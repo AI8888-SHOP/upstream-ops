@@ -42,6 +42,8 @@ type channelService interface {
 	GetSubscriptionUsage(ctx context.Context, channelID uint) (*connector.SubscriptionUsageInfo, error)
 	ListAPIKeys(ctx context.Context, channelID uint, query connector.APIKeyQuery) (*connector.APIKeyPage, error)
 	ListAPIKeyGroups(ctx context.Context, channelID uint) ([]connector.APIKeyGroup, error)
+	// ListAPIKeyGroupSet 拉取该渠道"已创建密钥的分组集合"，用于"仅显示已创建密钥的分组"开关。
+	ListAPIKeyGroupSet(ctx context.Context, channelID uint) (*channel.APIKeyGroupSet, error)
 	CreateAPIKey(ctx context.Context, channelID uint, req connector.APIKeyCreateRequest) (*connector.APIKey, error)
 	UpdateAPIKey(ctx context.Context, channelID uint, keyID int64, req connector.APIKeyUpdateRequest) (*connector.APIKey, error)
 	DeleteAPIKey(ctx context.Context, channelID uint, keyID int64) error

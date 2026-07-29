@@ -168,8 +168,14 @@ export function useChannelsPage(page = 1, pageSize = 9) {
   return useApi<ChannelPage>(`/channels?page=${page}&page_size=${pageSize}`)
 }
 
-export function useChannelRates(channelID: number | null) {
-  return useApi<RateSnapshot[]>(channelID == null ? null : `/channels/${channelID}/rates`)
+export function useChannelRates(channelID: number | null, onlyWithKeys = false) {
+  const path =
+    channelID == null
+      ? null
+      : onlyWithKeys
+        ? `/channels/${channelID}/rates?only_with_keys=1`
+        : `/channels/${channelID}/rates`
+  return useApi<RateSnapshot[]>(path)
 }
 
 // useMultiChannelRates 把多个上游渠道的倍率分组拉回来合并去重，

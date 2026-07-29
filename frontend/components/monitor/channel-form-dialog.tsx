@@ -71,6 +71,7 @@ interface FormState {
   recharge_multiplier: string
   recharge_multiplier_mode: RechargeMultiplierMode
   monitor_enabled: boolean
+  only_created_key_groups_enabled: boolean
   turnstile_enabled: boolean
   ignore_announcements: boolean
   subscription_enabled: boolean
@@ -99,6 +100,7 @@ function initialState(c?: Channel | null): FormState {
     recharge_multiplier: c?.recharge_multiplier != null ? String(c.recharge_multiplier) : "",
     recharge_multiplier_mode: rechargeMultiplierMode,
     monitor_enabled: c?.monitor_enabled ?? true,
+    only_created_key_groups_enabled: c?.only_created_key_groups_enabled ?? false,
     turnstile_enabled: c?.turnstile_enabled ?? false,
     ignore_announcements: c?.ignore_announcements ?? false,
     subscription_enabled: c?.subscription_enabled ?? false,
@@ -258,6 +260,7 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
           recharge_multiplier: rechargeMultiplier,
           recharge_multiplier_mode: form.recharge_multiplier_mode,
           monitor_enabled: form.monitor_enabled,
+          only_created_key_groups_enabled: form.only_created_key_groups_enabled,
           turnstile_enabled: !isTokenMode && form.turnstile_enabled,
           ignore_announcements: form.ignore_announcements,
           subscription_enabled: supportsSubscription && form.subscription_enabled,
@@ -287,6 +290,7 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
             recharge_multiplier: rechargeMultiplier,
             recharge_multiplier_mode: form.recharge_multiplier_mode,
             monitor_enabled: form.monitor_enabled,
+            only_created_key_groups_enabled: form.only_created_key_groups_enabled,
             turnstile_enabled: !isTokenMode && form.turnstile_enabled,
             ignore_announcements: form.ignore_announcements,
             subscription_enabled: supportsSubscription && form.subscription_enabled,
@@ -676,6 +680,20 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
             <Switch
               checked={form.monitor_enabled}
               onCheckedChange={(v) => setForm({ ...form, monitor_enabled: v })}
+              disabled={submitting}
+            />
+          </div>
+
+          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+            <div>
+              <p className="text-sm font-medium">仅显示已创建密钥的分组</p>
+              <p className="text-xs text-muted-foreground">
+                开启后渠道卡片 / 分组对话框 / 倍率变动通知只关注已创建密钥的分组；网关与上游同步设置仍可看全部分组
+              </p>
+            </div>
+            <Switch
+              checked={form.only_created_key_groups_enabled}
+              onCheckedChange={(v) => setForm({ ...form, only_created_key_groups_enabled: v })}
               disabled={submitting}
             />
           </div>

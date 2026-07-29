@@ -24,6 +24,10 @@ func init() {
 	connector.Register(connector.TypeNewAPI, func() connector.Connector { return New() })
 }
 
+// newAPIRefreshCookieName 新版 NewAPI 登录 / 刷新接口用于承载刷新令牌的 Cookie 名称。
+// 与上游常量 service.RefreshCookieName 保持一致，值本身即为 opaque 刷新令牌。
+const newAPIRefreshCookieName = "new_api_refresh"
+
 // Client NewAPI connector 实现。
 type Client struct {
 	http *resty.Client
@@ -110,15 +114,47 @@ func (c *Client) Login(ctx context.Context, ch *connector.Channel) (*connector.A
 		return nil, fmt.Errorf("newapi login: %s", wrapped.Message)
 	}
 
+	// 新版 NewAPI (controller/user.go setupLoginAtAuthVersion) 返回：
+	//   data: { access_token, token_type, access_expires_at, session, user: { id, ... } }
+	// 鉴权方式改为 `Authorization: Bearer <jwt>`，session cookie 仅用于刷新。
+	// 老版本 NewAPI 仍以 `Set-Cookie: session=...` + `data.id` 形式响应对接，
+	// 这里保留双模式解析：优先 access_token，回退 cookie + data.id。
 	var data struct {
-		Require2FA bool  `json:"require_2fa"`
-		ID         int64 `json:"id"`
+		Require2FA      bool   `json:"require_2fa"`
+		ID              int64  `json:"id"`
+		AccessToken     string `json:"access_token"`
+		AccessExpiresAt int64  `json:"access_expires_at"`
+		User            struct {
+			ID int64 `json:"id"`
+		} `json:"user"`
 	}
 	_ = json.Unmarshal(wrapped.Data, &data)
 	if data.Require2FA {
 		return nil, errors.New("newapi account requires 2FA; please disable it for monitoring accounts")
 	}
 
+	// 优先新版 access_token 鉴权路径：登录响应里只要带了 access_token就走 JWT 模式。
+	if token := strings.TrimSpace(data.AccessToken); token != "" {
+		if data.User.ID == 0 {
+			// 新版响应里用户 id 必须嵌在 data.user.id；缺失说明协议不符。
+			return nil, errors.New("newapi login: missing user id in response")
+		}
+		expires := time.Now().Add(14 * time.Minute)
+		if data.AccessExpiresAt > 0 {
+			expires = time.Unix(data.AccessExpiresAt, 0)
+		}
+		// 新版登录在同一次响应里通过 Set-Cookie: new_api_refresh=<rotated> 下发刷新令牌；
+		// 该 cookie 仅用于后续 /api/user/auth/refresh 续期，不参与业务鉴权，单独存放 RefreshToken。
+		refreshToken := pickCookieValue(resp.Cookies(), newAPIRefreshCookieName)
+		return &connector.AuthSession{
+			UserID:       strconv.FormatInt(data.User.ID, 10),
+			AccessToken:  token,
+			RefreshToken: refreshToken,
+			ExpiresAt:    expires,
+		}, nil
+	}
+
+	// 回退老版本 cookie 鉴权路径。
 	cookie := joinCookies(resp.Cookies())
 	if cookie == "" {
 		return nil, errors.New("newapi login: no session cookie returned")
@@ -143,32 +179,108 @@ func (c *Client) CheckAuth(ctx context.Context, ch *connector.Channel, session *
 	return err
 }
 
-// newAPIHasAuth 判断 session 是否带有 NewAPI 通过鉴权所必需的凭据。
-// NewAPI 支持两种鉴权：
-//   - 浏览器 session：Cookie 头（典型值 session=xxxxx; ...）
-//   - 系统访问令牌：Authorization 头（user.access_token，32 位字符串）
+// RefreshSession 实现 connector.SessionRefresher。
 //
-// 两者都需要搭配 New-Api-User 头，见 applyNewAPIAuth。
+// 调用上游 `POST /api/user/auth/refresh`（controller/auth_session.go RefreshAuth）：
+//   - 请求体为空，刷新令牌通过 Cookie: new_api_refresh=<RefreshToken> 提交；
+//     可选 X-Auth-Session 头携带 SID 做越权校验，我们没有显式跟踪 SID 故不发送，
+//     由服务器按 cookie 自身记录的 SID 校验。
+//   - 成功响应 shape 与 Login 一致：data.{access_token, token_type, access_expires_at, user.id, session}；
+//     新的 refresh token 通过 Set-Cookie: new_api_refresh=<rotated> 下发（cookie-only，不在 JSON body）。
+//
+// 没有 RefreshToken（老版本 cookie-only 会话或 token 直配模式）时返回错误，
+// 让 channel/service.go 退回到重新登录路径（见 sub2api 同样的 SessionRefresher 实现）。
+func (c *Client) RefreshSession(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) (*connector.AuthSession, error) {
+	if session == nil || strings.TrimSpace(session.RefreshToken) == "" {
+		return nil, errors.New("newapi refresh: missing refresh token")
+	}
+	site := strings.TrimRight(ch.SiteURL, "/")
+	req := c.http.R().
+		SetContext(ctx).
+		SetHeader("Content-Type", "application/json").
+		SetHeader("Accept", "application/json").
+		SetHeader("Cookie", newAPIRefreshCookieName+"="+strings.TrimSpace(session.RefreshToken))
+	if strings.TrimSpace(session.UserID) != "" {
+		// 与业务鉴权头一致的行为：New-Api-User 不会在新版 middleware 里被读取，
+		// 但旧版下游节点回放兼容时可能依赖，同 Login 后的鉴权头一起带上不会有害。
+		req.SetHeader("New-Api-User", session.UserID)
+	}
+
+	resp, err := req.Post(site + "/api/user/auth/refresh")
+	if err != nil {
+		return nil, fmt.Errorf("newapi refresh http: %w", err)
+	}
+	if resp.IsError() {
+		return nil, fmt.Errorf("newapi refresh: %w", connector.HTTPStatusError(resp.StatusCode(), resp.Body()))
+	}
+
+	var wrapped newapiResp
+	if err := json.Unmarshal(resp.Body(), &wrapped); err != nil {
+		return nil, fmt.Errorf("newapi refresh decode: %w", err)
+	}
+	if !wrapped.Success {
+		return nil, fmt.Errorf("newapi refresh: %s", wrapped.Message)
+	}
+
+	var data struct {
+		AccessToken     string `json:"access_token"`
+		AccessExpiresAt int64  `json:"access_expires_at"`
+		User            struct {
+			ID int64 `json:"id"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(wrapped.Data, &data); err != nil {
+		return nil, fmt.Errorf("newapi refresh data decode: %w", err)
+	}
+	if strings.TrimSpace(data.AccessToken) == "" || data.User.ID == 0 {
+		return nil, errors.New("newapi refresh: missing access_token or user id in response")
+	}
+
+	expires := time.Now().Add(14 * time.Minute)
+	if data.AccessExpiresAt > 0 {
+		expires = time.Unix(data.AccessExpiresAt, 0)
+	}
+	refreshed := *session
+	refreshed.AccessToken = strings.TrimSpace(data.AccessToken)
+	if rotated := pickCookieValue(resp.Cookies(), newAPIRefreshCookieName); rotated != "" {
+		refreshed.RefreshToken = rotated
+	}
+	refreshed.ExpiresAt = expires
+	// 刷新响应里 user.id 与原 session.UserID 应一致；若上游因账号合并等出现偏差，
+	// 以最新响应为准，避免后续 New-Api-User 头错配。
+	refreshed.UserID = strconv.FormatInt(data.User.ID, 10)
+	// Cookie 仅老版本鉴权路径使用；refresh 不维护它，清空以免误用旧 cookie。
+	refreshed.Cookie = ""
+	return &refreshed, nil
+}
+
+// newAPIHasAuth 判断 session 是否带有 NewAPI 通过鉴权所必需的凭据。
+// NewAPI 支持三种鉴权凭据：
+//   - access_token（登录后获得的 dashboard JWT）
+//   - 系统访问令牌（user.access_token，PAT）
+//   - 老版本浏览器 session：Cookie 头（典型值 session=xxxxx; ...）
+//
+// 见 applyNewAPIAuth。
 func newAPIHasAuth(session *connector.AuthSession) bool {
 	if session == nil {
 		return false
 	}
-	return strings.TrimSpace(session.Cookie) != "" || strings.TrimSpace(session.AccessToken) != ""
+	return strings.TrimSpace(session.AccessToken) != "" || strings.TrimSpace(session.Cookie) != ""
 }
 
 // applyNewAPIAuth 把当前 session 的鉴权头挂到 resty 请求上。
-//   - 优先 Cookie（浏览器 session）；
-//   - 没填 Cookie 但填了 AccessToken 时改走 Authorization: <token>，对应 NewAPI 的系统访问令牌；
-//   - New-Api-User 始终带上（NewAPI 即便用 session 也要求这个头）。
+//   - 优先 Authorization: Bearer <AccessToken>，覆盖新版登录返回的 dashboard JWT 和手动配置的 PAT；
+//     NewAPI middleware 会自动识别 JWT 与 PAT 两条路径（middleware/auth.go authorizationToken）。
+//   - 没有 AccessToken 但有 Cookie 时回退老版本浏览器 session 鉴权；
+//   - New-Api-User 仍始终带上：旧版 session 鉴权必备，PAT/JWT 路径下无害。
 func applyNewAPIAuth(req *resty.Request, session *connector.AuthSession) {
 	if session == nil {
 		return
 	}
-	if strings.TrimSpace(session.Cookie) != "" {
-		req.SetHeader("Cookie", session.Cookie)
-	} else if token := strings.TrimSpace(session.AccessToken); token != "" {
-		// NewAPI middleware 会自动去掉 "Bearer " 前缀，这里直接给裸 token，行为最贴近 dashboard。
-		req.SetHeader("Authorization", token)
+	if token := strings.TrimSpace(session.AccessToken); token != "" {
+		req.SetHeader("Authorization", "Bearer "+token)
+	} else if cookie := strings.TrimSpace(session.Cookie); cookie != "" {
+		req.SetHeader("Cookie", cookie)
 	}
 	if strings.TrimSpace(session.UserID) != "" {
 		req.SetHeader("New-Api-User", session.UserID)
@@ -948,6 +1060,18 @@ func joinCookies(cookies []*http.Cookie) string {
 		parts = append(parts, c.Name+"="+c.Value)
 	}
 	return strings.Join(parts, "; ")
+}
+
+// pickCookieValue 从响应 Set-Cookie 列表里取出指定名称 cookie 的值；
+// 同名多次出现时取最后一个（服务器轮换刷新令牌时最新值在末尾）。
+func pickCookieValue(cookies []*http.Cookie, name string) string {
+	var value string
+	for _, c := range cookies {
+		if c.Name == name {
+			value = c.Value
+		}
+	}
+	return value
 }
 
 func parseAnnouncementTime(values ...string) *time.Time {

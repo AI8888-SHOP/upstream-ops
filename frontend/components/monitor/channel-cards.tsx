@@ -124,8 +124,8 @@ function ratioTone(r: number): string {
 }
 
 /** InlineRates 在渠道卡片内部展示当前所有分组倍率，默认 2 行折叠 + 展开按钮。 */
-function InlineRates({ channelID }: { channelID: number }) {
-  const { data, loading } = useChannelRates(channelID)
+function InlineRates({ channel }: { channel: Channel }) {
+  const { data, loading } = useChannelRates(channel.id, channel.only_created_key_groups_enabled)
   const rates = [...(data ?? [])].sort((a, b) => a.ratio - b.ratio)
   const [expanded, setExpanded] = useState(false)
   const [hasOverflow, setHasOverflow] = useState(false)
@@ -261,7 +261,9 @@ function ChannelGroupsDialog({
 
     Promise.all(
       channels.map(async (channel) => {
-        const rates = await apiFetch<RateSnapshot[]>(`/channels/${channel.id}/rates`)
+        const rates = await apiFetch<RateSnapshot[]>(
+          `/channels/${channel.id}/rates${channel.only_created_key_groups_enabled ? "?only_with_keys=1" : ""}`,
+        )
         return { channel, rates }
       }),
     )
@@ -949,7 +951,7 @@ export function ChannelCards() {
                     ) : null}
                   </div>
 
-                  <InlineRates channelID={c.id} />
+                  <InlineRates channel={c} />
 
                   <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
                     <Button

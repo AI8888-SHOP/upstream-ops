@@ -38,6 +38,11 @@ type Service struct {
 	mu          sync.RWMutex
 	proxyConfig config.ProxyConfig
 	upstream    config.UpstreamConfig
+
+	// apiKeyGroupSetCache 缓存"已创建密钥的分组集合"。
+	// 该集合需要分页拉取上游全部密钥计算，monitor 每次刷新和前端切页都会用到，
+	// 缓存以 channelID 为 key（TTL 见 apiKeyGroupSetTTL）。
+	apiKeyGroupSetCache sync.Map
 }
 
 func NewService(
@@ -159,6 +164,7 @@ type CreateInput struct {
 	RechargeMultiplier     *float64
 	RechargeMultiplierMode string
 	MonitorEnabled         bool
+	OnlyCreatedKeyGroupsEnabled bool
 }
 
 func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
@@ -200,6 +206,7 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 		RechargeMultiplier:     normalizeRechargeMultiplier(in.RechargeMultiplier),
 		RechargeMultiplierMode: connector.NormalizeRechargeMultiplierMode(in.RechargeMultiplierMode),
 		MonitorEnabled:         in.MonitorEnabled,
+		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
 	}
 	if mode == storage.CredentialModeToken {
 		// token 模式不依赖打码 provider
@@ -230,6 +237,7 @@ type UpdateInput struct {
 	RechargeMultiplier     *float64
 	RechargeMultiplierMode *string
 	MonitorEnabled         *bool
+	OnlyCreatedKeyGroupsEnabled *bool
 }
 
 func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
@@ -340,6 +348,9 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	}
 	if in.MonitorEnabled != nil {
 		c.MonitorEnabled = *in.MonitorEnabled
+	}
+	if in.OnlyCreatedKeyGroupsEnabled != nil {
+		c.OnlyCreatedKeyGroupsEnabled = *in.OnlyCreatedKeyGroupsEnabled
 	}
 	if err := s.Channels.Update(c); err != nil {
 		return nil, err
@@ -1197,4 +1208,132 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// apiKeyGroupSetTTL "已创建密钥的分组集合"缓存有效期。
+// 选 30s：让 monitor 每分钟一次的扫描仍可获到新数据，前端切页 30s 内不再打上游。
+const apiKeyGroupSetTTL = 30 * time.Second
+
+// maxAPIKeyListPages 拉密钥时的安全页数上限（每页 100，最多 100 页 = 10000 密钥），
+// 避免上游异常 Pages 字段导致死循环。
+const maxAPIKeyListPages = 100
+
+// APIKeyGroupSet 表示某个渠道全部已创建密钥所归属的分组集合。
+// Sub2API 用 IDs（int64），NewAPI 用 Names（分组名）；分别对应 RateSnapshot.RemoteGroupID 与 ModelName。
+type APIKeyGroupSet struct {
+	IDs   map[int64]struct{}
+	Names map[string]struct{}
+}
+
+// ContainsGroupID 判断 Sub2API 分组 ID 是否在集合内。
+// id 为 nil 或非正数时返回 false（兼容 NewAPI 的 snapshot 不带 ID 的情形）。
+func (s *APIKeyGroupSet) ContainsGroupID(id *int64) bool {
+	if s == nil || s.IDs == nil || id == nil || *id <= 0 {
+		return false
+	}
+	_, ok := s.IDs[*id]
+	return ok
+}
+
+// ContainsGroupName 判断 NewAPI 分组名是否在集合内。
+func (s *APIKeyGroupSet) ContainsGroupName(name string) bool {
+	if s == nil || s.Names == nil || name == "" {
+		return false
+	}
+	_, ok := s.Names[name]
+	return ok
+}
+
+// ContainsSnapshot 判断一个 RateSnapshot 是否属于"已创建密钥的分组"。
+// Sub2API 看 RemoteGroupID；NewAPI 看 ModelName。
+func (s *APIKeyGroupSet) ContainsSnapshot(snap storage.RateSnapshot) bool {
+	if s == nil {
+		return false
+	}
+	if snap.RemoteGroupID != nil {
+		return s.ContainsGroupID(snap.RemoteGroupID)
+	}
+	return s.ContainsGroupName(snap.ModelName)
+}
+
+// Empty 返回集合是否为空（即没拉到任何密钥）。调用方据此可决定是否禁用过滤以避免误伤。
+func (s *APIKeyGroupSet) Empty() bool {
+	return s == nil || (len(s.IDs) == 0 && len(s.Names) == 0)
+}
+
+type apiKeyGroupSetCacheEntry struct {
+	set       *APIKeyGroupSet
+	fetchedAt time.Time
+}
+
+// ListAPIKeyGroupSet 分页拉取该渠道上游全部密钥，汇总成"已挂密钥"的分组集合。
+// 用于"仅显示已创建密钥的分组"开关：
+//   - Sub2API：snapshot.RemoteGroupID ∈ set.IDs 即视为有密钥
+//   - NewAPI : snapshot.ModelName ∈ set.Names 即视为有密钥
+//
+// 内置 30s TTL 内存缓存（sync.Map），避免 monitor 每分钟扫描 + 前端切页都打上游。
+// 分页循环有安全上限 maxAPIKeyListPages 以防 pages 异常导致死循环。
+func (s *Service) ListAPIKeyGroupSet(ctx context.Context, channelID uint) (*APIKeyGroupSet, error) {
+	if cached, ok := s.loadAPIKeyGroupSetCache(channelID); ok {
+		return cached, nil
+	}
+
+	c, resolved, conn, session, err := s.prepareConnectorCall(ctx, channelID)
+	if err != nil {
+		return nil, err
+	}
+
+	set := &APIKeyGroupSet{
+		IDs:   make(map[int64]struct{}),
+		Names: make(map[string]struct{}),
+	}
+	isSub2API := c.Type == storage.ChannelTypeSub2API
+
+	const pageSize = 100
+	for page := 1; page <= maxAPIKeyListPages; page++ {
+		p, err := conn.ListAPIKeys(ctx, resolved, session, connector.APIKeyQuery{Page: page, PageSize: pageSize})
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range p.Items {
+			if isSub2API {
+				if k.GroupID != nil && *k.GroupID > 0 {
+					set.IDs[*k.GroupID] = struct{}{}
+				}
+				continue
+			}
+			if name := strings.TrimSpace(k.Group); name != "" {
+				set.Names[name] = struct{}{}
+			}
+		}
+		if p.Pages <= 0 || page >= p.Pages {
+			break
+		}
+	}
+	_ = s.Channels.SetLastError(c.ID, "")
+	s.storeAPIKeyGroupSetCache(channelID, set)
+	return set, nil
+}
+
+// loadAPIKeyGroupSetCache 读缓存；过期或未命中返回 (nil, false)。
+func (s *Service) loadAPIKeyGroupSetCache(channelID uint) (*APIKeyGroupSet, bool) {
+	v, ok := s.apiKeyGroupSetCache.Load(channelID)
+	if !ok {
+		return nil, false
+	}
+	entry, ok := v.(*apiKeyGroupSetCacheEntry)
+	if !ok {
+		return nil, false
+	}
+	if time.Since(entry.fetchedAt) > apiKeyGroupSetTTL {
+		return nil, false
+	}
+	return entry.set, true
+}
+
+func (s *Service) storeAPIKeyGroupSetCache(channelID uint, set *APIKeyGroupSet) {
+	s.apiKeyGroupSetCache.Store(channelID, &apiKeyGroupSetCacheEntry{
+		set:       set,
+		fetchedAt: time.Now(),
+	})
 }

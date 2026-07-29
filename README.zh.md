@@ -98,6 +98,7 @@ UpstreamOps 主要解决这些痛点：
 - 支持 Cloudflare Turnstile 打码配置，适用于开启 Turnstile 的上游登录场景。
 - 支持在渠道卡片中打开上游站点地址。
 - 支持在渠道卡片中清空已保存的登录信息。
+- 支持「仅显示已创建密钥的分组」开关：开启后渠道卡片、分组对话框、倍率面板和倍率变动通知只关注已创建密钥的分组；网关转发、上游同步和通知设置仍可看到全部分组，本地倍率快照也始终保留全量。
 - 删除上游渠道时会自动清理相关快照、倍率、公告、通知冷却和通知日志。
 
 ### Sub2API 上游同步管理
@@ -322,7 +323,7 @@ IMAGE_TAG=latest
 生产环境建议锁定具体版本，例如：
 
 ```env
-IMAGE_TAG=v0.0.7
+IMAGE_TAG=v0.0.8
 ```
 
 ## MySQL 部署
@@ -498,6 +499,8 @@ POST /api/settings/proxy/test
 #### 账号密码模式
 
 填写上游站点地址、用户名、密码。若上游登录接口需要额外字段，可以在“附加表单参数”中填写 JSON 对象；若上游开启 Turnstile，需要先在“验证码服务”中配置打码平台，然后在渠道中启用 Turnstile。
+
+新版 NewAPI（QuantumNous/new-api 及其分叉）登录后改用短期 `access_token`（Bearer JWT，默认 15 分钟）鉴权，并随响应下发 `new_api_refresh` 刷新令牌。UpstreamOps 会在令牌临近过期时自动调用 `/api/user/auth/refresh` 续期并轮换刷新令牌，无需频繁重新登录；老版本 NewAPI 仍走 `Set-Cookie: session=...` + `New-Api-User` 头鉴权，由程序自动识别兼容。
 
 #### Token/Cookie 模式
 

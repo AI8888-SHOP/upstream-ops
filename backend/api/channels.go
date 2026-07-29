@@ -67,6 +67,7 @@ type channelInput struct {
 	RechargeMultiplier     *float64               `json:"recharge_multiplier"`
 	RechargeMultiplierMode string                 `json:"recharge_multiplier_mode"`
 	MonitorEnabled         bool                   `json:"monitor_enabled"`
+	OnlyCreatedKeyGroupsEnabled bool             `json:"only_created_key_groups_enabled"`
 }
 
 type channelUpdateInput struct {
@@ -87,6 +88,7 @@ type channelUpdateInput struct {
 	RechargeMultiplier     *float64                `json:"recharge_multiplier"`
 	RechargeMultiplierMode *string                 `json:"recharge_multiplier_mode"`
 	MonitorEnabled         *bool                   `json:"monitor_enabled"`
+	OnlyCreatedKeyGroupsEnabled *bool             `json:"only_created_key_groups_enabled"`
 }
 
 type channelOutput struct {
@@ -172,6 +174,7 @@ func createChannel(c *gin.Context, d *Deps) {
 		RechargeMultiplier:     in.RechargeMultiplier,
 		RechargeMultiplierMode: in.RechargeMultiplierMode,
 		MonitorEnabled:         in.MonitorEnabled,
+		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
 	})
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err)
@@ -271,6 +274,7 @@ func updateChannel(c *gin.Context, d *Deps) {
 		RechargeMultiplier:     in.RechargeMultiplier,
 		RechargeMultiplierMode: in.RechargeMultiplierMode,
 		MonitorEnabled:         in.MonitorEnabled,
+		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
 	})
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err)
@@ -644,6 +648,29 @@ func channelRates(c *gin.Context, d *Deps) {
 	list, err := d.Rates.ListByChannel(id)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	// ?only_with_keys=1：仅返回"已创建密钥的分组"。
+	// 该参数由前端按渠道开关 channel.only_created_key_groups_enabled 拼接，
+	// 网关 / 上游同步 / 通知设置等全量场景不传该参数，仍返回完整 RateSnapshot。
+	if onlyWithKeys := c.Query("only_with_keys"); onlyWithKeys == "1" || strings.EqualFold(onlyWithKeys, "true") {
+		set, err := d.ChannelSvc.ListAPIKeyGroupSet(c.Request.Context(), id)
+		if err != nil {
+			fail(c, http.StatusInternalServerError, err)
+			return
+		}
+		if set.Empty() {
+			// 没有任何已创建密钥 → 返回空数组（开关语义就是"只显示有密钥的分组"）。
+			c.JSON(http.StatusOK, gin.H{"data": []storage.RateSnapshot{}})
+			return
+		}
+		filtered := make([]storage.RateSnapshot, 0, len(list))
+		for _, snap := range list {
+			if set.ContainsSnapshot(snap) {
+				filtered = append(filtered, snap)
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"data": filtered})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": list})

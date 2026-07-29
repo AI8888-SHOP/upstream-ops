@@ -65,6 +65,220 @@ func TestLoginAddsExtraParams(t *testing.T) {
 	}
 }
 
+// TestLoginParsesNewAPIAuthBundle 覆盖新版 NewAPI 登录响应：
+// 响应体不再带顶层 id，而是嵌在 data.user.id，鉴权凭据改为 data.access_token。
+// 站点只 Set refresh cookie（不参与 dashboard 鉴权），connector 必须忽略它改走 Bearer。
+func TestLoginParsesNewAPIAuthBundle(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/user/login", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["username"] != "u" || body["password"] != "p" {
+			t.Fatalf("body = %#v", body)
+		}
+		// 新版新-api 只写 refresh cookie，鉴权完全走 Authorization Bearer。
+		http.SetCookie(w, &http.Cookie{Name: "new_api_refresh", Value: "refresh-abc"})
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"access_token":"jwt-dashboard-token","token_type":"Bearer","access_expires_at":1800000000,"session":{"sid":"sess-1"},"user":{"id":9,"username":"u"}}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	session, err := c.Login(context.Background(), &connector.Channel{
+		SiteURL:  srv.URL,
+		Username: "u",
+		Password: "p",
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if session.UserID != "9" {
+		t.Fatalf("user id = %q, want 9", session.UserID)
+	}
+	if session.AccessToken != "jwt-dashboard-token" {
+		t.Fatalf("access token = %q, want jwt-dashboard-token", session.AccessToken)
+	}
+	// refresh cookie 不得进入 Cookie 字段，避免被误当成 dashboard 鉴权。
+	if session.Cookie != "" {
+		t.Fatalf("cookie = %q, want empty", session.Cookie)
+	}
+	// refresh cookie 的值必须被解析到 RefreshToken，供后续 RefreshSession 使用。
+	if session.RefreshToken != "refresh-abc" {
+		t.Fatalf("refresh token = %q, want refresh-abc", session.RefreshToken)
+	}
+	wantExpires := time.Unix(1800000000, 0)
+	if !session.ExpiresAt.Equal(wantExpires) {
+		t.Fatalf("expires at = %s, want %s", session.ExpiresAt, wantExpires)
+	}
+}
+
+func TestLoginNewAPIMissingUserFails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/user/login", func(w http.ResponseWriter, r *http.Request) {
+		// 即使带了 access_token，缺 user.id 也无法构造后续请求头，应失败。
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"access_token":"jwt-token","access_expires_at":1800000000,"user":{}}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	_, err := c.Login(context.Background(), &connector.Channel{
+		SiteURL:  srv.URL,
+		Username: "u",
+		Password: "p",
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing user id") {
+		t.Fatalf("err = %v, want missing user id", err)
+	}
+}
+
+// TestRefreshSessionPostsRefreshCookie 验证 RefreshSession 走 cookie 路径：
+// 请求必须携带 Cookie: new_api_refresh=<refresh>，不带 body，不携带 Authorization。
+// 成功响应返回新的 access_token，并通过 Set-Cookie 轮换 refresh token。
+func TestRefreshSessionPostsRefreshCookie(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/user/auth/refresh", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("refresh must not send Authorization, got %q", got)
+		}
+		cookie := r.Header.Get("Cookie")
+		if !strings.Contains(cookie, "new_api_refresh=old-refresh") {
+			t.Fatalf("cookie = %q, want new_api_refresh=old-refresh", cookie)
+		}
+		// 服务器轮换 refresh cookie；新值仅通过 Set-Cookie 下发，不在 JSON body。
+		http.SetCookie(w, &http.Cookie{Name: "new_api_refresh", Value: "rotated-refresh"})
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"access_token":"new-jwt","token_type":"Bearer","access_expires_at":1900000000,"user":{"id":9}}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	old := &connector.AuthSession{
+		UserID:       "9",
+		AccessToken:  "stale-jwt",
+		RefreshToken: "old-refresh",
+		ExpiresAt:    time.Now().Add(1 * time.Minute),
+	}
+	refreshed, err := c.RefreshSession(context.Background(), &connector.Channel{SiteURL: srv.URL}, old)
+	if err != nil {
+		t.Fatalf("RefreshSession: %v", err)
+	}
+	if refreshed.AccessToken != "new-jwt" {
+		t.Fatalf("access token = %q, want new-jwt", refreshed.AccessToken)
+	}
+	if refreshed.RefreshToken != "rotated-refresh" {
+		t.Fatalf("refresh token = %q, want rotated-refresh", refreshed.RefreshToken)
+	}
+	if refreshed.UserID != "9" {
+		t.Fatalf("user id = %q, want 9", refreshed.UserID)
+	}
+	if want := time.Unix(1900000000, 0); !refreshed.ExpiresAt.Equal(want) {
+		t.Fatalf("expires at = %s, want %s", refreshed.ExpiresAt, want)
+	}
+	// refresh 后必须清空 Cookie，避免老版 cookie 被当成有效鉴权继续使用。
+	if refreshed.Cookie != "" {
+		t.Fatalf("cookie = %q, want empty after refresh", refreshed.Cookie)
+	}
+	// 入参 session 不应被原地修改（防止共享 session 被破坏）。
+	if old.AccessToken != "stale-jwt" || old.RefreshToken != "old-refresh" {
+		t.Fatalf("input session mutated: %#v", old)
+	}
+}
+
+// TestRefreshSessionMissingRefreshTokenFails 没有 RefreshToken 必须返回错误，
+// 让 channel/service.go 退回到重新登录路径（与 sub2api 一致）。
+func TestRefreshSessionMissingRefreshTokenFails(t *testing.T) {
+	c := New()
+	cases := []struct {
+		name    string
+		session *connector.AuthSession
+	}{
+		{"nil", nil},
+		{"empty refresh", &connector.AuthSession{UserID: "9", AccessToken: "jwt"}},
+		{"whitespace refresh", &connector.AuthSession{UserID: "9", RefreshToken: "   "}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.RefreshSession(context.Background(), &connector.Channel{SiteURL: "http://example.invalid"}, tc.session)
+			if err == nil || !strings.Contains(err.Error(), "missing refresh token") {
+				t.Fatalf("err = %v, want missing refresh token", err)
+			}
+		})
+	}
+}
+
+// TestRefreshSessionServerFailure 把 !success 响应翻译成 `newapi refresh: <message>` 错误。
+func TestRefreshSessionServerFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/user/auth/refresh", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"success":false,"message":"refresh token is invalid","data":null}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	session := &connector.AuthSession{UserID: "9", RefreshToken: "stale"}
+	_, err := c.RefreshSession(context.Background(), &connector.Channel{SiteURL: srv.URL}, session)
+	if err == nil || !strings.Contains(err.Error(), "newapi refresh:") || !strings.Contains(err.Error(), "refresh token is invalid") {
+		t.Fatalf("err = %v, want newapi refresh: ...refresh token is invalid", err)
+	}
+}
+
+// TestRefreshSessionMissingAccessTokenFails 即使 success=true 但 body 缺 access_token/user.id
+// 也必须失败，避免写入无凭据的 session。
+func TestRefreshSessionMissingAccessTokenFails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/user/auth/refresh", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "new_api_refresh", Value: "rotated"})
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"access_token":"","user":{}}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	session := &connector.AuthSession{UserID: "9", RefreshToken: "old"}
+	_, err := c.RefreshSession(context.Background(), &connector.Channel{SiteURL: srv.URL}, session)
+	if err == nil || !strings.Contains(err.Error(), "missing access_token or user id") {
+		t.Fatalf("err = %v, want missing access_token or user id", err)
+	}
+}
+
+func TestCreateRechargeUsesBearerAccessToken(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/user/pay", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer jwt-token" {
+			t.Fatalf("authorization = %q, want Bearer jwt-token", got)
+		}
+		if got := r.Header.Get("Cookie"); got != "" {
+			t.Fatalf("cookie = %q, want empty", got)
+		}
+		_, _ = w.Write([]byte(`{"message":"success","data":{"pid":"123","type":"alipay"},"url":"https://pay.example.com/submit"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	launch, err := c.CreateRecharge(context.Background(), &connector.Channel{SiteURL: srv.URL}, &connector.AuthSession{
+		AccessToken: "jwt-token",
+		UserID:      "9",
+	}, connector.RechargeRequest{
+		Amount:        20,
+		PaymentMethod: "alipay",
+	})
+	if err != nil {
+		t.Fatalf("CreateRecharge: %v", err)
+	}
+	if launch.FormFields["pid"] != "123" {
+		t.Fatalf("pid = %q", launch.FormFields["pid"])
+	}
+}
+
 func TestGetCosts(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {

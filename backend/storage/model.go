@@ -55,6 +55,11 @@ type Channel struct {
 	RechargeMultiplier     *float64       `json:"recharge_multiplier,omitempty"`
 	RechargeMultiplierMode string         `gorm:"size:16;not null;default:'divide'" json:"recharge_multiplier_mode"`
 	MonitorEnabled         bool           `gorm:"default:true" json:"monitor_enabled"`
+	// OnlyCreatedKeyGroupsEnabled 开启后仅展示与监听"已创建密钥的分组"。
+	// 影响：渠道卡片 / 分组对话框 / 全局倍率面板的分组列表，以及倍率变动通知。
+	// 不影响 RateSnapshot 本地存储（始终保留全部分组），网关、上游同步、通知设置
+	// 等仍可拿到原始全部分组。
+	OnlyCreatedKeyGroupsEnabled bool `gorm:"default:false" json:"only_created_key_groups_enabled"`
 
 	// 最近一次采集结果（聚合视图，便于列表页直接展示）
 	LastBalance   *float64   `json:"last_balance,omitempty"`

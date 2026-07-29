@@ -94,6 +94,7 @@ UpstreamOps focuses on these problems:
 - Supports Cloudflare Turnstile solving for upstream login flows.
 - Opens upstream site URLs directly from channel cards.
 - Supports clearing saved login information from channel cards.
+- Supports a "only show groups with created keys" toggle: when enabled, channel cards, group dialogs, rate panels, and rate-change notifications only cover groups that already have API keys; gateway forwarding, upstream sync, and notification settings still see all groups, and local rate snapshots always keep the full set.
 - Deleting a channel cleans related snapshots, rates, announcements, notification cooldowns, and notification logs.
 
 ### Sub2API Upstream Synchronization
@@ -309,7 +310,7 @@ IMAGE_TAG=latest
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.7
+IMAGE_TAG=v0.0.8
 ```
 
 ## MySQL Deployment
@@ -485,6 +486,8 @@ Username/password mode:
 - Provide upstream site URL, username, and password.
 - If the login endpoint requires extra fields, provide a JSON object in extra form parameters.
 - If Turnstile is enabled, configure a captcha provider first, then enable Turnstile in the channel.
+
+Newer NewAPI builds (QuantumNous/new-api and forks) issue short-lived `access_token` Bearer JWTs (default 15 minutes) at login and return a `new_api_refresh` refresh token. UpstreamOps automatically calls `/api/user/auth/refresh` to renew the access token and rotate the refresh token before it expires, so frequent re-login is not needed. Older NewAPI builds still authenticate via `Set-Cookie: session=...` plus the `New-Api-User` header; the connector auto-detects and supports both.
 
 Token/cookie mode:
 

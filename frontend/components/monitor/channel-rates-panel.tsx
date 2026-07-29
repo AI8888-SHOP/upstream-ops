@@ -26,7 +26,7 @@ function ratioTone(r: number): string {
 }
 
 function ChannelRateRow({ channel }: { channel: Channel }) {
-  const { data, loading } = useChannelRates(channel.id)
+  const { data, loading } = useChannelRates(channel.id, channel.only_created_key_groups_enabled)
   const rates = [...(data ?? [])].sort((a, b) => a.ratio - b.ratio)
   const latest = rates[0]?.last_seen_at
 

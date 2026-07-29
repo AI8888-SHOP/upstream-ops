@@ -188,6 +188,39 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 	for _, snapshot := range existing {
 		existingByName[snapshot.ModelName] = snapshot
 	}
+
+	// "仅显示已创建密钥的分组"开关：开关开启时只派发"已挂密钥的分组"的 added/removed/changes
+	// 通知；RateSnapshot 本地存储仍按全量维护，确保网关 / 上游同步 / 通知设置等可继续读全分组。
+	// 拉 set 失败时不做过滤（保险：避免上游密钥接口抖动导致通知被全静音），仅日志告警。
+	var keyGroupSet *channel.APIKeyGroupSet
+	if c.OnlyCreatedKeyGroupsEnabled {
+		set, setErr := s.channelSvc.ListAPIKeyGroupSet(ctx, c.ID)
+		if setErr != nil {
+			s.log.Warn("list api key group set failed; skip dispatch filtering",
+				"channel", c.Name, "err", setErr)
+		} else if set.Empty() {
+			// 渠道没有密钥 → 任何 added / changes / removed 都不应通知。
+			keyGroupSet = &channel.APIKeyGroupSet{}
+		} else {
+			keyGroupSet = set
+		}
+	}
+	resultInSet := func(r connector.RateResult) bool {
+		if keyGroupSet == nil {
+			return true
+		}
+		if r.GroupID != nil {
+			return keyGroupSet.ContainsGroupID(r.GroupID)
+		}
+		return keyGroupSet.ContainsGroupName(r.ModelName)
+	}
+	snapInSet := func(snap storage.RateSnapshot) bool {
+		if keyGroupSet == nil {
+			return true
+		}
+		return keyGroupSet.ContainsSnapshot(snap)
+	}
+
 	seen := make(map[string]struct{}, len(results))
 	changes := make([]notify.RateChange, 0, len(results))
 	added := make([]notify.RateChange, 0)
@@ -207,7 +240,7 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 			continue
 		}
 		if prev == nil {
-			if !isFirstSync {
+			if !isFirstSync && resultInSet(r) {
 				added = append(added, notify.RateChange{
 					GroupName: r.ModelName,
 					NewRatio:  r.Ratio,
@@ -231,14 +264,16 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 			NewCompletionRatio: r.CompletionRatio,
 			ChangedAt:          now,
 		})
-		changes = append(changes, notify.RateChange{
-			GroupName: r.ModelName,
-			OldRatio:  oldRatio,
-			NewRatio:  r.Ratio,
-			OldComp:   oldComp,
-			NewComp:   r.CompletionRatio,
-			ChangedAt: now,
-		})
+		if resultInSet(r) {
+			changes = append(changes, notify.RateChange{
+				GroupName: r.ModelName,
+				OldRatio:  oldRatio,
+				NewRatio:  r.Ratio,
+				OldComp:   oldComp,
+				NewComp:   r.CompletionRatio,
+				ChangedAt: now,
+			})
+		}
 	}
 	removed := make([]notify.RateChange, 0)
 	for _, snapshot := range existingByName {
@@ -249,12 +284,14 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 			s.log.Warn("rate delete failed", "channel", c.Name, "model", snapshot.ModelName, "err", err)
 			continue
 		}
-		removed = append(removed, notify.RateChange{
-			GroupName: snapshot.ModelName,
-			OldRatio:  snapshot.Ratio,
-			OldComp:   snapshot.CompletionRatio,
-			ChangedAt: now,
-		})
+		if snapInSet(snapshot) {
+			removed = append(removed, notify.RateChange{
+				GroupName: snapshot.ModelName,
+				OldRatio:  snapshot.Ratio,
+				OldComp:   snapshot.CompletionRatio,
+				ChangedAt: now,
+			})
+		}
 	}
 	// 一次扫描的所有变化打包推送：去抖策略（合并 / 涨跌幅过滤）由 Dispatcher.Policy 决定。
 	if len(changes) > 0 {
