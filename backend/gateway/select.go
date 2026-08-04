@@ -199,3 +199,50 @@ func SortRoutes(routes []storage.GatewayRoute, groupsByChannel map[uint][]connec
 	})
 	return out
 }
+
+// sortRoutesWithAffinity preserves the normal scheduler order for unrelated
+// requests. A matching session may bypass a live cooldown exactly once so the
+// upstream prompt cache can be reactivated; all other requests still see the
+// cooled route as unschedulable.
+func (rt *Runtime) sortRoutesWithAffinity(
+	routes []storage.GatewayRoute,
+	groupsByChannel map[uint][]connector.APIKeyGroup,
+	direction string,
+	now time.Time,
+	exclude map[uint]struct{},
+	affinity *routeAffinityContext,
+) []ScoredRoute {
+	normal := SortRoutes(routes, groupsByChannel, direction, now, exclude)
+	if rt == nil || affinity == nil || affinity.PreferredRouteID == 0 || affinity.LookupKey.Fingerprint == "" {
+		return normal
+	}
+	if exclude != nil {
+		if _, excluded := exclude[affinity.PreferredRouteID]; excluded {
+			return normal
+		}
+	}
+	for _, route := range routes {
+		if route.ID != affinity.PreferredRouteID {
+			continue
+		}
+		if route.TempUnschedulableUntil == nil || !route.TempUnschedulableUntil.After(now) {
+			return normal
+		}
+		candidate := route
+		candidate.TempUnschedulableUntil = nil
+		if !IsRouteSchedulable(&candidate, now) {
+			return normal
+		}
+		affinity.PreservePreferred = true
+		if !rt.claimRouteAffinityProbe(affinity.LookupKey, route.ID, now) {
+			return normal
+		}
+		affinity.RecoveryCooldownUntil = *route.TempUnschedulableUntil
+		affinity.RecoveryRouteID = route.ID
+		affinity.Recovery = true
+		groups := groupsByChannel[route.SourceChannelID]
+		rate := RateForRoute(&candidate, groups)
+		return append([]ScoredRoute{{Route: candidate, EffectiveRate: rate, BillingRate: rate}}, normal...)
+	}
+	return normal
+}

@@ -66,6 +66,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	routes = filteredRoutes
+	affinity := rt.routeAffinityForRequest(c, key.ID, group.ID, string(kind), requestedModel, body)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	validator, validationErr := rt.responseValidatorForGroup(group)
 	if validationErr != nil {
@@ -87,7 +88,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			c: c, path: path, kind: kind, key: key, group: group, body: body,
 			requestedModel: requestedModel, stream: stream, serviceTier: serviceTier,
 			reasoningEffort: reasoningEffort, thinkingEnabled: thinkingEnabled,
-			routes: routes, validator: validator, requestID: reqID,
+			routes: routes, validator: validator, requestID: reqID, affinity: affinity,
 			firstToken: firstTokenTimeout, hedgeActive: hedgeActive,
 		})
 		return
@@ -131,9 +132,16 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	// 全局尝试序号（写入 usage.attempt，同一 request_id 关联）
 	attemptNo := 0
 	routesTried := 0
+	finishRecoveryProbe := func(routeID uint) {
+		if !affinity.Recovery || affinity.RecoveryRouteID != routeID {
+			return
+		}
+		now := time.Now()
+		rt.finishRouteAffinityProbe(&affinity, routeID, false, affinity.recoveryBlockedUntil(nil, now), now)
+	}
 
 	for {
-		candidates := SortRoutes(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude)
+		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity)
 		if len(candidates) == 0 {
 			break
 		}
@@ -146,6 +154,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 		cand := candidates[0]
 		route := cand.Route
+		recoveryRoute := affinity.Recovery && affinity.RecoveryRouteID == route.ID && routesTried == 0
 		exclude[route.ID] = struct{}{}
 		if routesTried > 0 {
 			failoversDone++
@@ -174,11 +183,19 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 		// 同一路由：1 次首次 + sameRouteRetries 次重试
 		maxTriesOnRoute := 1 + sameRouteRetries
+		if recoveryRoute {
+			// A cooled route gets exactly one half-open recovery probe. If it
+			// fails, continue with the configured fallback routes instead of
+			// amplifying the probe through same-route retries.
+			maxTriesOnRoute = 1
+		}
 		for tryOnRoute := 0; tryOnRoute < maxTriesOnRoute; tryOnRoute++ {
 			attemptNo++
 			attemptKind := attemptKindPrimary
 			if tryOnRoute > 0 {
 				attemptKind = attemptKindRetry
+			} else if recoveryRoute {
+				attemptKind = attemptKindRecovery
 			} else if routesTried > 1 {
 				attemptKind = attemptKindFailover
 			}
@@ -195,6 +212,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					InboundEndpoint: path, InboundProtocol: string(kind), ServiceTier: serviceTier, ReasoningEffort: attemptReasoningEffort,
 					Attempt: attemptNo, AttemptKind: attemptKind,
 				})
+				finishRecoveryProbe(route.ID)
 				// 配置错误：不再重试同路由，进入顺延判断
 				break
 			}
@@ -225,6 +243,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 						UpstreamURL: target.BaseURL + path, ServiceTier: serviceTier, ReasoningEffort: attemptReasoningEffort,
 						Attempt: attemptNo, AttemptKind: attemptKind,
 					})
+					finishRecoveryProbe(route.ID)
 					rt.finalizeUsageFailure(reqID, key)
 					rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", message)
 					return
@@ -244,6 +263,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					UpstreamURL: target.BaseURL + path, ServiceTier: serviceTier, ReasoningEffort: attemptReasoningEffort,
 					Attempt: attemptNo, AttemptKind: attemptKind,
 				})
+				finishRecoveryProbe(route.ID)
 				rt.finalizeUsageFailure(reqID, key)
 				rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", message)
 				return
@@ -356,17 +376,27 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				}
 				if success {
 					_ = rt.Routes.NoteSuccessForPauseError(route.ID)
-				} else if rt.Log != nil {
-					rt.Log.Warn("gateway stream ended with error after commit",
-						"request_id", reqID,
-						"attempt", attemptNo,
-						"route_id", route.ID,
-						"upstream_url", upstreamFullURL,
-						"err", errInfo.Summary,
-						"client_disconnected", clientDisconnected,
-						"input_tokens", streamTokens.InputTokens,
-						"output_tokens", streamTokens.OutputTokens,
-					)
+					rt.finishRouteAffinityProbe(&affinity, route.ID, true, nil, time.Now())
+					if affinity.shouldRememberRoute(route.ID) {
+						rt.rememberRouteAffinity(affinity.Keys, route.ID, time.Now())
+					}
+				} else {
+					if recoveryRoute {
+						blockUntil := affinity.recoveryBlockedUntil(route.TempUnschedulableUntil, time.Now())
+						rt.finishRouteAffinityProbe(&affinity, route.ID, false, blockUntil, time.Now())
+					}
+					if rt.Log != nil {
+						rt.Log.Warn("gateway stream ended with error after commit",
+							"request_id", reqID,
+							"attempt", attemptNo,
+							"route_id", route.ID,
+							"upstream_url", upstreamFullURL,
+							"err", errInfo.Summary,
+							"client_disconnected", clientDisconnected,
+							"input_tokens", streamTokens.InputTokens,
+							"output_tokens", streamTokens.OutputTokens,
+						)
+					}
 				}
 				// status 通常为 200；保留已 drain 的 tokens（含客户端断开后的用量同步）。
 				if status == 0 {
@@ -426,6 +456,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					}
 					_ = rt.Routes.SetTempUnschedulable(route.ID, until, pauseReason, time.Now(), reqID)
 				}
+				if recoveryRoute && lastTryOnRoute {
+					blockUntil := affinity.recoveryBlockedUntil(cooldownUntil, time.Now())
+					rt.finishRouteAffinityProbe(&affinity, route.ID, false, blockUntil, time.Now())
+				}
 				usageMeta.CooldownUntil = cooldownUntil
 				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, UsageTokens{}, cand.EffectiveRate, cand.BillingRate, stream, status, false, errInfo, duration, firstTokenMS, c, usageMeta)
 				if rt.Log != nil {
@@ -465,6 +499,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				rt.setGatewayRequestIDHeaders(c, reqID)
 				c.Status(status)
 				_, _ = c.Writer.Write(clientBody)
+				finishRecoveryProbe(route.ID)
 				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, UsageTokens{}, cand.EffectiveRate, cand.BillingRate, stream, status, false, errInfo, duration, firstTokenMS, c, usageMeta)
 				rt.finalizeUsageFailure(reqID, key)
 				return
@@ -492,12 +527,17 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					Summary: "failed to deliver gateway response: " + writeErr.Error(),
 					Detail:  fmt.Sprintf("downstream write error\nrequest_id: %s\nwritten_bytes: %d\nresponse_bytes: %d\nerror: %s\n", reqID, written, len(clientBody), writeErr.Error()),
 				}
+				finishRecoveryProbe(route.ID)
 				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, tokens, cand.EffectiveRate, cand.BillingRate, stream, status, false, errInfo, duration, firstTokenMS, c, usageMeta)
 				rt.finalizeUsageFailure(reqID, key)
 				return
 			}
 			// 成功：立刻恢复调度；连续成功达到阈值后自动清除错误残留展示
 			_ = rt.Routes.NoteSuccessForPauseError(route.ID)
+			rt.finishRouteAffinityProbe(&affinity, route.ID, true, nil, time.Now())
+			if affinity.shouldRememberRoute(route.ID) {
+				rt.rememberRouteAffinity(affinity.Keys, route.ID, time.Now())
+			}
 			rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, tokens, cand.EffectiveRate, cand.BillingRate, stream, status, true, usageErrorInfo{}, duration, firstTokenMS, c, usageMeta)
 			return
 		}

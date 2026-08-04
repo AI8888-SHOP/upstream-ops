@@ -478,6 +478,7 @@ const (
 	GatewayAttemptKindRetry       = "retry"
 	GatewayAttemptKindFailover    = "failover"
 	GatewayAttemptKindHedge       = "hedge"
+	GatewayAttemptKindRecovery    = "recovery"
 	GatewayAttemptKindRegexReject = "regex_reject"
 
 	GatewayAttemptStatusAccepted = "accepted"
@@ -682,7 +683,7 @@ type GatewayUsageLog struct {
 	RequestID               string    `gorm:"size:64;not null;index" json:"request_id"`
 	// 同一 RequestID 下的尝试序号（从 1 起）；用于使用记录关联
 	Attempt                 int       `gorm:"not null;default:1;index" json:"attempt"`
-	// primary | retry | failover | hedge | regex_reject
+	// primary | retry | failover | hedge | recovery | regex_reject
 	AttemptKind             string    `gorm:"size:16;not null;default:'primary'" json:"attempt_kind,omitempty"`
 	// accepted | rejected | error | canceled；保留 Success 兼容原版查询。
 	AttemptStatus           string    `gorm:"size:16;not null;default:'';index" json:"attempt_status,omitempty"`

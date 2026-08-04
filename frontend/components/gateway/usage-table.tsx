@@ -748,6 +748,8 @@ async function copyText(label: string, text: string) {
 
 function attemptKindLabel(kind?: string) {
   switch (kind) {
+    case "recovery":
+      return "冷却恢复"
     case "retry":
       return "重试"
     case "failover":
@@ -780,6 +782,7 @@ function AttemptBadge({
     kind === "retry" ||
     kind === "failover" ||
     kind === "hedge" ||
+    kind === "recovery" ||
     kind === "regex_reject" ||
     attempt > 1
   if (!multi && !isRetryish) return null

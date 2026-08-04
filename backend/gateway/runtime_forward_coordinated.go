@@ -34,6 +34,7 @@ type coordinatedForwardRequest struct {
 	requestID       string
 	firstToken      time.Duration
 	hedgeActive     bool
+	affinity        routeAffinityContext
 }
 
 type coordinatedRoutePlan struct {
@@ -70,6 +71,7 @@ type coordinatedForwardAttempt struct {
 	Terminal     bool
 	Skipped      bool
 	Validation   validationResult
+	Recovery     bool
 
 	Gate         *streamPrefixGateWriter
 	Cancel       context.CancelFunc
@@ -149,13 +151,21 @@ func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, vali
 
 func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	groupsByChannel := rt.loadGroupsByChannel(req.c.Request.Context(), req.routes)
-	candidates := SortRoutes(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil)
+	candidates := rt.sortRoutesWithAffinity(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil, &req.affinity)
+	if req.affinity.Recovery && req.hedgeActive {
+		// A cooled route must complete its single recovery probe before any
+		// concurrent hedge is launched; fallback resumes after that probe fails.
+		req.hedgeActive = false
+	}
 	if len(candidates) == 0 {
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		rt.writeGatewayError(req.c, req.kind, http.StatusServiceUnavailable, "api_error", "no schedulable routes")
 		return
 	}
 	plan := buildCoordinatedRoutePlan(candidates, req.group, req.hedgeActive, req.validator != nil && req.validator.Enabled())
+	if req.affinity.Recovery {
+		plan = removeRecoveryRouteRetries(plan, req.affinity.RecoveryRouteID)
+	}
 	if len(plan) == 0 {
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		rt.writeGatewayError(req.c, req.kind, http.StatusServiceUnavailable, "api_error", "no attempts available")
@@ -182,6 +192,9 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		attempt := &coordinatedForwardAttempt{
 			Info: info, Plan: entry, Route: entry.Candidate.Route, StartedAt: time.Now(),
 			runnerDone: make(chan struct{}),
+		}
+		if info.Number == 1 && req.affinity.Recovery && req.affinity.RecoveryRouteID == attempt.Route.ID {
+			attempt.Recovery = true
 		}
 		states.Store(info.Number, attempt)
 		defer close(attempt.runnerDone)
@@ -738,6 +751,9 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 				Route: entry.Candidate.Route, Err: context.Canceled,
 				ErrInfo: usageErrorInfo{Type: "canceled", Summary: "attempt cleanup timed out after cancellation"},
 			}
+			if number == 1 && req.affinity.Recovery && attempt.Route.ID == req.affinity.RecoveryRouteID {
+				attempt.Recovery = true
+			}
 		} else if attempt.runnerDone != nil {
 			select {
 			case <-attempt.runnerDone:
@@ -750,6 +766,9 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 					Info: hedgeAttemptInfo{Number: number}, Plan: entry,
 					Route: entry.Candidate.Route, Err: context.Canceled,
 					ErrInfo: usageErrorInfo{Type: "canceled", Summary: "attempt cleanup timed out after cancellation"},
+				}
+				if number == 1 && req.affinity.Recovery && attempt.Route.ID == req.affinity.RecoveryRouteID {
+					attempt.Recovery = true
 				}
 			}
 		}
@@ -850,6 +869,20 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			onlyClientDisconnect := rt.isClientDisconnectAfterCommit(streamResult.ClientDisconnected, streamResult.StreamErr)
 			success = success && (streamResult.StreamErr == nil || onlyClientDisconnect)
 		}
+		if attempt.Recovery {
+			if success {
+				if !isWinner {
+					_ = rt.Routes.NoteSuccessForPauseError(attempt.Route.ID)
+				}
+				rt.finishRouteAffinityProbe(&req.affinity, attempt.Route.ID, true, nil, time.Now())
+				if req.affinity.shouldRememberRoute(attempt.Route.ID) {
+					rt.rememberRouteAffinity(req.affinity.Keys, attempt.Route.ID, time.Now())
+				}
+			} else {
+				blockUntil := req.affinity.recoveryBlockedUntil(attempt.UsageMeta.CooldownUntil, time.Now())
+				rt.finishRouteAffinityProbe(&req.affinity, attempt.Route.ID, false, blockUntil, time.Now())
+			}
+		}
 
 		meta := attempt.UsageMeta
 		meta.Attempt = number
@@ -891,7 +924,24 @@ func coordinatedPlanHasLaterRoute(plan []coordinatedRoutePlan, number int, route
 	return false
 }
 
+func removeRecoveryRouteRetries(plan []coordinatedRoutePlan, routeID uint) []coordinatedRoutePlan {
+	if routeID == 0 || len(plan) == 0 {
+		return plan
+	}
+	out := plan[:0]
+	for _, entry := range plan {
+		if entry.Candidate.Route.ID == routeID && entry.TryOnRoute > 0 {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func coordinatedAttemptKind(attempt *coordinatedForwardAttempt, hedgeActive bool, number int) string {
+	if attempt != nil && attempt.Recovery && number == 1 {
+		return storage.GatewayAttemptKindRecovery
+	}
 	if number <= 1 {
 		return storage.GatewayAttemptKindPrimary
 	}
@@ -926,6 +976,10 @@ func (rt *Runtime) finishCoordinatedNonStream(req *coordinatedForwardRequest, wi
 		return
 	}
 	_ = rt.Routes.NoteSuccessForPauseError(winner.Route.ID)
+	rt.finishRouteAffinityProbe(&req.affinity, winner.Route.ID, true, nil, time.Now())
+	if req.affinity.shouldRememberRoute(winner.Route.ID) {
+		rt.rememberRouteAffinity(req.affinity.Keys, winner.Route.ID, time.Now())
+	}
 	if err := rt.finalizeUsageWinner(req.requestID, req.key, winner.Info.Number, usageID); err != nil && rt.Log != nil {
 		rt.Log.Error("finalize coordinated gateway winner failed", "request_id", req.requestID, "attempt", winner.Info.Number, "err", err)
 	}
@@ -951,6 +1005,10 @@ func (rt *Runtime) finishCoordinatedStream(req *coordinatedForwardRequest, winne
 		return
 	}
 	_ = rt.Routes.NoteSuccessForPauseError(winner.Route.ID)
+	rt.finishRouteAffinityProbe(&req.affinity, winner.Route.ID, true, nil, time.Now())
+	if req.affinity.shouldRememberRoute(winner.Route.ID) {
+		rt.rememberRouteAffinity(req.affinity.Keys, winner.Route.ID, time.Now())
+	}
 	if err := rt.finalizeUsageWinner(req.requestID, req.key, winner.Info.Number, usageID); err != nil && rt.Log != nil {
 		rt.Log.Error("finalize coordinated stream winner failed", "request_id", req.requestID, "attempt", winner.Info.Number, "err", err)
 	}

@@ -26,6 +26,7 @@ const (
 	attemptKindRetry    = "retry"
 	attemptKindFailover = "failover"
 	attemptKindHedge    = "hedge"
+	attemptKindRecovery = storage.GatewayAttemptKindRecovery
 )
 
 // ChannelAPI 上游密钥管理能力（由 channel.Service 实现）。
@@ -77,6 +78,12 @@ type Service struct {
 	// 源分组列表缓存（ListAPIKeyGroups 远程调用昂贵；列表接口不再实时拉，运行时/保存仍可复用缓存）
 	channelGroupsCacheMu sync.Mutex
 	channelGroupsCache   map[uint]channelGroupsCacheEntry // keyed by channel id
+
+	// routeAffinities keeps short-lived session-to-route bindings so a cooled
+	// route can receive one controlled recovery probe for its own conversation.
+	routeAffinityMu sync.Mutex
+	routeAffinities map[routeAffinityKey]routeAffinityEntry
+	routeAffinityLastCleanup time.Time
 }
 
 type modelsCacheEntry struct {
@@ -116,6 +123,7 @@ func NewService(
 		modelsCache:        map[uint]modelsCacheEntry{},
 		responseValidatorCache: map[uint]responseValidatorCacheEntry{},
 		channelGroupsCache: map[uint]channelGroupsCacheEntry{},
+		routeAffinities:    map[routeAffinityKey]routeAffinityEntry{},
 		upstreamConcurrency: newUpstreamConcurrencyRegistry(),
 	}
 	s.Admin = &AdminService{Service: s}
