@@ -177,6 +177,18 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 		s.notifyError(ctx, c, storage.EventMonitorFailed, "倍率采集失败", err)
 		return err
 	}
+	for i := range results {
+		results[i].Ratio = connector.ApplyGroupMultiplier(
+			results[i].Ratio,
+			resolved.GroupMultiplier,
+			resolved.GroupMultiplierMode,
+		)
+		results[i].CompletionRatio = connector.ApplyGroupMultiplier(
+			results[i].CompletionRatio,
+			resolved.GroupMultiplier,
+			resolved.GroupMultiplierMode,
+		)
+	}
 
 	now := time.Now()
 	existing, err := s.rates.ListByChannel(c.ID)

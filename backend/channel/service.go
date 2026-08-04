@@ -163,6 +163,8 @@ type CreateInput struct {
 	BalanceThreshold       float64
 	RechargeMultiplier     *float64
 	RechargeMultiplierMode string
+	GroupMultiplier        *float64
+	GroupMultiplierMode    string
 	MonitorEnabled         bool
 	OnlyCreatedKeyGroupsEnabled bool
 }
@@ -203,8 +205,10 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 		ProxyEnabled:           in.ProxyEnabled,
 		CaptchaConfigID:        in.CaptchaConfigID,
 		BalanceThreshold:       in.BalanceThreshold,
-		RechargeMultiplier:     normalizeRechargeMultiplier(in.RechargeMultiplier),
+		RechargeMultiplier:     normalizeMultiplier(in.RechargeMultiplier),
 		RechargeMultiplierMode: connector.NormalizeRechargeMultiplierMode(in.RechargeMultiplierMode),
+		GroupMultiplier:        normalizeMultiplier(in.GroupMultiplier),
+		GroupMultiplierMode:    connector.NormalizeGroupMultiplierMode(in.GroupMultiplierMode),
 		MonitorEnabled:         in.MonitorEnabled,
 		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
 	}
@@ -236,6 +240,8 @@ type UpdateInput struct {
 	BalanceThreshold       *float64
 	RechargeMultiplier     *float64
 	RechargeMultiplierMode *string
+	GroupMultiplier        *float64
+	GroupMultiplierMode    *string
 	MonitorEnabled         *bool
 	OnlyCreatedKeyGroupsEnabled *bool
 }
@@ -341,10 +347,16 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 		c.BalanceThreshold = *in.BalanceThreshold
 	}
 	if in.RechargeMultiplier != nil {
-		c.RechargeMultiplier = normalizeRechargeMultiplier(in.RechargeMultiplier)
+		c.RechargeMultiplier = normalizeMultiplier(in.RechargeMultiplier)
 	}
 	if in.RechargeMultiplierMode != nil {
 		c.RechargeMultiplierMode = connector.NormalizeRechargeMultiplierMode(*in.RechargeMultiplierMode)
+	}
+	if in.GroupMultiplier != nil {
+		c.GroupMultiplier = normalizeMultiplier(in.GroupMultiplier)
+	}
+	if in.GroupMultiplierMode != nil {
+		c.GroupMultiplierMode = connector.NormalizeGroupMultiplierMode(*in.GroupMultiplierMode)
 	}
 	if in.MonitorEnabled != nil {
 		c.MonitorEnabled = *in.MonitorEnabled
@@ -358,7 +370,7 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	return c, nil
 }
 
-func normalizeRechargeMultiplier(v *float64) *float64 {
+func normalizeMultiplier(v *float64) *float64 {
 	if v == nil || *v <= 0 {
 		return nil
 	}
@@ -513,6 +525,8 @@ func (s *Service) Resolve(ctx context.Context, c *storage.Channel) (*connector.C
 		TurnstileEnabled:       c.TurnstileEnabled,
 		RechargeMultiplier:     c.RechargeMultiplier,
 		RechargeMultiplierMode: connector.NormalizeRechargeMultiplierMode(c.RechargeMultiplierMode),
+		GroupMultiplier:        c.GroupMultiplier,
+		GroupMultiplierMode:    connector.NormalizeGroupMultiplierMode(c.GroupMultiplierMode),
 	}
 	loginExtraParams, err := parseLoginExtraParams(c.LoginExtraParams)
 	if err != nil {
@@ -1113,6 +1127,11 @@ func (s *Service) ListAPIKeys(ctx context.Context, channelID uint, query connect
 	if err != nil {
 		return nil, err
 	}
+	if page != nil {
+		for i := range page.Items {
+			applyGroupMultiplierToAPIKey(&page.Items[i], resolved)
+		}
+	}
 	_ = s.Channels.SetLastError(c.ID, "")
 	return page, nil
 }
@@ -1125,6 +1144,13 @@ func (s *Service) ListAPIKeyGroups(ctx context.Context, channelID uint) ([]conne
 	groups, err := conn.ListAPIKeyGroups(ctx, resolved, session)
 	if err != nil {
 		return nil, err
+	}
+	for i := range groups {
+		groups[i].Ratio = connector.ApplyGroupMultiplier(
+			groups[i].Ratio,
+			resolved.GroupMultiplier,
+			resolved.GroupMultiplierMode,
+		)
 	}
 	_ = s.Channels.SetLastError(c.ID, "")
 	return groups, nil
@@ -1139,6 +1165,9 @@ func (s *Service) CreateAPIKey(ctx context.Context, channelID uint, req connecto
 	if err != nil {
 		return nil, err
 	}
+	if key != nil {
+		applyGroupMultiplierToAPIKey(key, resolved)
+	}
 	_ = s.Channels.SetLastError(c.ID, "")
 	return key, nil
 }
@@ -1152,8 +1181,22 @@ func (s *Service) UpdateAPIKey(ctx context.Context, channelID uint, keyID int64,
 	if err != nil {
 		return nil, err
 	}
+	if key != nil {
+		applyGroupMultiplierToAPIKey(key, resolved)
+	}
 	_ = s.Channels.SetLastError(c.ID, "")
 	return key, nil
+}
+
+func applyGroupMultiplierToAPIKey(key *connector.APIKey, channel *connector.Channel) {
+	if key == nil || channel == nil {
+		return
+	}
+	key.GroupRatio = connector.ApplyGroupMultiplier(
+		key.GroupRatio,
+		channel.GroupMultiplier,
+		channel.GroupMultiplierMode,
+	)
 }
 
 func (s *Service) DeleteAPIKey(ctx context.Context, channelID uint, keyID int64) error {

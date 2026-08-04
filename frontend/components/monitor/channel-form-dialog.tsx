@@ -70,6 +70,8 @@ interface FormState {
   balance_threshold: string
   recharge_multiplier: string
   recharge_multiplier_mode: RechargeMultiplierMode
+  group_multiplier: string
+  group_multiplier_mode: RechargeMultiplierMode
   monitor_enabled: boolean
   only_created_key_groups_enabled: boolean
   turnstile_enabled: boolean
@@ -81,6 +83,7 @@ interface FormState {
 
 function initialState(c?: Channel | null): FormState {
   const rechargeMultiplierMode = c?.recharge_multiplier_mode === "multiply" ? "multiply" : "divide"
+  const groupMultiplierMode = c?.group_multiplier_mode === "multiply" ? "multiply" : "divide"
   return {
     name: c?.name ?? "",
     type: c?.type ?? "sub2api",
@@ -99,6 +102,8 @@ function initialState(c?: Channel | null): FormState {
     balance_threshold: c?.balance_threshold != null ? String(c.balance_threshold) : "0",
     recharge_multiplier: c?.recharge_multiplier != null ? String(c.recharge_multiplier) : "",
     recharge_multiplier_mode: rechargeMultiplierMode,
+    group_multiplier: c?.group_multiplier != null ? String(c.group_multiplier) : "",
+    group_multiplier_mode: groupMultiplierMode,
     monitor_enabled: c?.monitor_enabled ?? true,
     only_created_key_groups_enabled: c?.only_created_key_groups_enabled ?? false,
     turnstile_enabled: c?.turnstile_enabled ?? false,
@@ -174,6 +179,14 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
         rechargeMultiplier = Number(rechargeMultiplierText)
         if (!Number.isFinite(rechargeMultiplier) || rechargeMultiplier <= 0) {
           throw new Error("充值倍率必须大于 0，或留空跟随上游")
+        }
+      }
+      let groupMultiplier = 0
+      const groupMultiplierText = form.group_multiplier.trim()
+      if (groupMultiplierText) {
+        groupMultiplier = Number(groupMultiplierText)
+        if (!Number.isFinite(groupMultiplier) || groupMultiplier <= 0) {
+          throw new Error("分组倍率换算值必须大于 0，或留空保留上游原值")
         }
       }
       const loginExtraParams = isTokenMode ? "" : form.login_extra_params.trim()
@@ -259,6 +272,8 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
           balance_threshold: threshold,
           recharge_multiplier: rechargeMultiplier,
           recharge_multiplier_mode: form.recharge_multiplier_mode,
+          group_multiplier: groupMultiplier,
+          group_multiplier_mode: form.group_multiplier_mode,
           monitor_enabled: form.monitor_enabled,
           only_created_key_groups_enabled: form.only_created_key_groups_enabled,
           turnstile_enabled: !isTokenMode && form.turnstile_enabled,
@@ -289,6 +304,8 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
             balance_threshold: threshold,
             recharge_multiplier: rechargeMultiplier,
             recharge_multiplier_mode: form.recharge_multiplier_mode,
+            group_multiplier: groupMultiplier,
+            group_multiplier_mode: form.group_multiplier_mode,
             monitor_enabled: form.monitor_enabled,
             only_created_key_groups_enabled: form.only_created_key_groups_enabled,
             turnstile_enabled: !isTokenMode && form.turnstile_enabled,
@@ -667,6 +684,39 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
                 <SelectContent>
                   <SelectItem value="divide">余额 / 倍率</SelectItem>
                   <SelectItem value="multiply">余额 × 倍率</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="group-multiplier">分组倍率换算值（留空 = 保留原值）</Label>
+              <Input
+                id="group-multiplier"
+                type="number"
+                step="0.0001"
+                min="0"
+                value={form.group_multiplier}
+                onChange={(e) => setForm({ ...form, group_multiplier: e.target.value })}
+                disabled={submitting}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="group-multiplier-mode">分组倍率换算方式</Label>
+              <Select
+                value={form.group_multiplier_mode}
+                onValueChange={(v) =>
+                  setForm({ ...form, group_multiplier_mode: v as RechargeMultiplierMode })
+                }
+                disabled={submitting}
+              >
+                <SelectTrigger id="group-multiplier-mode" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="divide">原倍率 / 换算值</SelectItem>
+                  <SelectItem value="multiply">原倍率 × 换算值</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -301,6 +301,7 @@ func TestRefreshRatesEmitsRateAddedAndRemoved(t *testing.T) {
 	}))
 	defer apiSrv.Close()
 
+	groupMultiplier := 2.0
 	ch := &storage.Channel{
 		Name:                "sub",
 		Type:                storage.ChannelTypeSub2API,
@@ -310,6 +311,8 @@ func TestRefreshRatesEmitsRateAddedAndRemoved(t *testing.T) {
 		CredentialMode:      storage.CredentialModeToken,
 		MonitorEnabled:      true,
 		SubscriptionEnabled: true,
+		GroupMultiplier:     &groupMultiplier,
+		GroupMultiplierMode: "multiply",
 	}
 	if err := channels.Create(ch); err != nil {
 		t.Fatalf("create channel: %v", err)
@@ -344,6 +347,12 @@ func TestRefreshRatesEmitsRateAddedAndRemoved(t *testing.T) {
 	}
 	if remoteGroupIDs["alpha"] != 1 || remoteGroupIDs["beta"] != 2 {
 		t.Fatalf("remote group ids = %#v", remoteGroupIDs)
+	}
+	for _, snapshot := range snapshots {
+		want := map[string]float64{"alpha": 2, "beta": 4}[snapshot.ModelName]
+		if snapshot.Ratio != want {
+			t.Fatalf("snapshot %s ratio = %v, want %v", snapshot.ModelName, snapshot.Ratio, want)
+		}
 	}
 
 	if err := svc.RefreshRates(context.Background(), ch); err != nil {
@@ -382,6 +391,12 @@ func TestRefreshRatesEmitsRateAddedAndRemoved(t *testing.T) {
 	got := map[string]bool{}
 	for _, item := range list {
 		got[item.ModelName] = true
+		if item.ModelName == "beta" && item.Ratio != 4 {
+			t.Fatalf("beta ratio = %v, want 4", item.Ratio)
+		}
+		if item.ModelName == "gamma" && item.Ratio != 6 {
+			t.Fatalf("gamma ratio = %v, want 6", item.Ratio)
+		}
 	}
 	if !got["beta"] || !got["gamma"] || got["alpha"] {
 		t.Fatalf("rate snapshots = %#v", got)

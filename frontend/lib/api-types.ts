@@ -60,6 +60,8 @@ export interface Channel {
   balance_threshold: number
   recharge_multiplier?: number | null
   recharge_multiplier_mode: RechargeMultiplierMode
+  group_multiplier?: number | null
+  group_multiplier_mode: RechargeMultiplierMode
   monitor_enabled: boolean
   only_created_key_groups_enabled: boolean
   last_balance?: number | null

@@ -54,6 +54,8 @@ type Channel struct {
 	BalanceThreshold       float64        `gorm:"default:0" json:"balance_threshold"`
 	RechargeMultiplier     *float64       `json:"recharge_multiplier,omitempty"`
 	RechargeMultiplierMode string         `gorm:"size:16;not null;default:'divide'" json:"recharge_multiplier_mode"`
+	GroupMultiplier        *float64       `json:"group_multiplier,omitempty"`
+	GroupMultiplierMode    string         `gorm:"size:16;not null;default:'divide'" json:"group_multiplier_mode"`
 	MonitorEnabled         bool           `gorm:"default:true" json:"monitor_enabled"`
 	// OnlyCreatedKeyGroupsEnabled 开启后仅展示与监听"已创建密钥的分组"。
 	// 影响：渠道卡片 / 分组对话框 / 全局倍率面板的分组列表，以及倍率变动通知。
