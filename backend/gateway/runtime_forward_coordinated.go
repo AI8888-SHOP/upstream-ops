@@ -237,15 +237,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		return attempt, runErr
 	}
 	validate := func(attempt *coordinatedForwardAttempt) (bool, error) {
-		if attempt == nil || attempt.Skipped {
-			return false, errSkippedRejectedRoute
-		}
-		validation, status, _, terminal := attempt.validationSnapshot()
-		if validation.IsRejected() && !validation.PostCommit {
-			excludedRoutes.Store(attempt.Route.ID, struct{}{})
-			return false, &responseRejectedError{Result: validation}
-		}
-		return (status >= 200 && status < 300) || terminal || validation.PostCommit, nil
+		return validateCoordinatedAttempt(attempt, &excludedRoutes)
 	}
 	hooks := hedgeHooks[*coordinatedForwardAttempt]{
 		OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
@@ -388,6 +380,28 @@ func coordinatedAttemptFirstTokenTimeout(
 		}
 	}
 	return 0
+}
+
+func validateCoordinatedAttempt(attempt *coordinatedForwardAttempt, excludedRoutes *sync.Map) (bool, error) {
+	if attempt == nil || attempt.Skipped {
+		return false, errSkippedRejectedRoute
+	}
+	if excludedRoutes != nil {
+		if _, excluded := excludedRoutes.Load(attempt.Route.ID); excluded {
+			// A same-route retry may already be running when another attempt on
+			// that route matches a pre-commit response rule. It must not win after
+			// the route has been explicitly rejected.
+			return false, errSkippedRejectedRoute
+		}
+	}
+	validation, status, _, terminal := attempt.validationSnapshot()
+	if validation.IsRejected() && !validation.PostCommit {
+		if excludedRoutes != nil {
+			excludedRoutes.Store(attempt.Route.ID, struct{}{})
+		}
+		return false, &responseRejectedError{Result: validation}
+	}
+	return (status >= 200 && status < 300) || terminal || validation.PostCommit, nil
 }
 
 func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, attempt *coordinatedForwardAttempt) error {
@@ -671,8 +685,10 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 	}
 	attempts := make(map[int]*coordinatedForwardAttempt, len(result.Attempts))
 	outcomes := make(map[int]hedgeAttemptOutcome, len(result.Attempts))
+	rejections := make(map[int]error, len(result.Attempts))
 	for _, item := range result.Attempts {
 		outcomes[item.Info.Number] = item.Outcome
+		rejections[item.Info.Number] = item.Rejection
 		if item.Value != nil {
 			attempts[item.Info.Number] = item.Value
 			if states != nil {
@@ -741,6 +757,7 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			continue
 		}
 		outcome := outcomes[number]
+		rejection := rejections[number]
 		isWinner := number == winnerNumber
 		attemptKind := coordinatedAttemptKind(attempt, req.hedgeActive, number)
 		attemptStatus := storage.GatewayAttemptStatusError
@@ -786,6 +803,11 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			attemptKind = storage.GatewayAttemptKindRegexReject
 			attemptStatus = storage.GatewayAttemptStatusRejected
 			errInfo = validationErrorInfo(validation)
+		} else if outcome == hedgeOutcomeRejected && errors.Is(rejection, errSkippedRejectedRoute) {
+			attemptStatus = storage.GatewayAttemptStatusCanceled
+			if strings.TrimSpace(errInfo.Summary) == "" {
+				errInfo = usageErrorInfo{Type: "canceled", Summary: "attempt canceled after response validation rejected its route"}
+			}
 		} else if outcome == hedgeOutcomeCanceled || outcome == hedgeOutcomeLost || errors.Is(attemptErr, context.Canceled) {
 			attemptStatus = storage.GatewayAttemptStatusCanceled
 			if strings.TrimSpace(errInfo.Summary) == "" {

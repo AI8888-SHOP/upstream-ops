@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -148,6 +150,19 @@ func TestCoordinatedTransportFailurePolicyKeepsRetryIndependent(t *testing.T) {
 	}
 	if coordinatedSameRouteRetryAllowed(group, last) {
 		t.Fatal("same-route retry unexpectedly allowed after retry budget")
+	}
+}
+
+func TestValidateCoordinatedAttemptSkipsExcludedRunningRetry(t *testing.T) {
+	attempt := &coordinatedForwardAttempt{
+		Route:  storage.GatewayRoute{ID: 7},
+		Status: http.StatusOK,
+	}
+	var excluded sync.Map
+	excluded.Store(uint(7), struct{}{})
+	accepted, err := validateCoordinatedAttempt(attempt, &excluded)
+	if accepted || !errors.Is(err, errSkippedRejectedRoute) {
+		t.Fatalf("accepted=%v err=%v, want excluded retry", accepted, err)
 	}
 }
 
