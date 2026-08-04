@@ -408,11 +408,20 @@ func TestForwardStreamHoldsConcurrencyThroughClientDisconnectDrain(t *testing.T)
 
 func TestCanceledAttemptReleasesConcurrency(t *testing.T) {
 	started := make(chan struct{})
+	stopHandler := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
-		<-r.Context().Done()
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+		case <-stopHandler:
+		}
 	}))
 	defer upstream.Close()
+	defer close(stopHandler)
 
 	svc := &Service{}
 	rt := svc.runtime()
