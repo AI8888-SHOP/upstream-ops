@@ -29,6 +29,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		rt.finalizeUsageFailure(reqID, key)
 		rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", "failed to read body")
 		return
 	}
@@ -46,12 +47,38 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 	routes, err := rt.Routes.ListByGroupID(group.ID)
 	if err != nil || len(routes) == 0 {
+		rt.finalizeUsageFailure(reqID, key)
 		rt.writeGatewayError(c, kind, http.StatusServiceUnavailable, "api_error", "no routes configured")
 		return
 	}
 
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	groupMapping := ParseModelMapping(group.ModelMappingJSON)
+	validator, validationErr := rt.responseValidatorForGroup(group)
+	if validationErr != nil {
+		rt.finalizeUsageFailure(reqID, key)
+		rt.writeGatewayError(c, kind, http.StatusInternalServerError, "api_error", validationErr.Error())
+		return
+	}
+	useCoordinator, hedgeActive := rt.shouldUseCoordinatedForward(group, validator, hedgeRequest{
+		Path: path, Model: requestedModel, Header: c.Request.Header, Body: body, Stream: stream,
+		Realtime: strings.Contains(strings.ToLower(path), "realtime"),
+	})
+	if useCoordinator {
+		ftTimeoutSec := rt.clampFirstTokenTimeoutSec(group.FirstTokenTimeoutSec)
+		var firstTokenTimeout time.Duration
+		if ftTimeoutSec > 0 {
+			firstTokenTimeout = time.Duration(ftTimeoutSec) * time.Second
+		}
+		rt.handleForwardCoordinated(coordinatedForwardRequest{
+			c: c, path: path, kind: kind, key: key, group: group, body: body,
+			requestedModel: requestedModel, stream: stream, serviceTier: serviceTier,
+			reasoningEffort: reasoningEffort, thinkingEnabled: thinkingEnabled,
+			routes: routes, validator: validator, requestID: reqID,
+			firstToken: firstTokenTimeout, hedgeActive: hedgeActive,
+		})
+		return
+	}
 
 	// 组级重试策略
 	retryEnabled := group.RetryEnabled
@@ -175,8 +202,18 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			// legacy completions 不跨协议
 			if protocol.IsOpenAIFamily(kind) && strings.Contains(path, "/completions") && !strings.Contains(path, "/chat/") {
 				if upstreamKind == protocolAnthropic || upstreamKind == protocol.KindOpenAIResponses {
-					rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error",
-						"protocol conversion for /v1/completions is not supported; use /v1/chat/completions")
+					message := "protocol conversion for /v1/completions is not supported; use /v1/chat/completions"
+					errInfo := usageErrorInfo{
+						Type: "config", Summary: message,
+						Detail: fmt.Sprintf("protocol conversion error\nroute_id: %d\nupstream_protocol: %s\nerror: %s\n", route.ID, upstreamKind, message),
+					}
+					rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, UsageTokens{}, cand.EffectiveRate, cand.BillingRate, stream, 0, false, errInfo, 0, nil, c, usageRecordMeta{
+						InboundEndpoint: path, InboundProtocol: string(kind), UpstreamProtocol: string(upstreamKind),
+						UpstreamURL: target.BaseURL + path, ServiceTier: serviceTier, ReasoningEffort: attemptReasoningEffort,
+						Attempt: attemptNo, AttemptKind: attemptKind,
+					})
+					rt.finalizeUsageFailure(reqID, key)
+					rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", message)
 					return
 				}
 				upstreamKind = protocol.KindOpenAIChat
@@ -184,7 +221,18 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 			fwdBody, upstreamPath, converted, convErr := rt.prepareUpstreamRequest(body, kind, upstreamKind, upstreamModel, stream, path)
 			if convErr != nil {
-				rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", "protocol convert failed: "+convErr.Error())
+				message := "protocol convert failed: " + convErr.Error()
+				errInfo := usageErrorInfo{
+					Type: "config", Summary: message,
+					Detail: fmt.Sprintf("protocol conversion error\nroute_id: %d\nupstream_protocol: %s\nerror: %s\n", route.ID, upstreamKind, convErr.Error()),
+				}
+				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, UsageTokens{}, cand.EffectiveRate, cand.BillingRate, stream, 0, false, errInfo, 0, nil, c, usageRecordMeta{
+					InboundEndpoint: path, InboundProtocol: string(kind), UpstreamProtocol: string(upstreamKind),
+					UpstreamURL: target.BaseURL + path, ServiceTier: serviceTier, ReasoningEffort: attemptReasoningEffort,
+					Attempt: attemptNo, AttemptKind: attemptKind,
+				})
+				rt.finalizeUsageFailure(reqID, key)
+				rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", message)
 				return
 			}
 
@@ -312,6 +360,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					status = http.StatusOK
 				}
 				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, streamTokens, cand.EffectiveRate, cand.BillingRate, stream, status, success, errInfo, duration, firstTokenMS, c, usageMeta)
+				if !success {
+					rt.finalizeUsageFailure(reqID, key)
+				}
 				return
 			}
 
@@ -402,6 +453,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				c.Status(status)
 				_, _ = c.Writer.Write(clientBody)
 				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, UsageTokens{}, cand.EffectiveRate, cand.BillingRate, stream, status, false, errInfo, duration, firstTokenMS, c, usageMeta)
+				rt.finalizeUsageFailure(reqID, key)
 				return
 			}
 
@@ -417,7 +469,20 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				c.Header("Content-Type", "application/json")
 			}
 			c.Status(status)
-			_, _ = c.Writer.Write(clientBody)
+			written, writeErr := c.Writer.Write(clientBody)
+			if writeErr != nil || (len(clientBody) > 0 && written != len(clientBody)) {
+				if writeErr == nil {
+					writeErr = io.ErrShortWrite
+				}
+				errInfo := usageErrorInfo{
+					Type:    "client",
+					Summary: "failed to deliver gateway response: " + writeErr.Error(),
+					Detail:  fmt.Sprintf("downstream write error\nrequest_id: %s\nwritten_bytes: %d\nresponse_bytes: %d\nerror: %s\n", reqID, written, len(clientBody), writeErr.Error()),
+				}
+				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, tokens, cand.EffectiveRate, cand.BillingRate, stream, status, false, errInfo, duration, firstTokenMS, c, usageMeta)
+				rt.finalizeUsageFailure(reqID, key)
+				return
+			}
 			// 成功：立刻恢复调度；连续成功达到阈值后自动清除错误残留展示
 			_ = rt.Routes.NoteSuccessForPauseError(route.ID)
 			rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, tokens, cand.EffectiveRate, cand.BillingRate, stream, status, true, usageErrorInfo{}, duration, firstTokenMS, c, usageMeta)
@@ -431,6 +496,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	}
 
 finishError:
+	rt.finalizeUsageFailure(reqID, key)
 	if lastStatus > 0 && len(lastBody) > 0 {
 		out := rt.injectUpstreamOpsRequestID(lastBody, reqID)
 		rt.setGatewayRequestIDHeaders(c, reqID)

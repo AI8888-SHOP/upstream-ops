@@ -326,12 +326,17 @@ export function UsagePanel({
   return (
     <div className="space-y-4">
 {usageStats ? (
-  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-8">
     {[
       {
         label: "请求数",
         value: String(usageStats.total_requests ?? 0),
         hint: `成功 ${usageStats.success_count ?? 0} · 失败 ${usageStats.error_count ?? 0}`,
+      },
+      {
+        label: "Attempts",
+        value: String(usageStats.attempt_count ?? 0),
+        hint: `winner ${usageStats.winner_count ?? 0}`,
       },
       {
         label: "Tokens",
@@ -340,9 +345,19 @@ export function UsagePanel({
         hintAlways: `入 ${formatTokens(usageStats.total_input_tokens ?? 0)} · 出 ${formatTokens(usageStats.total_output_tokens ?? 0)} · 读 ${formatTokens(usageStats.total_cache_read_tokens ?? 0)} · 写 ${formatTokens(usageStats.total_cache_creation_tokens ?? 0)}`,
       },
       {
-        label: "费用",
-        value: money(usageStats.total_actual_cost),
+        label: "上游成本",
+        value: money(usageStats.total_upstream_cost ?? usageStats.total_actual_cost),
         hint: `标准 ${money(usageStats.total_cost)}`,
+      },
+      {
+        label: "Winner结算",
+        value: money(usageStats.winner_cost ?? 0),
+        hint: "仅交付请求扣费",
+      },
+      {
+        label: "额外成本",
+        value: money(usageStats.extra_attempt_cost ?? 0),
+        hint: "loser/拒绝 attempt",
       },
       {
         label: "平均耗时",

@@ -25,6 +25,10 @@ type usageRecordMeta struct {
 	UpstreamURL       string
 	Attempt           int
 	AttemptKind       string
+	AttemptStatus     string
+	Winner            bool
+	DeferSettlement   bool
+	Validation        validationResult
 	CooldownUntil     *time.Time
 }
 

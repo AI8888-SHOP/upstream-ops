@@ -25,6 +25,7 @@ const (
 	attemptKindPrimary  = "primary"
 	attemptKindRetry    = "retry"
 	attemptKindFailover = "failover"
+	attemptKindHedge    = "hedge"
 )
 
 // ChannelAPI 上游密钥管理能力（由 channel.Service 实现）。
@@ -42,6 +43,7 @@ type Service struct {
 	Groups     *storage.GatewayGroups
 	Keys       *storage.GatewayKeys
 	Routes     *storage.GatewayRoutes
+	ResponseRules *storage.GatewayResponseRules
 	Providers  *storage.GatewayProviders
 	Usage      *storage.GatewayUsageLogs
 	Prices     *storage.ModelPriceOverrides
@@ -114,6 +116,12 @@ func NewService(
 // SetProviders 注入直连渠道仓储（main 组装时调用，保持 NewService 签名兼容）。
 func (s *Service) SetProviders(p *storage.GatewayProviders) {
 	s.Providers = p
+}
+
+// SetResponseRules injects the group-level response validation repository.
+// A setter keeps NewService source-compatible with existing integrations and tests.
+func (s *Service) SetResponseRules(rules *storage.GatewayResponseRules) {
+	s.ResponseRules = rules
 }
 
 // ListDefaultPrices 返回内置模型价目（管理端只读）。

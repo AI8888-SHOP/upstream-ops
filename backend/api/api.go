@@ -70,6 +70,7 @@ type Deps struct {
 	GatewayGroups *storage.GatewayGroups
 	GatewayKeys   *storage.GatewayKeys
 	GatewayUsage  *storage.GatewayUsageLogs
+	GatewayResponseRules *storage.GatewayResponseRules
 	ModelPrices   *storage.ModelPriceOverrides
 	Log           *slog.Logger
 

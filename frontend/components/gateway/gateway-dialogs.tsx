@@ -885,6 +885,120 @@ export function GroupFormDialog({
                 </p>
               </div>
             </div>
+            <div className="space-y-3 border-t border-border/60 pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <Label>并发兜底</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    主请求超过延迟仍无有效结果时，并发启动其它路由；首个通过校验的响应获胜。
+                    图片、视频生成和 Realtime 请求自动排除。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  checked={groupForm.hedge_enabled}
+                  onCheckedChange={(v) =>
+                    setGroupForm({ ...groupForm, hedge_enabled: v })
+                  }
+                />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="space-y-1">
+                  <Label>启动延迟（秒）</Label>
+                  <Input
+                    type="number"
+                    min={0.1}
+                    max={300}
+                    step={0.1}
+                    disabled={!groupForm.hedge_enabled}
+                    value={groupForm.hedge_delay_seconds}
+                    onChange={(e) =>
+                      setGroupForm({ ...groupForm, hedge_delay_seconds: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>最大并发</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={32}
+                    disabled={!groupForm.hedge_enabled}
+                    value={groupForm.hedge_max_parallel}
+                    onChange={(e) =>
+                      setGroupForm({ ...groupForm, hedge_max_parallel: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>最大尝试</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={64}
+                    disabled={!groupForm.hedge_enabled}
+                    value={groupForm.hedge_max_attempts}
+                    onChange={(e) =>
+                      setGroupForm({ ...groupForm, hedge_max_attempts: e.target.value })
+                    }
+                  />
+                </div>
+              </div>
+              <p className="rounded-md border border-amber-200/80 bg-amber-50/80 px-2 py-1.5 text-[11px] leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                网关配额仅结算获胜请求，但所有 attempt 及可能产生的额外上游成本都会保留在使用记录中。
+              </p>
+            </div>
+            <div className="space-y-3 border-t border-border/60 pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <Label>正则响应校验</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    命中规则后直接切换其它路由。非流式检查完整响应；流式在提交前检查前缀。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  checked={groupForm.response_validation_enabled}
+                  onCheckedChange={(v) =>
+                    setGroupForm({ ...groupForm, response_validation_enabled: v })
+                  }
+                />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <Label>流式前缀（字节）</Label>
+                  <Input
+                    type="number"
+                    min={1024}
+                    max={1048576}
+                    disabled={!groupForm.response_validation_enabled}
+                    value={groupForm.response_validation_prefix_bytes}
+                    onChange={(e) =>
+                      setGroupForm({
+                        ...groupForm,
+                        response_validation_prefix_bytes: e.target.value,
+                      })
+                    }
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>前缀等待（毫秒）</Label>
+                  <Input
+                    type="number"
+                    min={100}
+                    max={30000}
+                    disabled={!groupForm.response_validation_enabled}
+                    value={groupForm.response_validation_prefix_timeout_ms}
+                    onChange={(e) =>
+                      setGroupForm({
+                        ...groupForm,
+                        response_validation_prefix_timeout_ms: e.target.value,
+                      })
+                    }
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         </div>
         <DialogFooter className="shrink-0">

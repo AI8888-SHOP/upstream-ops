@@ -3,6 +3,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -42,6 +43,13 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.POST("/groups/:id/models/sync", func(c *gin.Context) { syncGatewayGroupModels(c, d) })
 		gp.POST("/groups/:id/models/test", func(c *gin.Context) { testGatewayGroupModel(c, d) })
 
+		// response validation rules
+		gp.GET("/groups/:id/response-rules", func(c *gin.Context) { listGatewayGroupResponseRules(c, d) })
+		gp.POST("/groups/:id/response-rules", func(c *gin.Context) { createGatewayGroupResponseRule(c, d) })
+		gp.GET("/response-rules/:id", func(c *gin.Context) { getGatewayResponseRule(c, d) })
+		gp.PUT("/response-rules/:id", func(c *gin.Context) { updateGatewayResponseRule(c, d) })
+		gp.DELETE("/response-rules/:id", func(c *gin.Context) { deleteGatewayResponseRule(c, d) })
+
 		// key ops
 		gp.PUT("/keys/:id", func(c *gin.Context) { updateGatewayKey(c, d) })
 		gp.DELETE("/keys/:id", func(c *gin.Context) { deleteGatewayKey(c, d) })
@@ -70,6 +78,257 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.PUT("/prices", func(c *gin.Context) { upsertGatewayPrice(c, d) })
 		gp.DELETE("/prices/:id", func(c *gin.Context) { deleteGatewayPrice(c, d) })
 	}
+}
+
+type gatewayResponseRuleCreateInput struct {
+	Name          string `json:"name"`
+	Enabled       *bool  `json:"enabled"`
+	Priority      int    `json:"priority"`
+	Pattern       string `json:"pattern"`
+	Target        string `json:"target"`
+	ModelsJSON    string `json:"models_json"`
+	ProtocolsJSON string `json:"protocols_json"`
+	Models        []string `json:"models"`
+	Protocols     []string `json:"protocols"`
+}
+
+type gatewayResponseRuleUpdateInput struct {
+	Name          *string `json:"name"`
+	Enabled       *bool   `json:"enabled"`
+	Priority      *int    `json:"priority"`
+	Pattern       *string `json:"pattern"`
+	Target        *string `json:"target"`
+	ModelsJSON    *string `json:"models_json"`
+	ProtocolsJSON *string `json:"protocols_json"`
+	Models        *[]string `json:"models"`
+	Protocols     *[]string `json:"protocols"`
+}
+
+type gatewayResponseRuleView struct {
+	storage.GatewayResponseRule
+	Models    []string `json:"models"`
+	Protocols []string `json:"protocols"`
+}
+
+func responseRuleView(item storage.GatewayResponseRule) gatewayResponseRuleView {
+	view := gatewayResponseRuleView{GatewayResponseRule: item, Models: []string{}, Protocols: []string{}}
+	_ = json.Unmarshal([]byte(item.ModelsJSON), &view.Models)
+	_ = json.Unmarshal([]byte(item.ProtocolsJSON), &view.Protocols)
+	return view
+}
+
+func responseRuleViews(items []storage.GatewayResponseRule) []gatewayResponseRuleView {
+	views := make([]gatewayResponseRuleView, 0, len(items))
+	for _, item := range items {
+		views = append(views, responseRuleView(item))
+	}
+	return views
+}
+
+func encodeResponseRuleList(values []string) (string, error) {
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func gatewayResponseRuleRepo(d *Deps) *storage.GatewayResponseRules {
+	if d == nil {
+		return nil
+	}
+	if d.GatewayResponseRules != nil {
+		return d.GatewayResponseRules
+	}
+	if d.DB == nil {
+		return nil
+	}
+	return storage.NewGatewayResponseRules(d.DB)
+}
+
+func listGatewayGroupResponseRules(c *gin.Context, d *Deps) {
+	groupID, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group id"})
+		return
+	}
+	if _, err := d.Gateway.GetGroup(groupID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "gateway group not found"})
+		return
+	}
+	repo := gatewayResponseRuleRepo(d)
+	if repo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "response rule repository unavailable"})
+		return
+	}
+	items, err := repo.ListByGroupID(groupID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": responseRuleViews(items)})
+}
+
+func createGatewayGroupResponseRule(c *gin.Context, d *Deps) {
+	groupID, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group id"})
+		return
+	}
+	if _, err := d.Gateway.GetGroup(groupID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "gateway group not found"})
+		return
+	}
+	var in gatewayResponseRuleCreateInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	enabled := true
+	if in.Enabled != nil {
+		enabled = *in.Enabled
+	}
+	modelsJSON, protocolsJSON := in.ModelsJSON, in.ProtocolsJSON
+	if in.Models != nil {
+		modelsJSON, err = encodeResponseRuleList(in.Models)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if in.Protocols != nil {
+		protocolsJSON, err = encodeResponseRuleList(in.Protocols)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	item := &storage.GatewayResponseRule{
+		GatewayGroupID: groupID,
+		Name:           in.Name,
+		Enabled:        enabled,
+		Priority:       in.Priority,
+		Pattern:        in.Pattern,
+		Target:         in.Target,
+		ModelsJSON:     modelsJSON,
+		ProtocolsJSON:  protocolsJSON,
+	}
+	repo := gatewayResponseRuleRepo(d)
+	if repo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "response rule repository unavailable"})
+		return
+	}
+	if err := repo.Create(item); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, responseRuleView(*item))
+}
+
+func getGatewayResponseRule(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid response rule id"})
+		return
+	}
+	repo := gatewayResponseRuleRepo(d)
+	if repo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "response rule repository unavailable"})
+		return
+	}
+	item, err := repo.FindByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "response rule not found"})
+		return
+	}
+	c.JSON(http.StatusOK, responseRuleView(*item))
+}
+
+func updateGatewayResponseRule(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid response rule id"})
+		return
+	}
+	repo := gatewayResponseRuleRepo(d)
+	if repo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "response rule repository unavailable"})
+		return
+	}
+	item, err := repo.FindByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "response rule not found"})
+		return
+	}
+	var in gatewayResponseRuleUpdateInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if in.Name != nil {
+		item.Name = *in.Name
+	}
+	if in.Enabled != nil {
+		item.Enabled = *in.Enabled
+	}
+	if in.Priority != nil {
+		item.Priority = *in.Priority
+	}
+	if in.Pattern != nil {
+		item.Pattern = *in.Pattern
+	}
+	if in.Target != nil {
+		item.Target = *in.Target
+	}
+	if in.ModelsJSON != nil {
+		item.ModelsJSON = *in.ModelsJSON
+	}
+	if in.ProtocolsJSON != nil {
+		item.ProtocolsJSON = *in.ProtocolsJSON
+	}
+	if in.Models != nil {
+		encoded, err := encodeResponseRuleList(*in.Models)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		item.ModelsJSON = encoded
+	}
+	if in.Protocols != nil {
+		encoded, err := encodeResponseRuleList(*in.Protocols)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		item.ProtocolsJSON = encoded
+	}
+	if err := repo.Update(item); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, responseRuleView(*item))
+}
+
+func deleteGatewayResponseRule(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid response rule id"})
+		return
+	}
+	repo := gatewayResponseRuleRepo(d)
+	if repo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "response rule repository unavailable"})
+		return
+	}
+	if _, err := repo.FindByID(id); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "response rule not found"})
+		return
+	}
+	if err := repo.Delete(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func listGatewayProviders(c *gin.Context, d *Deps) {

@@ -53,6 +53,37 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.FirstTokenTimeoutSec != nil {
 		ftTimeout = a.clampFirstTokenTimeoutSec(*in.FirstTokenTimeoutSec)
 	}
+	hedgeEnabled := gwDefaults.Hedge.Enabled
+	if in.HedgeEnabled != nil {
+		hedgeEnabled = *in.HedgeEnabled
+	}
+	hedgeDelay, hedgeParallel, hedgeAttempts := gwDefaults.Hedge.DelaySeconds, gwDefaults.Hedge.MaxParallel, gwDefaults.Hedge.MaxAttempts
+	if in.HedgeDelaySeconds != nil {
+		hedgeDelay = *in.HedgeDelaySeconds
+	}
+	if in.HedgeMaxParallel != nil {
+		hedgeParallel = *in.HedgeMaxParallel
+	}
+	if in.HedgeMaxAttempts != nil {
+		hedgeAttempts = *in.HedgeMaxAttempts
+	}
+	hedgeDelay, hedgeParallel, hedgeAttempts = a.clampGroupHedgePolicy(hedgeDelay, hedgeParallel, hedgeAttempts)
+	validationEnabled := gwDefaults.ResponseValidation.Enabled
+	if in.ResponseValidationEnabled != nil {
+		validationEnabled = *in.ResponseValidationEnabled
+	}
+	validationMode := gwDefaults.ResponseValidation.StreamMode
+	if in.ResponseValidationStreamMode != nil {
+		validationMode = *in.ResponseValidationStreamMode
+	}
+	prefixBytes, prefixTimeoutMS := gwDefaults.ResponseValidation.PrefixBytes, gwDefaults.ResponseValidation.PrefixTimeoutMS
+	if in.ResponseValidationPrefixBytes != nil {
+		prefixBytes = *in.ResponseValidationPrefixBytes
+	}
+	if in.ResponseValidationPrefixTimeoutMS != nil {
+		prefixTimeoutMS = *in.ResponseValidationPrefixTimeoutMS
+	}
+	validationMode, prefixBytes, prefixTimeoutMS = a.clampGroupResponseValidationPolicy(validationMode, prefixBytes, prefixTimeoutMS)
 	rateResort := false
 	if in.RateResortEnabled != nil {
 		rateResort = *in.RateResortEnabled
@@ -78,6 +109,14 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		FailoverOn4xx:        failoverOn4xx,
 		CooldownSeconds:      cooldown,
 		FirstTokenTimeoutSec: ftTimeout,
+		HedgeEnabled:         hedgeEnabled,
+		HedgeDelaySeconds:    hedgeDelay,
+		HedgeMaxParallel:     hedgeParallel,
+		HedgeMaxAttempts:     hedgeAttempts,
+		ResponseValidationEnabled:         validationEnabled,
+		ResponseValidationStreamMode:      validationMode,
+		ResponseValidationPrefixBytes:     prefixBytes,
+		ResponseValidationPrefixTimeoutMS: prefixTimeoutMS,
 		UserAgent:            strings.TrimSpace(in.UserAgent),
 	}
 	if err := a.Groups.Create(item); err != nil {
@@ -160,6 +199,36 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	if in.FirstTokenTimeoutSec != nil {
 		item.FirstTokenTimeoutSec = a.clampFirstTokenTimeoutSec(*in.FirstTokenTimeoutSec)
 	}
+	if in.HedgeEnabled != nil {
+		item.HedgeEnabled = *in.HedgeEnabled
+	}
+	hd, hp, ha := item.HedgeDelaySeconds, item.HedgeMaxParallel, item.HedgeMaxAttempts
+	if in.HedgeDelaySeconds != nil {
+		hd = *in.HedgeDelaySeconds
+	}
+	if in.HedgeMaxParallel != nil {
+		hp = *in.HedgeMaxParallel
+	}
+	if in.HedgeMaxAttempts != nil {
+		ha = *in.HedgeMaxAttempts
+	}
+	item.HedgeDelaySeconds, item.HedgeMaxParallel, item.HedgeMaxAttempts = a.clampGroupHedgePolicy(hd, hp, ha)
+	if in.ResponseValidationEnabled != nil {
+		item.ResponseValidationEnabled = *in.ResponseValidationEnabled
+	}
+	validationMode := item.ResponseValidationStreamMode
+	if in.ResponseValidationStreamMode != nil {
+		validationMode = *in.ResponseValidationStreamMode
+	}
+	prefixBytes, prefixTimeoutMS := item.ResponseValidationPrefixBytes, item.ResponseValidationPrefixTimeoutMS
+	if in.ResponseValidationPrefixBytes != nil {
+		prefixBytes = *in.ResponseValidationPrefixBytes
+	}
+	if in.ResponseValidationPrefixTimeoutMS != nil {
+		prefixTimeoutMS = *in.ResponseValidationPrefixTimeoutMS
+	}
+	item.ResponseValidationStreamMode, item.ResponseValidationPrefixBytes, item.ResponseValidationPrefixTimeoutMS =
+		a.clampGroupResponseValidationPolicy(validationMode, prefixBytes, prefixTimeoutMS)
 	if in.UserAgent != nil {
 		item.UserAgent = strings.TrimSpace(*in.UserAgent)
 	}

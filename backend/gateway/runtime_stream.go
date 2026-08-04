@@ -142,7 +142,14 @@ func (rt *Runtime) forwardStream(
 	// 剥离客户端取消：否则 client disconnect 会连带取消 upstream body，usage 永远为 0
 	upBase := context.Background()
 	if ctx != nil {
-		upBase = context.WithoutCancel(ctx)
+		// Normal requests deliberately drain after client disconnect. Hedge
+		// attempts opt in to a preserved, attempt-local cancel so losers stop
+		// promptly before their buffered prefix can grow.
+		if preserveAttemptCancel(ctx) {
+			upBase = ctx
+		} else {
+			upBase = context.WithoutCancel(ctx)
+		}
 	}
 	gwCfg := rt.gatewayRuntime()
 	upCtx, upCancel := context.WithTimeout(upBase, gwCfg.ForwardTimeout())
@@ -247,9 +254,13 @@ func (rt *Runtime) forwardStreamBuffered(
 		return streamAttemptResult{Status: status, Headers: headers, Body: clientBody, FirstTokenMS: ft, Tokens: tokens, Err: err}
 	}
 	if _, err := c.Writer.Write(clientBody); err != nil {
+		var rejected *responseRejectedError
+		if errors.As(err, &rejected) {
+			return streamAttemptResult{Status: status, Headers: headers, Body: clientBody, FirstTokenMS: ft, Tokens: tokens, Err: err, ValidationRejection: rejected.Result}
+		}
 		return streamAttemptResult{
 			Status: status, Headers: headers, FirstTokenMS: ft, Tokens: tokens,
-			Committed: true, ClientDisconnected: true, StreamErr: errClientDisconnected,
+			Committed: streamWriterActuallyCommitted(c), ClientDisconnected: true, StreamErr: errClientDisconnected,
 		}
 	}
 	rt.flushWriter(c)
@@ -260,7 +271,7 @@ func (rt *Runtime) forwardStreamBuffered(
 	// 缓冲路径整包写出成功即视为下游完整交付（含转换后的终端帧）。
 	return streamAttemptResult{
 		Status: status, Headers: headers, FirstTokenMS: ft, Tokens: tokens,
-		Committed: true, DownstreamComplete: true,
+		Committed: streamWriterActuallyCommitted(c), DownstreamComplete: true,
 	}
 }
 
@@ -387,6 +398,7 @@ func (rt *Runtime) forwardStreamIncremental(
 	var (
 		pendingLines     []string
 		sawUpstreamData  bool
+		streamStarted    bool
 		errorEventSent   bool
 		lastDownstreamAt = time.Now()
 		usageBuf         bytes.Buffer
@@ -409,16 +421,17 @@ func (rt *Runtime) forwardStreamIncremental(
 		if len(frames) == 0 {
 			return nil
 		}
-		if !result.Committed {
+		if !streamStarted {
 			if err := rt.commitSSEHeaders(c, headers); err != nil {
 				return err
 			}
-			result.Committed = true
+			streamStarted = true
 			ms := time.Since(start).Milliseconds()
 			result.FirstTokenMS = &ms
 			stopFirstTimer()
 		}
-		if result.ClientDisconnected {
+		result.Committed = streamWriterActuallyCommitted(c)
+		if result.ClientDisconnected && result.Committed {
 			return nil
 		}
 		for _, f := range frames {
@@ -426,6 +439,16 @@ func (rt *Runtime) forwardStreamIncremental(
 				continue
 			}
 			if _, err := c.Writer.Write(f); err != nil {
+				var rejected *responseRejectedError
+				if errors.As(err, &rejected) {
+					result.ValidationRejection = rejected.Result
+					result.Err = err
+					return err
+				}
+				if errors.Is(err, errStreamGateLost) {
+					result.Err = err
+					return err
+				}
 				result.ClientDisconnected = true
 				return err
 			}
@@ -434,6 +457,7 @@ func (rt *Runtime) forwardStreamIncremental(
 			}
 		}
 		rt.flushWriter(c)
+		result.Committed = streamWriterActuallyCommitted(c)
 		lastDownstreamAt = time.Now()
 		return nil
 	}
@@ -495,7 +519,7 @@ func (rt *Runtime) forwardStreamIncremental(
 		_ = rt.writeStreamTerminalError(c, clientKind, errType, msg)
 	}
 
-	closeConverters := func() {
+	closeConverters := func() error {
 		var frames [][]byte
 		switch {
 		case anth2oai != nil:
@@ -511,7 +535,7 @@ func (rt *Runtime) forwardStreamIncremental(
 		case chat2resp != nil:
 			frames = chat2resp.Close()
 		}
-		_ = writeFrames(frames)
+		return writeFrames(frames)
 	}
 
 	for {
@@ -616,26 +640,42 @@ func (rt *Runtime) forwardStreamIncremental(
 			if !ok {
 				// 上游结束
 				if len(pendingLines) > 0 {
-					_ = processEvent(pendingLines)
+					if err := processEvent(pendingLines); err != nil {
+						if result.Err == nil {
+							result.Err = err
+						}
+						return result
+					}
 					pendingLines = pendingLines[:0]
 				}
-				if !result.Committed {
+				if !streamStarted {
 					// 空流
 					result.Body = usageBuf.Bytes()
 					result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
 					// 仍写出转换收尾（可能只有 [DONE]）
-					closeConverters()
-					if !result.Committed {
+					if err := closeConverters(); err != nil {
+						if result.Err == nil {
+							result.Err = err
+						}
+						return result
+					}
+					if !streamStarted {
 						// 无任何输出：视为成功空流，commit 空 SSE 结束
-						if err := rt.commitSSEHeaders(c, headers); err == nil {
-							result.Committed = true
-							if anth2oai == nil && oai2anth == nil && resp2anth == nil && resp2oai == nil && anth2resp == nil && chat2resp == nil {
-								doneFrame := []byte("data: [DONE]\n\n")
-								if _, werr := c.Writer.Write(doneFrame); werr == nil {
-									result.DownstreamComplete = true
+						if anth2oai == nil && oai2anth == nil && resp2anth == nil && resp2oai == nil && anth2resp == nil && chat2resp == nil {
+							doneFrame := []byte("data: [DONE]\n\n")
+							if err := writeFrames([][]byte{doneFrame}); err != nil {
+								if result.Err == nil {
+									result.Err = err
 								}
-								rt.flushWriter(c)
+								return result
 							}
+							result.DownstreamComplete = true
+						} else if err := rt.commitSSEHeaders(c, headers); err == nil {
+							streamStarted = true
+							result.Committed = streamWriterActuallyCommitted(c)
+						} else {
+							result.Err = err
+							return result
 						}
 					}
 					result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
@@ -643,7 +683,12 @@ func (rt *Runtime) forwardStreamIncremental(
 					return result
 				}
 				// 已 commit：收尾转换（客户端已断则 writeFrames 会跳过写出）
-				closeConverters()
+				if err := closeConverters(); err != nil {
+					if result.Err == nil {
+						result.Err = err
+					}
+					return result
+				}
 				result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
 				rt.finalizeStreamClientDisconnect(&result)
 				return result
@@ -689,8 +734,11 @@ func (rt *Runtime) forwardStreamIncremental(
 						result.FirstTokenMS = &ms
 					}
 				}
-				if err := processEvent(pendingLines); err != nil && !result.ClientDisconnected {
-					// write error already flagged disconnect
+				if err := processEvent(pendingLines); err != nil {
+					if result.Err == nil {
+						result.Err = err
+					}
+					return result
 				}
 				pendingLines = pendingLines[:0]
 				continue

@@ -25,6 +25,14 @@ type CreateGroupInput struct {
 	FailoverOn4xx        *bool  `json:"failover_on_4xx"`
 	CooldownSeconds      *int   `json:"cooldown_seconds"`
 	FirstTokenTimeoutSec *int   `json:"first_token_timeout_sec"`
+	HedgeEnabled         *bool    `json:"hedge_enabled"`
+	HedgeDelaySeconds    *float64 `json:"hedge_delay_seconds"`
+	HedgeMaxParallel     *int     `json:"hedge_max_parallel"`
+	HedgeMaxAttempts     *int     `json:"hedge_max_attempts"`
+	ResponseValidationEnabled         *bool   `json:"response_validation_enabled"`
+	ResponseValidationStreamMode      *string `json:"response_validation_stream_mode"`
+	ResponseValidationPrefixBytes     *int    `json:"response_validation_prefix_bytes"`
+	ResponseValidationPrefixTimeoutMS *int    `json:"response_validation_prefix_timeout_ms"`
 	// UserAgent 组级统一 UA；路由 mode=group 时使用。
 	UserAgent string `json:"user_agent"`
 }
@@ -46,6 +54,14 @@ type UpdateGroupInput struct {
 	FailoverOn4xx        *bool   `json:"failover_on_4xx"`
 	CooldownSeconds      *int    `json:"cooldown_seconds"`
 	FirstTokenTimeoutSec *int    `json:"first_token_timeout_sec"`
+	HedgeEnabled         *bool    `json:"hedge_enabled"`
+	HedgeDelaySeconds    *float64 `json:"hedge_delay_seconds"`
+	HedgeMaxParallel     *int     `json:"hedge_max_parallel"`
+	HedgeMaxAttempts     *int     `json:"hedge_max_attempts"`
+	ResponseValidationEnabled         *bool   `json:"response_validation_enabled"`
+	ResponseValidationStreamMode      *string `json:"response_validation_stream_mode"`
+	ResponseValidationPrefixBytes     *int    `json:"response_validation_prefix_bytes"`
+	ResponseValidationPrefixTimeoutMS *int    `json:"response_validation_prefix_timeout_ms"`
 	// UserAgent 空串=清除组级 UA。
 	UserAgent *string `json:"user_agent"`
 }

@@ -76,8 +76,10 @@ UpstreamOps focuses on these problems:
   - Per-route `upstream_protocol`: `auto` / `openai` (Chat) / `openai_responses` / `anthropic`
 - Failover on network errors, 429, and 5xx with temporary pause; optional “failover on 4xx”; group-level retry count, max switches, and cooldown.
 - **First-token timeout** (optional): fail fast on the first byte when another route can still be tried.
+- **Concurrent fallback (hedging, optional and off by default)**: when the primary has no valid result after the group delay, start other routes up to the configured limits. The first validated attempt wins and in-flight losers are canceled. `maxParallel` includes the primary and `maxAttempts` caps all attempts; image/video generation and Realtime requests are always excluded.
+- **Regex response validation (optional and off by default)**: priority-ordered rules inspect `assistant_text`, `raw_body`, or `error_message`, with optional model/protocol filters. A match rejects that attempt and switches directly to another route. Non-stream responses are checked in full; streams are checked through a configurable pre-commit prefix gate.
 - User-Agent modes: `passthrough` / `group` / `custom`; admin model pull and probe fall back to the default UA.
-- Usage logs aligned with sub2api fields (endpoint, protocol, tokens including cache buckets, cost, latency, first-token latency, success/error detail) with list, stats, model filters, and cleanup.
+- Usage logs aligned with sub2api fields (endpoint, protocol, tokens including cache buckets, cost, latency, first-token latency, attempt kind/status, winner, response rule, and error detail) with list, stats, model filters, and cleanup.
 - Pricing: built-in unit prices (overridable) and `actual_cost = base_cost × account_billing_rate` (same conversion rules as upstream sync).
 - Runtime knobs (hot-reloadable `gateway` section in system settings): forward timeout, models cache TTL, temp pause, batch concurrency, usage error truncation, and more.
 - Admin UI: Dock **Request Gateway** (`/gateway`); management APIs under `/api/gateway/*` (admin auth required).
@@ -277,7 +279,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=replace-with-a-strong-password
 ```
 
-Docker pulls `ghcr.io/bejix/upstream-ops:${IMAGE_TAG:-latest}` by default. Configuration and data are stored in the host `data/` directory.
+Docker pulls `${IMAGE_REPOSITORY:-ghcr.io/ai8888-shop/upstream-ops}:${IMAGE_TAG:-latest}` by default, so no local compilation is required. Override `IMAGE_REPOSITORY` when mirroring the project to another registry. Configuration and data are stored in the host `data/` directory.
 
 Start:
 
@@ -288,8 +290,17 @@ docker compose up -d
 Default URL:
 
 ```text
-http://localhost:8080
+http://localhost:8418
 ```
+
+Check the container and health endpoint:
+
+```bash
+docker compose ps
+curl -fsS http://localhost:8418/healthz
+```
+
+`HTTP_PORT` changes only the host mapping. The container and health check keep the original default port `8418`.
 
 Default database file inside the container:
 
@@ -301,16 +312,21 @@ The host file is `data/upstream-ops.db`. Runtime system settings are persisted t
 
 ### Pin the Image Version
 
-The default image tag comes from `.env`:
+The default image repository and tag come from `.env`:
 
 ```env
+IMAGE_REPOSITORY=ghcr.io/ai8888-shop/upstream-ops
 IMAGE_TAG=latest
 ```
+
+The `CI` workflow runs Go tests, native Linux/Windows/macOS builds, frontend checks, and a no-push Docker build for pull requests and every branch push. The existing `Publish Docker Image` workflow pushes to the current public repository's GHCR package only from `main`, a version tag, or a manual run. After the first fork release, make sure its Package visibility is public before relying on anonymous Docker pulls.
+
+Commit only `.env.example` to a public repository. Never commit `.env`, `data/`, `config.yaml`, `APP_SECRET`, upstream API keys, admin/database passwords, or runtime credentials to a workflow or README; publishing the image does not require those secrets.
 
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.8
+IMAGE_TAG=v0.0.9
 ```
 
 ## MySQL Deployment
@@ -337,13 +353,15 @@ MYSQL_PORT=33069
 ### Basic
 
 ```env
-HTTP_PORT=8080
+HTTP_PORT=8418
+IMAGE_REPOSITORY=ghcr.io/ai8888-shop/upstream-ops
 IMAGE_TAG=latest
 SERVER_MODE=release
 LOG_LEVEL=info
 ```
 
 - `HTTP_PORT`: host port.
+- `IMAGE_REPOSITORY`: GHCR image path; set this to the public fork's package.
 - `IMAGE_TAG`: Docker image tag.
 - `SERVER_MODE`: Gin mode, usually `release`.
 - `LOG_LEVEL`: log level.
@@ -455,6 +473,16 @@ gateway:
   usageErrorMsgRunes: 500
   usageErrorHeaderValueRunes: 8192
   usageErrorHeadersJSONBytes: 65536
+  hedge:
+    enabled: false
+    delaySeconds: 10
+    maxParallel: 2
+    maxAttempts: 4
+  responseValidation:
+    enabled: false
+    streamMode: prefix
+    prefixBytes: 8192
+    prefixTimeoutMs: 2000
 ```
 
 - `proxy.enabled`: enables global proxy.
@@ -464,7 +492,7 @@ gateway:
 - `proxy.username` / `proxy.password`: optional proxy authentication.
 - `upstream.timeoutSeconds`: upstream request timeout.
 - `upstream.userAgent`: upstream request `User-Agent` (also the default UA fallback for gateway admin model pull / probe).
-- `gateway.*`: request-gateway runtime knobs (forward timeout, models cache, temp pause, batch concurrency, usage error truncation, and more); hot-reloadable from system settings.
+- `gateway.*`: request-gateway runtime knobs plus the hedge / response-validation defaults for new groups; hot-reloadable from system settings without overwriting policies on existing groups.
 - When `proxy.enabled=false`, per-channel `proxy_enabled` settings do not take effect.
 
 Proxy test endpoint:
@@ -662,7 +690,7 @@ The request gateway aggregates multiple upstreams (monitored NewAPI/Sub2API chan
 
 | Concept | Description |
 |---------|-------------|
-| **Group** | Configuration unit: route table, group-level model map, model list, retry / failover / cooldown / first-token timeout, group UA |
+| **Group** | Configuration unit: route table, group-level model map, model list, retry / failover / cooldown / first-token timeout, hedging, response validation, group UA |
 | **Key** | Client auth credential bound to a group; supports quota and IP allow/deny lists; plaintext is shown only on create/reveal |
 | **Route** | A schedulable upstream target: monitor channel + source group, or a direct Provider; weight, ratio conversion, protocol, UA policy |
 | **Provider** | Gateway-managed base URL + API key + default billing ratio; no need to create a monitor channel first |
@@ -675,15 +703,17 @@ The request gateway aggregates multiple upstreams (monitored NewAPI/Sub2API chan
    - Option A: an existing monitored NewAPI/Sub2API channel and the source group to use.
    - Option B: create a **Provider** on the gateway page (base URL, key, protocol, default billing ratio).
 2. **Create a gateway group**
-   Sort direction (ratio asc/desc), reorder-after-scan, retry/failover, optional first-token timeout, group UA.
+   Sort direction (ratio asc/desc), reorder-after-scan, retry/failover, and optional first-token timeout, hedging, regex response validation, and group UA.
 3. **Add routes**
    Choose monitor or provider; set weight, ratio conversion, `upstream_protocol`, UA mode; optionally **Ensure upstream keys** (monitor routes only).
 4. **Models**
    Configure group/route maps; use Preview / Sync / Probe to maintain the model list.
-5. **Create a gateway key**
+5. **Response rules (optional)**
+   On the group's **Response rules** tab, create Go RE2 patterns, choose an inspection target, and optionally filter models/protocols; then enable regex response validation in **Edit group**.
+6. **Create a gateway key**
    Give clients the plaintext `sk-...` (shown once; use **Reveal** later).
-6. **Client**
-   Base URL points at this service (e.g. `http://host:8080`), paths under `/v1/...`, auth as below.
+7. **Client**
+   Base URL points at this service (e.g. `http://host:8418`), paths under `/v1/...`, auth as below.
 
 ### Client authentication
 
@@ -725,13 +755,11 @@ Streaming: body `stream: true` (or equivalent) uses SSE. Chat streams try to for
 ```text
 Client → auth (key / IP / quota) → read body → take model
        → order schedulable routes by group policy
-       → for each route:
-            model map → resolve upstream protocol (auto / fixed)
-            → convert body / path if needed
-            → HTTP to upstream (optional first-token timeout)
-            → on success: write client response (stream may convert incrementally) + record usage
-            → on fail + failover allowed: temp-pause route, try next
-       → all failed → return last error
+       → start primary immediately; hedge may start other routes after its delay
+       → each attempt: model map → protocol conversion → upstream HTTP → validation
+       → first valid result becomes winner; cancel unfinished losers; deliver to client
+       → regex match / upstream failure switches directly to another route per policy
+       → record every attempt; all failed → return last error
 ```
 
 ### Protocols and conversion
@@ -765,13 +793,20 @@ Route field `upstream_protocol`:
 - When the group enables reorder-after-ratio-scan, ratio scan rewrites route order and billing-ratio snapshots for related groups.
 - Cost: `base_cost` from model unit price × token buckets; `actual_cost = base_cost × account billing ratio` (multiplied once).
 
-### Failover and first-token timeout
+### Failover, hedging, and response validation
 
 - Default failover: no response, 429, 5xx; with group “failover on 4xx”, all 4xx may failover too.
 - Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
 - Group: `retry_count`, `failover_max`, `cooldown_seconds`.
 - **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
-- Once valid SSE has been committed to the client, the gateway generally does not switch routes (avoids half-stream dual responses).
+- **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.
+- Image generation, video generation, and Realtime/WebSocket operations always use the original sequential policy. Multimodal text requests that only include images as input are not excluded.
+- **Regex response validation (off by default)** uses Go RE2 syntax and checks rules in ascending numeric priority. Targets are `assistant_text` (client-visible text after protocol conversion), `raw_body`, and `error_message`. Empty model/protocol filters match all values; `*` / `?` globs are supported.
+- A non-stream response is checked in full before delivery. A match records the attempt as `regex_reject` / `rejected` and switches directly to another route without retrying the same route.
+- Streaming uses the fixed `prefix` mode: buffer at most `response_validation_prefix_bytes` or wait `response_validation_prefix_timeout_ms` before first commit. A match after commit cannot safely switch routes and is audit-only with the post-commit marker.
+- Once valid SSE has been committed to the client, the gateway does not switch routes (avoids half-stream dual responses).
+
+In the admin UI, configure hedge/validation switches and limits under **Request Gateway → Edit group**, and maintain regexes on the group's **Response rules** tab. The equivalent system settings are defaults copied only into newly created groups; saved groups keep their own policy.
 
 ### Model list modes
 
@@ -809,13 +844,17 @@ A group may mix both route types; scheduling and failover rules are the same.
 
 ### Usage and billing records
 
-Each forward attempt (success or failure) tries to write a usage row, field style aligned with sub2api for reconciliation:
+Every primary / retry / failover / hedge / regex-rejection attempt (accepted, failed, rejected, or canceled) tries to write a usage row, field style aligned with sub2api for reconciliation:
 
 - Correlation: gateway request id, group, key, route, endpoint, inbound/upstream protocol
 - Tokens: prompt / completion / total, plus cache read/write buckets when the upstream reports them
 - Cost: `base_cost` (unit price × tokens), `actual_cost` (× account billing ratio once)
 - Latency: total latency, first-token latency (streaming)
+- Scheduling: `attempt`, `attempt_kind`, `attempt_status`, `winner`, matched response rule, and post-commit marker
 - Outcome: success / failure; failures store truncated upstream error summary and redacted headers
+- Extra cost: `estimated_cost` and `estimated_extra_cost` on loser/rejected attempts for upstream-cost reconciliation
+
+**A gateway key's `quota_used` increases exactly once, using only the successfully delivered winner's `actual_cost`.** Losers, regex rejections, cancellations, and terminal failures do not consume gateway quota, but their attempts and possible upstream costs remain available for audit. Request finalization is keyed by request id so concurrent completion or replay cannot settle twice; an all-failed request has no winner and charges zero quota.
 
 Admin UI: list filters, stats aggregation, model filter options, cleanup API. Clients may call `GET /v1/usage` with a gateway key (see actual response shape).
 
@@ -838,7 +877,7 @@ Canonical list: `GET /v1` discovery payload at runtime.
 **Chat client → Claude upstream (route protocol anthropic)**
 
 ```bash
-curl -s http://127.0.0.1:8080/v1/chat/completions \
+curl -s http://127.0.0.1:8418/v1/chat/completions \
   -H "Authorization: Bearer sk-YOUR_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -851,7 +890,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 **Anthropic client**
 
 ```bash
-curl -s http://127.0.0.1:8080/v1/messages \
+curl -s http://127.0.0.1:8418/v1/messages \
   -H "x-api-key: sk-YOUR_GATEWAY_KEY" \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
@@ -865,7 +904,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
 **Responses client (streaming)**
 
 ```bash
-curl -sN http://127.0.0.1:8080/v1/responses \
+curl -sN http://127.0.0.1:8418/v1/responses \
   -H "Authorization: Bearer sk-YOUR_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -889,7 +928,7 @@ Exact match first, then `"*"`. When group and route maps both apply, **route map
 
 ### Runtime config (`gateway` section)
 
-Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no process restart). Values ≤0 fall back to built-in defaults:
+Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no process restart). Base runtime values ≤0 fall back to built-in defaults. `hedge` and `responseValidation` are defaults copied when a gateway group is created; they do not overwrite saved groups:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -902,10 +941,34 @@ Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no pr
 | `usageErrorMsgRunes` | 500 | Max error summary runes |
 | `usageErrorHeaderValueRunes` | 8192 | Per error response-header value truncation |
 | `usageErrorHeadersJSONBytes` | 65536 | Max error headers JSON size |
+| `hedge.enabled` | false | Enable hedging by default for new groups |
+| `hedge.delaySeconds` | 10 | Delay ladder for launching additional attempts (0.1-300 seconds) |
+| `hedge.maxParallel` | 2 | Concurrent attempts including the primary (1-32) |
+| `hedge.maxAttempts` | 4 | Total attempt budget (1-64 and not less than `maxParallel`) |
+| `responseValidation.enabled` | false | Enable regex response validation by default for new groups |
+| `responseValidation.streamMode` | `prefix` | Streaming validation mode; currently fixed to `prefix` |
+| `responseValidation.prefixBytes` | 8192 | Maximum stream prefix inspected before commit (1024-1048576 bytes) |
+| `responseValidation.prefixTimeoutMs` | 2000 | Wait from first stream content before accepting the prefix (100-30000 ms) |
+
+Full example with both features disabled by default:
+
+```yaml
+gateway:
+  hedge:
+    enabled: false
+    delaySeconds: 10
+    maxParallel: 2
+    maxAttempts: 4
+  responseValidation:
+    enabled: false
+    streamMode: prefix
+    prefixBytes: 8192
+    prefixTimeoutMs: 2000
+```
 
 Note: `upstream.timeoutSeconds` mainly affects **monitor-side** calls to upstream sites (login, sync). Gateway forward timeout is `gateway.forwardTimeoutSeconds` — do not confuse the two.
 
-Group policy (`retry_count` / `failover_max` / `cooldown_seconds` / first-token timeout, etc.) is configured per group; empty fields fall back to gateway defaults where applicable.
+Group policy (`retry_count` / `failover_max` / `cooldown_seconds` / first-token timeout / hedge / response validation, etc.) is configured per group; new groups use the gateway defaults where applicable.
 
 ### Management APIs (admin auth required)
 
@@ -921,6 +984,8 @@ POST         /api/gateway/groups/:id/routes/ensure-keys
 GET          /api/gateway/groups/:id/models/preview
 POST         /api/gateway/groups/:id/models/sync
 POST         /api/gateway/groups/:id/models/test
+GET/POST     /api/gateway/groups/:id/response-rules
+GET/PUT/DELETE /api/gateway/response-rules/:id
 PUT/DELETE   /api/gateway/keys/:id
 POST         /api/gateway/keys/:id/reveal
 POST         /api/gateway/routes/:id/clear-pause
@@ -935,6 +1000,35 @@ POST         /api/gateway/usage/cleanup
 GET/PUT      /api/gateway/prices
 GET          /api/gateway/prices/defaults
 DELETE       /api/gateway/prices/:id
+```
+
+Group create/update requests accept the policy fields directly, for example:
+
+```json
+{
+  "hedge_enabled": true,
+  "hedge_delay_seconds": 10,
+  "hedge_max_parallel": 2,
+  "hedge_max_attempts": 4,
+  "response_validation_enabled": true,
+  "response_validation_stream_mode": "prefix",
+  "response_validation_prefix_bytes": 8192,
+  "response_validation_prefix_timeout_ms": 2000
+}
+```
+
+Example response-rule create body (`models_json` / `protocols_json` are JSON array strings; `[]` means no filter):
+
+```json
+{
+  "name": "retry temporary upstream replies",
+  "enabled": true,
+  "priority": 10,
+  "pattern": "(?i)temporarily unavailable|please retry",
+  "target": "assistant_text",
+  "models_json": "[\"gpt-*\"]",
+  "protocols_json": "[\"openai_chat\",\"openai_responses\"]"
+}
 ```
 
 ### Backend layout (developers)

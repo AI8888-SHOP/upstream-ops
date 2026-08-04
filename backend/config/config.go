@@ -2,7 +2,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,6 +153,14 @@ const (
 	DefaultGatewayUsageErrorMsgRunes         = 500
 	DefaultGatewayUsageErrorHeaderValueRunes = 8 * 1024
 	DefaultGatewayUsageErrorHeadersJSONBytes = 64 * 1024
+	DefaultGatewayHedgeDelaySeconds           = 10.0
+	DefaultGatewayHedgeMaxParallel            = 2
+	DefaultGatewayHedgeMaxAttempts            = 4
+	MaxGatewayHedgeParallel                   = 32
+	MaxGatewayHedgeAttempts                   = 64
+	DefaultGatewayResponseValidationMode      = "prefix"
+	DefaultGatewayResponseValidationBytes     = 8 * 1024
+	DefaultGatewayResponseValidationTimeoutMS = 2 * 1000
 )
 
 type UpstreamConfig struct {
@@ -186,6 +196,115 @@ type GatewayConfig struct {
 	UsageErrorMsgRunes         int `mapstructure:"usageErrorMsgRunes" yaml:"usageErrorMsgRunes" json:"usageErrorMsgRunes"`
 	UsageErrorHeaderValueRunes int `mapstructure:"usageErrorHeaderValueRunes" yaml:"usageErrorHeaderValueRunes" json:"usageErrorHeaderValueRunes"`
 	UsageErrorHeadersJSONBytes int `mapstructure:"usageErrorHeadersJSONBytes" yaml:"usageErrorHeadersJSONBytes" json:"usageErrorHeadersJSONBytes"`
+	// Hedge / ResponseValidation 是新建 GatewayGroup 的默认策略；组内保存后独立生效。
+	Hedge              GatewayHedgeConfig              `mapstructure:"hedge" yaml:"hedge" json:"hedge"`
+	ResponseValidation GatewayResponseValidationConfig `mapstructure:"responseValidation" yaml:"responseValidation" json:"responseValidation"`
+}
+
+type GatewayHedgeConfig struct {
+	Enabled      bool    `mapstructure:"enabled" yaml:"enabled" json:"enabled"`
+	DelaySeconds float64 `mapstructure:"delaySeconds" yaml:"delaySeconds" json:"delaySeconds"`
+	MaxParallel  int     `mapstructure:"maxParallel" yaml:"maxParallel" json:"maxParallel"`
+	MaxAttempts  int     `mapstructure:"maxAttempts" yaml:"maxAttempts" json:"maxAttempts"`
+}
+
+func (h GatewayHedgeConfig) WithDefaults() GatewayHedgeConfig {
+	if math.IsNaN(h.DelaySeconds) || math.IsInf(h.DelaySeconds, 0) || h.DelaySeconds <= 0 {
+		h.DelaySeconds = DefaultGatewayHedgeDelaySeconds
+	}
+	if h.DelaySeconds < 0.1 {
+		h.DelaySeconds = 0.1
+	}
+	if h.DelaySeconds > 300 {
+		h.DelaySeconds = 300
+	}
+	if h.MaxParallel <= 0 {
+		h.MaxParallel = DefaultGatewayHedgeMaxParallel
+	}
+	if h.MaxParallel > MaxGatewayHedgeParallel {
+		h.MaxParallel = MaxGatewayHedgeParallel
+	}
+	if h.MaxAttempts <= 0 {
+		h.MaxAttempts = DefaultGatewayHedgeMaxAttempts
+	}
+	if h.MaxAttempts > MaxGatewayHedgeAttempts {
+		h.MaxAttempts = MaxGatewayHedgeAttempts
+	}
+	if h.MaxAttempts < h.MaxParallel {
+		h.MaxAttempts = h.MaxParallel
+	}
+	return h
+}
+
+func (h GatewayHedgeConfig) Delay() time.Duration {
+	h = h.WithDefaults()
+	return time.Duration(h.DelaySeconds * float64(time.Second))
+}
+
+type GatewayResponseValidationConfig struct {
+	Enabled         bool   `mapstructure:"enabled" yaml:"enabled" json:"enabled"`
+	StreamMode      string `mapstructure:"streamMode" yaml:"streamMode" json:"streamMode"`
+	PrefixBytes     int    `mapstructure:"prefixBytes" yaml:"prefixBytes" json:"prefixBytes"`
+	PrefixTimeoutMS int    `mapstructure:"prefixTimeoutMs" yaml:"prefixTimeoutMs" json:"prefixTimeoutMs"`
+}
+
+func (v GatewayResponseValidationConfig) WithDefaults() GatewayResponseValidationConfig {
+	v.StreamMode = strings.ToLower(strings.TrimSpace(v.StreamMode))
+	if v.StreamMode != DefaultGatewayResponseValidationMode {
+		v.StreamMode = DefaultGatewayResponseValidationMode
+	}
+	if v.PrefixBytes <= 0 {
+		v.PrefixBytes = DefaultGatewayResponseValidationBytes
+	}
+	if v.PrefixBytes < 1024 {
+		v.PrefixBytes = 1024
+	}
+	if v.PrefixBytes > 1024*1024 {
+		v.PrefixBytes = 1024 * 1024
+	}
+	if v.PrefixTimeoutMS <= 0 {
+		v.PrefixTimeoutMS = DefaultGatewayResponseValidationTimeoutMS
+	}
+	if v.PrefixTimeoutMS < 100 {
+		v.PrefixTimeoutMS = 100
+	}
+	if v.PrefixTimeoutMS > 30000 {
+		v.PrefixTimeoutMS = 30000
+	}
+	return v
+}
+
+func (v GatewayResponseValidationConfig) PrefixTimeout() time.Duration {
+	v = v.WithDefaults()
+	return time.Duration(v.PrefixTimeoutMS) * time.Millisecond
+}
+
+// Validate 检查显式配置边界；Load 会在 Viper 默认值展开后调用。
+func (g GatewayConfig) Validate() error {
+	var joined error
+	if math.IsNaN(g.Hedge.DelaySeconds) || math.IsInf(g.Hedge.DelaySeconds, 0) ||
+		g.Hedge.DelaySeconds < 0.1 || g.Hedge.DelaySeconds > 300 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.hedge.delaySeconds must be between 0.1 and 300"))
+	}
+	if g.Hedge.MaxParallel < 1 || g.Hedge.MaxParallel > MaxGatewayHedgeParallel {
+		joined = errors.Join(joined, fmt.Errorf("gateway.hedge.maxParallel must be between 1 and %d", MaxGatewayHedgeParallel))
+	}
+	if g.Hedge.MaxAttempts < 1 || g.Hedge.MaxAttempts > MaxGatewayHedgeAttempts {
+		joined = errors.Join(joined, fmt.Errorf("gateway.hedge.maxAttempts must be between 1 and %d", MaxGatewayHedgeAttempts))
+	}
+	if g.Hedge.MaxAttempts < g.Hedge.MaxParallel {
+		joined = errors.Join(joined, fmt.Errorf("gateway.hedge.maxAttempts must be greater than or equal to maxParallel"))
+	}
+	if strings.ToLower(strings.TrimSpace(g.ResponseValidation.StreamMode)) != DefaultGatewayResponseValidationMode {
+		joined = errors.Join(joined, fmt.Errorf("gateway.responseValidation.streamMode must be prefix"))
+	}
+	if g.ResponseValidation.PrefixBytes < 1024 || g.ResponseValidation.PrefixBytes > 1024*1024 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.responseValidation.prefixBytes must be between 1024 and 1048576"))
+	}
+	if g.ResponseValidation.PrefixTimeoutMS < 100 || g.ResponseValidation.PrefixTimeoutMS > 30000 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.responseValidation.prefixTimeoutMs must be between 100 and 30000"))
+	}
+	return joined
 }
 
 func (g GatewayConfig) WithDefaults() GatewayConfig {
@@ -219,6 +338,8 @@ func (g GatewayConfig) WithDefaults() GatewayConfig {
 	if g.UsageErrorHeadersJSONBytes <= 0 {
 		g.UsageErrorHeadersJSONBytes = DefaultGatewayUsageErrorHeadersJSONBytes
 	}
+	g.Hedge = g.Hedge.WithDefaults()
+	g.ResponseValidation = g.ResponseValidation.WithDefaults()
 	return g
 }
 
@@ -322,6 +443,9 @@ func load(path string, withEnv bool) (*Config, string, error) {
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, "", fmt.Errorf("unmarshal config: %w", err)
 	}
+	if err := cfg.Gateway.Validate(); err != nil {
+		return nil, "", err
+	}
 	cfg.Upstream = cfg.Upstream.WithDefaults()
 	cfg.Gateway = cfg.Gateway.WithDefaults()
 	return cfg, v.ConfigFileUsed(), nil
@@ -334,7 +458,15 @@ func Save(path string, cfg *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir config dir: %w", err)
 	}
-	body, err := yaml.Marshal(cfg)
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	// Persist normalized runtime defaults so a config created by an older
+	// caller remains loadable after new hedge/validation fields are added.
+	normalized := *cfg
+	normalized.Upstream = normalized.Upstream.WithDefaults()
+	normalized.Gateway = normalized.Gateway.WithDefaults()
+	body, err := yaml.Marshal(&normalized)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
@@ -432,6 +564,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gateway.usageErrorMsgRunes", DefaultGatewayUsageErrorMsgRunes)
 	v.SetDefault("gateway.usageErrorHeaderValueRunes", DefaultGatewayUsageErrorHeaderValueRunes)
 	v.SetDefault("gateway.usageErrorHeadersJSONBytes", DefaultGatewayUsageErrorHeadersJSONBytes)
+	v.SetDefault("gateway.hedge.enabled", false)
+	v.SetDefault("gateway.hedge.delaySeconds", DefaultGatewayHedgeDelaySeconds)
+	v.SetDefault("gateway.hedge.maxParallel", DefaultGatewayHedgeMaxParallel)
+	v.SetDefault("gateway.hedge.maxAttempts", DefaultGatewayHedgeMaxAttempts)
+	v.SetDefault("gateway.responseValidation.enabled", false)
+	v.SetDefault("gateway.responseValidation.streamMode", DefaultGatewayResponseValidationMode)
+	v.SetDefault("gateway.responseValidation.prefixBytes", DefaultGatewayResponseValidationBytes)
+	v.SetDefault("gateway.responseValidation.prefixTimeoutMs", DefaultGatewayResponseValidationTimeoutMS)
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")

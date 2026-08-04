@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/bejix/upstream-ops/backend/config"
 )
 
 func (svc *Service) clampGroupRetryPolicy(retryCount, failoverMax, cooldownSec int) (int, int, int) {
@@ -41,6 +43,26 @@ func (svc *Service) clampFirstTokenTimeoutSec(sec int) int {
 		return 300
 	}
 	return sec
+}
+
+// clampGroupHedgePolicy 统一组级 hedge 的边界。maxParallel 包含主请求，
+// maxAttempts 是整个客户端请求允许启动的 attempt 总数。
+func (svc *Service) clampGroupHedgePolicy(delaySeconds float64, maxParallel, maxAttempts int) (float64, int, int) {
+	cfg := (config.GatewayHedgeConfig{
+		DelaySeconds: delaySeconds,
+		MaxParallel:  maxParallel,
+		MaxAttempts:  maxAttempts,
+	}).WithDefaults()
+	return cfg.DelaySeconds, cfg.MaxParallel, cfg.MaxAttempts
+}
+
+func (svc *Service) clampGroupResponseValidationPolicy(streamMode string, prefixBytes, prefixTimeoutMS int) (string, int, int) {
+	cfg := (config.GatewayResponseValidationConfig{
+		StreamMode:      streamMode,
+		PrefixBytes:     prefixBytes,
+		PrefixTimeoutMS: prefixTimeoutMS,
+	}).WithDefaults()
+	return cfg.StreamMode, cfg.PrefixBytes, cfg.PrefixTimeoutMS
 }
 
 // effectiveFirstTokenTimeout 决定本 attempt 实际使用的首字超时。

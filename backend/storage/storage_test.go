@@ -1046,6 +1046,297 @@ func TestGatewayGroupsReorderAndListOrder(t *testing.T) {
 	}
 }
 
+func TestGatewayResponseRulesValidateCompileAndScope(t *testing.T) {
+	db := openTestDB(t)
+	groups := NewGatewayGroups(db)
+	first := &GatewayGroup{Name: "rules-first", Status: GatewayGroupStatusActive}
+	second := &GatewayGroup{Name: "rules-second", Status: GatewayGroupStatusActive}
+	if err := groups.Create(first); err != nil {
+		t.Fatalf("create first group: %v", err)
+	}
+	if err := groups.Create(second); err != nil {
+		t.Fatalf("create second group: %v", err)
+	}
+	rules := NewGatewayResponseRules(db)
+	item := &GatewayResponseRule{
+		GatewayGroupID: first.ID,
+		Name:           "bad-content",
+		Enabled:        true,
+		Priority:       2,
+		Pattern:        `(?i)declined`,
+		Target:         GatewayResponseRuleTargetAssistantText,
+		ModelsJSON:     `[" model-a ","model-a"]`,
+		ProtocolsJSON:  `["OpenAI","openai"]`,
+	}
+	if err := rules.Create(item); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	if item.ModelsJSON != `["model-a"]` || item.ProtocolsJSON != `["openai"]` {
+		t.Fatalf("normalized lists = %s / %s", item.ModelsJSON, item.ProtocolsJSON)
+	}
+	list, err := rules.ListEnabledByGroupID(first.ID)
+	if err != nil || len(list) != 1 || list[0].Name != item.Name {
+		t.Fatalf("enabled rules = %#v, err=%v", list, err)
+	}
+	if other, err := rules.ListByGroupID(second.ID); err != nil || len(other) != 0 {
+		t.Fatalf("rule scope leaked: %#v, err=%v", other, err)
+	}
+	duplicate := *item
+	duplicate.ID = 0
+	duplicate.Name = "BAD-CONTENT"
+	if err := rules.Create(&duplicate); err == nil {
+		t.Fatal("case-insensitive duplicate rule name was accepted")
+	}
+	invalid := *item
+	invalid.ID = 0
+	invalid.Name = "invalid"
+	invalid.Pattern = "["
+	if err := rules.Create(&invalid); err == nil {
+		t.Fatal("invalid regular expression was accepted")
+	}
+}
+
+func TestGatewayGroupsDeleteRemovesResponseRules(t *testing.T) {
+	db := openTestDB(t)
+	groups := NewGatewayGroups(db)
+	group := &GatewayGroup{Name: "rules-delete", Status: GatewayGroupStatusActive}
+	if err := groups.Create(group); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	rules := NewGatewayResponseRules(db)
+	rule := &GatewayResponseRule{
+		GatewayGroupID: group.ID,
+		Name:           "rule",
+		Pattern:        "x",
+		ModelsJSON:     "[]",
+		ProtocolsJSON:  "[]",
+	}
+	if err := rules.Create(rule); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	if err := groups.Delete(group.ID); err != nil {
+		t.Fatalf("delete group: %v", err)
+	}
+	if _, err := rules.FindByID(rule.ID); err == nil {
+		t.Fatal("response rule survived group deletion")
+	}
+}
+
+func TestGatewayUsageFinalizeRequestChargesWinnerOnce(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "settle-key", KeyHash: "settle-hash", KeyPrefix: "sk-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	usage := &GatewayUsageLog{
+		GatewayKeyID: key.ID,
+		RequestID:    "settle-request",
+		Attempt:      2,
+		AttemptKind:  GatewayAttemptKindHedge,
+		ActualCost:   1.25,
+		Success:      true,
+		CreatedAt:    time.Now().UTC(),
+	}
+	logs := NewGatewayUsageLogs(db)
+	if err := logs.Create(usage); err != nil {
+		t.Fatalf("create usage: %v", err)
+	}
+	first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID:        usage.RequestID,
+		GatewayKeyID:     key.ID,
+		Delivered:        true,
+		WinnerAttempt:    usage.Attempt,
+		WinnerUsageLogID: usage.ID,
+	})
+	if err != nil || !first {
+		t.Fatalf("first finalize = %v, err=%v", first, err)
+	}
+	second, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID:     usage.RequestID,
+		GatewayKeyID:  key.ID,
+		Delivered:     true,
+		WinnerAttempt: usage.Attempt,
+	})
+	if err != nil || second {
+		t.Fatalf("replayed finalize = %v, err=%v", second, err)
+	}
+	var gotKey GatewayKey
+	if err := db.First(&gotKey, key.ID).Error; err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if gotKey.QuotaUsed != 1.25 {
+		t.Fatalf("quota_used = %v, want 1.25", gotKey.QuotaUsed)
+	}
+	var winnerCount int64
+	if err := db.Model(&GatewayUsageLog{}).Where("request_id = ? AND winner = ?", usage.RequestID, true).Count(&winnerCount).Error; err != nil {
+		t.Fatalf("count winner: %v", err)
+	}
+	if winnerCount != 1 {
+		t.Fatalf("winner count = %d, want 1", winnerCount)
+	}
+	var extraCost float64
+	if err := db.Model(&GatewayUsageLog{}).Where("id = ?", usage.ID).Select("estimated_extra_cost").Scan(&extraCost).Error; err != nil {
+		t.Fatalf("load winner extra cost: %v", err)
+	}
+	if extraCost != 0 {
+		t.Fatalf("winner estimated_extra_cost = %v, want 0", extraCost)
+	}
+	var settlementCount int64
+	if err := db.Model(&GatewayWinnerSettlement{}).Where("request_id = ?", usage.RequestID).Count(&settlementCount).Error; err != nil {
+		t.Fatalf("count settlements: %v", err)
+	}
+	if settlementCount != 1 {
+		t.Fatalf("settlement count = %d, want 1", settlementCount)
+	}
+}
+
+func TestGatewayUsageCleanupRemovesOrphanSettlements(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "cleanup-key", KeyHash: "cleanup-hash", KeyPrefix: "ck-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	usage := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: "cleanup-request", Attempt: 1,
+		ActualCost: 0.5, Winner: true, Success: true, CreatedAt: time.Now().Add(-time.Hour),
+	}
+	if err := logs.Create(usage); err != nil {
+		t.Fatalf("create usage: %v", err)
+	}
+	if _, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: usage.RequestID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: 1, WinnerUsageLogID: usage.ID,
+	}); err != nil {
+		t.Fatalf("finalize usage: %v", err)
+	}
+	deleted, err := logs.DeleteBefore(time.Now().Add(-time.Minute))
+	if err != nil || deleted != 1 {
+		t.Fatalf("delete before = %d, err=%v", deleted, err)
+	}
+	var finalizationCount, settlementCount int64
+	if err := db.Model(&GatewayRequestFinalization{}).Where("request_id = ?", usage.RequestID).Count(&finalizationCount).Error; err != nil {
+		t.Fatalf("count finalizations: %v", err)
+	}
+	if err := db.Model(&GatewayWinnerSettlement{}).Where("request_id = ?", usage.RequestID).Count(&settlementCount).Error; err != nil {
+		t.Fatalf("count settlements: %v", err)
+	}
+	if finalizationCount != 0 || settlementCount != 0 {
+		t.Fatalf("cleanup left finalization=%d settlement=%d", finalizationCount, settlementCount)
+	}
+}
+
+func TestGatewayUsageFinalizeFailedRequestDoesNotCharge(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "failed-settle-key", KeyHash: "failed-settle-hash", KeyPrefix: "sk-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	first, err := logs.FinalizeFailedRequest("failed-request", key.ID)
+	if err != nil || !first {
+		t.Fatalf("first failed finalize = %v, err=%v", first, err)
+	}
+	second, err := logs.FinalizeFailedRequest("failed-request", key.ID)
+	if err != nil || second {
+		t.Fatalf("replayed failed finalize = %v, err=%v", second, err)
+	}
+	usage := &GatewayUsageLog{
+		GatewayKeyID: key.ID,
+		RequestID:    "failed-request",
+		Attempt:      2,
+		ActualCost:   9,
+		Success:      true,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := logs.Create(usage); err != nil {
+		t.Fatalf("create replay usage: %v", err)
+	}
+	lateWinner, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID:        usage.RequestID,
+		GatewayKeyID:     key.ID,
+		Delivered:        true,
+		WinnerAttempt:    usage.Attempt,
+		WinnerUsageLogID: usage.ID,
+	})
+	if err != nil || lateWinner {
+		t.Fatalf("late winner after terminal failure = %v, err=%v", lateWinner, err)
+	}
+	var gotKey GatewayKey
+	if err := db.First(&gotKey, key.ID).Error; err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if gotKey.QuotaUsed != 0 {
+		t.Fatalf("failed request charged %v", gotKey.QuotaUsed)
+	}
+	var settlements int64
+	if err := db.Model(&GatewayWinnerSettlement{}).Where("request_id = ?", "failed-request").Count(&settlements).Error; err != nil {
+		t.Fatalf("count settlements: %v", err)
+	}
+	if settlements != 0 {
+		t.Fatalf("failed request created %d settlements", settlements)
+	}
+}
+
+func TestGatewayUsageFinalizeRequestConcurrentClaim(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "race-settle-key", KeyHash: "race-settle-hash", KeyPrefix: "sk-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	usage := &GatewayUsageLog{
+		GatewayKeyID: key.ID,
+		RequestID:    "race-request",
+		Attempt:      1,
+		ActualCost:   0.75,
+		Success:      true,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := logs.Create(usage); err != nil {
+		t.Fatalf("create usage: %v", err)
+	}
+	const callers = 8
+	var wg sync.WaitGroup
+	var claimed atomic.Int64
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+				RequestID:        usage.RequestID,
+				GatewayKeyID:     key.ID,
+				Delivered:        true,
+				WinnerAttempt:    usage.Attempt,
+				WinnerUsageLogID: usage.ID,
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if first {
+				claimed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent finalize: %v", err)
+	}
+	if claimed.Load() != 1 {
+		t.Fatalf("successful claims = %d, want 1", claimed.Load())
+	}
+	var gotKey GatewayKey
+	if err := db.First(&gotKey, key.ID).Error; err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if gotKey.QuotaUsed != 0.75 {
+		t.Fatalf("quota_used = %v, want 0.75", gotKey.QuotaUsed)
+	}
+}
+
 func TestGatewayRoutesSaveForGroupPreservesID(t *testing.T) {
 	db, err := Open(DBConfig{
 		Driver:       DBDriverSQLite,

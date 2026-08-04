@@ -110,6 +110,7 @@ func main() {
 	gatewayGroups := storage.NewGatewayGroups(db)
 	gatewayKeys := storage.NewGatewayKeys(db)
 	gatewayRoutes := storage.NewGatewayRoutes(db)
+	gatewayResponseRules := storage.NewGatewayResponseRules(db)
 	gatewayProviders := storage.NewGatewayProviders(db)
 	gatewayUsage := storage.NewGatewayUsageLogs(db)
 	modelPrices := storage.NewModelPriceOverrides(db)
@@ -119,6 +120,7 @@ func main() {
 	channelSvc.UpdateUpstreamConfig(cfg.Upstream)
 	gatewaySvc := gateway.NewService(gatewayGroups, gatewayKeys, gatewayRoutes, gatewayUsage, modelPrices, channels, channelSvc, cipher, log)
 	gatewaySvc.SetProviders(gatewayProviders)
+	gatewaySvc.SetResponseRules(gatewayResponseRules)
 	gatewaySvc.UpdateProxyConfig(cfg.Proxy)
 	gatewaySvc.UpdateUpstreamConfig(cfg.Upstream)
 	gatewaySvc.UpdateGatewayConfig(cfg.Gateway)
@@ -200,6 +202,7 @@ func main() {
 		GatewayGroups: gatewayGroups,
 		GatewayKeys:   gatewayKeys,
 		GatewayUsage:  gatewayUsage,
+		GatewayResponseRules: gatewayResponseRules,
 		ModelPrices:   modelPrices,
 		Log:           log,
 		Frontend:      frontendFS,

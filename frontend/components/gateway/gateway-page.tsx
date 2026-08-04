@@ -16,7 +16,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useConfirm } from "@/components/ui/confirm-dialog"
 import { apiFetch } from "@/lib/api"
-import { useChannels } from "@/lib/queries"
+import { useChannels, useSystemConfig } from "@/lib/queries"
 import { cn } from "@/lib/utils"
 import type {
   GatewayEnsureKeysResult,
@@ -46,6 +46,7 @@ import { GroupsSidebar } from "./groups-sidebar"
 import { KeysPanel } from "./keys-panel"
 import { RoutesPanel } from "./routes-panel"
 import { ModelsPanel } from "./models-panel"
+import { ResponseRulesPanel } from "./response-rules-panel"
 import { UsagePanel } from "./usage-panel"
 import { PricesPanel } from "./prices-panel"
 import {
@@ -81,6 +82,7 @@ import {
 export function GatewayPage() {
   const { confirm, dialog: confirmDialog } = useConfirm()
   const channels = useChannels()
+  const systemConfig = useSystemConfig()
   const channelList = channels.data ?? []
 
   const [groups, setGroups] = useState<GatewayGroup[]>([])
@@ -686,8 +688,33 @@ export function GatewayPage() {
   }, [selectedGroup?.id, reloadGroupDetail])
 
   function openCreateGroup() {
+    const formDefaults = emptyGroupForm()
+    const hedgeDefaults = systemConfig.data?.config.gateway?.hedge
+    const validationDefaults = systemConfig.data?.config.gateway?.responseValidation
     setEditingGroup(null)
-    setGroupForm(emptyGroupForm())
+    setGroupForm({
+      ...formDefaults,
+      hedge_enabled: hedgeDefaults?.enabled ?? formDefaults.hedge_enabled,
+      hedge_delay_seconds: String(
+        hedgeDefaults?.delaySeconds ?? formDefaults.hedge_delay_seconds,
+      ),
+      hedge_max_parallel: String(
+        hedgeDefaults?.maxParallel ?? formDefaults.hedge_max_parallel,
+      ),
+      hedge_max_attempts: String(
+        hedgeDefaults?.maxAttempts ?? formDefaults.hedge_max_attempts,
+      ),
+      response_validation_enabled:
+        validationDefaults?.enabled ?? formDefaults.response_validation_enabled,
+      response_validation_prefix_bytes: String(
+        validationDefaults?.prefixBytes ??
+          formDefaults.response_validation_prefix_bytes,
+      ),
+      response_validation_prefix_timeout_ms: String(
+        validationDefaults?.prefixTimeoutMs ??
+          formDefaults.response_validation_prefix_timeout_ms,
+      ),
+    })
     setGroupDialogOpen(true)
   }
 
@@ -705,6 +732,17 @@ export function GatewayPage() {
       failover_on_4xx: !!g.failover_on_4xx,
       cooldown_seconds: String(g.cooldown_seconds ?? 30),
       first_token_timeout_sec: String(g.first_token_timeout_sec ?? 0),
+      hedge_enabled: !!g.hedge_enabled,
+      hedge_delay_seconds: String(g.hedge_delay_seconds ?? 10),
+      hedge_max_parallel: String(g.hedge_max_parallel ?? 2),
+      hedge_max_attempts: String(g.hedge_max_attempts ?? 4),
+      response_validation_enabled: !!g.response_validation_enabled,
+      response_validation_prefix_bytes: String(
+        g.response_validation_prefix_bytes ?? 8192,
+      ),
+      response_validation_prefix_timeout_ms: String(
+        g.response_validation_prefix_timeout_ms ?? 2000,
+      ),
       user_agent: g.user_agent ?? "",
     })
     setGroupDialogOpen(true)
@@ -726,6 +764,26 @@ export function GatewayPage() {
     if (firstTokenTimeout < 0) firstTokenTimeout = 0
     if (firstTokenTimeout > 0 && firstTokenTimeout < 1) firstTokenTimeout = 1
     if (firstTokenTimeout > 300) firstTokenTimeout = 300
+    const hedgeDelaySeconds = Math.max(
+      0.1,
+      Math.min(300, Number(groupForm.hedge_delay_seconds) || 10),
+    )
+    const hedgeMaxParallel = Math.max(
+      1,
+      Math.min(32, Math.floor(Number(groupForm.hedge_max_parallel) || 2)),
+    )
+    const hedgeMaxAttempts = Math.max(
+      hedgeMaxParallel,
+      Math.min(64, Math.floor(Number(groupForm.hedge_max_attempts) || 4)),
+    )
+    const prefixBytes = Math.max(
+      1024,
+      Math.min(1024 * 1024, Math.floor(Number(groupForm.response_validation_prefix_bytes) || 8192)),
+    )
+    const prefixTimeoutMS = Math.max(
+      100,
+      Math.min(30000, Math.floor(Number(groupForm.response_validation_prefix_timeout_ms) || 2000)),
+    )
     const policy = {
       rate_resort_enabled: groupForm.rate_resort_enabled,
       retry_enabled: groupForm.retry_enabled,
@@ -735,6 +793,14 @@ export function GatewayPage() {
       failover_on_4xx: groupForm.failover_on_4xx,
       cooldown_seconds: cooldownSeconds,
       first_token_timeout_sec: firstTokenTimeout,
+      hedge_enabled: groupForm.hedge_enabled,
+      hedge_delay_seconds: hedgeDelaySeconds,
+      hedge_max_parallel: hedgeMaxParallel,
+      hedge_max_attempts: hedgeMaxAttempts,
+      response_validation_enabled: groupForm.response_validation_enabled,
+      response_validation_stream_mode: "prefix",
+      response_validation_prefix_bytes: prefixBytes,
+      response_validation_prefix_timeout_ms: prefixTimeoutMS,
       user_agent: groupForm.user_agent.trim(),
     }
     setBusy(true)
@@ -1482,6 +1548,9 @@ export function GatewayPage() {
                       <TabsTrigger value="models" className="flex-none gap-1.5 px-3 py-1.5">
                         <Layers className="size-3.5" /> 模型映射
                       </TabsTrigger>
+                      <TabsTrigger value="response-rules" className="flex-none gap-1.5 px-3 py-1.5">
+                        <ScrollText className="size-3.5" /> 响应规则
+                      </TabsTrigger>
                     </TabsList>
 
                     <TabsContent value="keys" className="mt-0 space-y-4">
@@ -1542,6 +1611,13 @@ export function GatewayPage() {
                         mappingRows={mappingRows}
                         onMappingRowsChange={setMappingRows}
                         modelSuggestions={modelSuggestions}
+                      />
+                    </TabsContent>
+
+                    <TabsContent value="response-rules" className="mt-0 space-y-4">
+                      <ResponseRulesPanel
+                        groupID={selectedGroup.id}
+                        enabled={!!selectedGroup.response_validation_enabled}
                       />
                     </TabsContent>
                   </Tabs>

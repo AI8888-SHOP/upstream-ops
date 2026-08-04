@@ -2,11 +2,15 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
+	"regexp"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ---------- GatewayProviders（直连渠道） ----------
@@ -198,6 +202,9 @@ func (r *GatewayGroups) Update(item *GatewayGroup) error { return r.db.Save(item
 // Delete 按主键删除。
 func (r *GatewayGroups) Delete(id uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayResponseRule{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayRoute{}).Error; err != nil {
 			return err
 		}
@@ -206,6 +213,200 @@ func (r *GatewayGroups) Delete(id uint) error {
 		}
 		return tx.Delete(&GatewayGroup{}, id).Error
 	})
+}
+
+// GatewayResponseRules 组级响应正则规则仓储。
+type GatewayResponseRules struct{ db *gorm.DB }
+
+// NewGatewayResponseRules 构造响应规则仓储。
+func NewGatewayResponseRules(db *gorm.DB) *GatewayResponseRules {
+	return &GatewayResponseRules{db: db}
+}
+
+// List 按组、优先级和主键稳定排序；groupID=0 时列出全部组。
+func (r *GatewayResponseRules) List(groupID uint) ([]GatewayResponseRule, error) {
+	var list []GatewayResponseRule
+	db := r.db
+	if groupID > 0 {
+		db = db.Where("gateway_group_id = ?", groupID)
+	}
+	if err := db.Order("gateway_group_id ASC, priority ASC, id ASC").Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// ListByGroupID 列出组内全部规则。
+func (r *GatewayResponseRules) ListByGroupID(groupID uint) ([]GatewayResponseRule, error) {
+	return r.List(groupID)
+}
+
+// ListEnabledByGroupID 返回运行时需要的启用规则。
+func (r *GatewayResponseRules) ListEnabledByGroupID(groupID uint) ([]GatewayResponseRule, error) {
+	var list []GatewayResponseRule
+	if err := r.db.Where("gateway_group_id = ? AND enabled = ?", groupID, true).
+		Order("priority ASC, id ASC").Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// FindByID 按主键查询。
+func (r *GatewayResponseRules) FindByID(id uint) (*GatewayResponseRule, error) {
+	var item GatewayResponseRule
+	if err := r.db.First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+// Create 校验并编译正则后插入。
+func (r *GatewayResponseRules) Create(item *GatewayResponseRule) error {
+	if err := normalizeGatewayResponseRule(item); err != nil {
+		return err
+	}
+	if err := r.ensureGroupExists(item.GatewayGroupID); err != nil {
+		return err
+	}
+	if err := r.ensureUniqueName(item.GatewayGroupID, item.Name, 0); err != nil {
+		return err
+	}
+	return r.db.Create(item).Error
+}
+
+// Update 校验并编译正则后保存。
+func (r *GatewayResponseRules) Update(item *GatewayResponseRule) error {
+	if item == nil || item.ID == 0 {
+		return fmt.Errorf("response rule id is required")
+	}
+	if err := normalizeGatewayResponseRule(item); err != nil {
+		return err
+	}
+	if err := r.ensureGroupExists(item.GatewayGroupID); err != nil {
+		return err
+	}
+	if err := r.ensureUniqueName(item.GatewayGroupID, item.Name, item.ID); err != nil {
+		return err
+	}
+	return r.db.Save(item).Error
+}
+
+// Delete 按主键删除。
+func (r *GatewayResponseRules) Delete(id uint) error {
+	return r.db.Delete(&GatewayResponseRule{}, id).Error
+}
+
+func (r *GatewayResponseRules) ensureGroupExists(groupID uint) error {
+	var count int64
+	if err := r.db.Model(&GatewayGroup{}).Where("id = ?", groupID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("gateway group not found")
+	}
+	return nil
+}
+
+func (r *GatewayResponseRules) ensureUniqueName(groupID uint, name string, exceptID uint) error {
+	q := r.db.Model(&GatewayResponseRule{}).
+		Where("gateway_group_id = ? AND LOWER(name) = LOWER(?)", groupID, name)
+	if exceptID > 0 {
+		q = q.Where("id <> ?", exceptID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("response rule name already exists")
+	}
+	return nil
+}
+
+func normalizeGatewayResponseRule(item *GatewayResponseRule) error {
+	if item == nil {
+		return fmt.Errorf("response rule is required")
+	}
+	if item.GatewayGroupID == 0 {
+		return fmt.Errorf("gateway_group_id is required")
+	}
+	item.Name = strings.TrimSpace(item.Name)
+	if item.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if len(item.Name) > 128 {
+		return fmt.Errorf("name exceeds 128 bytes")
+	}
+	if strings.TrimSpace(item.Pattern) == "" {
+		return fmt.Errorf("pattern is required")
+	}
+	if len(item.Pattern) > 16*1024 {
+		return fmt.Errorf("pattern exceeds 16384 bytes")
+	}
+	if _, err := regexp.Compile(item.Pattern); err != nil {
+		return fmt.Errorf("compile response rule %q: %w", item.Name, err)
+	}
+	item.Target = strings.ToLower(strings.TrimSpace(item.Target))
+	if item.Target == "" {
+		item.Target = GatewayResponseRuleTargetAssistantText
+	}
+	switch item.Target {
+	case GatewayResponseRuleTargetAssistantText, GatewayResponseRuleTargetRawBody, GatewayResponseRuleTargetErrorMessage:
+	default:
+		return fmt.Errorf("target must be assistant_text, raw_body, or error_message")
+	}
+	if item.Priority < 0 || item.Priority > 100000 {
+		return fmt.Errorf("priority must be between 0 and 100000")
+	}
+	models, err := normalizeResponseRuleListJSON(item.ModelsJSON, false, 256)
+	if err != nil {
+		return fmt.Errorf("models_json: %w", err)
+	}
+	protocols, err := normalizeResponseRuleListJSON(item.ProtocolsJSON, true, 64)
+	if err != nil {
+		return fmt.Errorf("protocols_json: %w", err)
+	}
+	item.ModelsJSON = models
+	item.ProtocolsJSON = protocols
+	return nil
+}
+
+func normalizeResponseRuleListJSON(raw string, lower bool, maxItemBytes int) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return "[]", nil
+	}
+	var input []string
+	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+		return "", fmt.Errorf("must be a JSON string array: %w", err)
+	}
+	if len(input) > 256 {
+		return "", fmt.Errorf("must contain at most 256 items")
+	}
+	seen := make(map[string]struct{}, len(input))
+	out := make([]string, 0, len(input))
+	for _, value := range input {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if lower {
+			value = strings.ToLower(value)
+		}
+		if len(value) > maxItemBytes {
+			return "", fmt.Errorf("item exceeds %d bytes", maxItemBytes)
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 // GatewayKeys 网关密钥仓储。
@@ -566,6 +767,129 @@ func (r *GatewayUsageLogs) Create(item *GatewayUsageLog) error {
 	return r.db.Create(item).Error
 }
 
+// GatewayFinalizeRequestInput 描述一次请求的终态。Delivered=false 也必须写入
+// finalization，以便失败请求重放时不会产生隐性扣费。
+type GatewayFinalizeRequestInput struct {
+	RequestID        string
+	GatewayKeyID     uint
+	Delivered        bool
+	WinnerAttempt    int
+	WinnerUsageLogID uint
+}
+
+// FinalizeRequest 原子完成 winner-only 结算。返回值表示本次调用是否首次
+// 成功抢到 request_id 的终态；重复调用返回 false 且不会再次增加 quota_used。
+// 成功交付时会在同一事务内标记唯一 usage winner、写入结算快照并累加密钥额度。
+func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (bool, error) {
+	input.RequestID = strings.TrimSpace(input.RequestID)
+	if input.RequestID == "" {
+		return false, fmt.Errorf("request_id is required")
+	}
+	if input.GatewayKeyID == 0 {
+		return false, fmt.Errorf("gateway_key_id is required")
+	}
+	if input.Delivered && input.WinnerAttempt <= 0 {
+		return false, fmt.Errorf("winner_attempt is required for delivered request")
+	}
+	inserted := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		finalization := &GatewayRequestFinalization{
+			RequestID:     input.RequestID,
+			GatewayKeyID:  input.GatewayKeyID,
+			Delivered:     input.Delivered,
+			WinnerAttempt: input.WinnerAttempt,
+			CreatedAt:     time.Now().UTC(),
+		}
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(finalization)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		inserted = true
+		var gatewayKey GatewayKey
+		if err := tx.Select("id").First(&gatewayKey, input.GatewayKeyID).Error; err != nil {
+			return fmt.Errorf("load gateway key: %w", err)
+		}
+		if !input.Delivered {
+			return nil
+		}
+
+		var usage GatewayUsageLog
+		query := tx.Where("request_id = ? AND gateway_key_id = ?", input.RequestID, input.GatewayKeyID)
+		if input.WinnerUsageLogID > 0 {
+			query = query.Where("id = ?", input.WinnerUsageLogID)
+		} else {
+			query = query.Where("attempt = ?", input.WinnerAttempt).Order("id DESC")
+		}
+		if err := query.First(&usage).Error; err != nil {
+			return fmt.Errorf("load winner usage log: %w", err)
+		}
+		if math.IsNaN(usage.ActualCost) || math.IsInf(usage.ActualCost, 0) || usage.ActualCost < 0 {
+			return fmt.Errorf("winner actual cost must be a finite non-negative number")
+		}
+		settlement := &GatewayWinnerSettlement{
+			RequestID:         input.RequestID,
+			GatewayKeyID:      input.GatewayKeyID,
+			RouteID:           usage.RouteID,
+			WinnerAttempt:     input.WinnerAttempt,
+			GatewayUsageLogID: usage.ID,
+			ActualCost:        usage.ActualCost,
+			CreatedAt:         time.Now().UTC(),
+		}
+		if err := tx.Create(settlement).Error; err != nil {
+			return fmt.Errorf("create winner settlement: %w", err)
+		}
+		// At most one attempt for a request is billable. Clearing first also makes
+		// a caller-provided pre-marked loser harmless under concurrent completion.
+		if err := tx.Model(&GatewayUsageLog{}).Where("request_id = ? AND gateway_key_id = ?", input.RequestID, input.GatewayKeyID).
+			Update("winner", false).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&GatewayUsageLog{}).Where("id = ?", usage.ID).Updates(map[string]any{
+			"winner":                true,
+			"attempt_status":        GatewayAttemptStatusAccepted,
+			"estimated_extra_cost": 0,
+		}).Error; err != nil {
+			return err
+		}
+		if usage.ActualCost > 0 {
+			if err := tx.Model(&GatewayKey{}).Where("id = ?", input.GatewayKeyID).
+				UpdateColumn("quota_used", gorm.Expr("quota_used + ?", usage.ActualCost)).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Model(&GatewayRequestFinalization{}).Where("request_id = ?", input.RequestID).
+			Updates(map[string]any{
+				"winner_usage_log_id": usage.ID,
+				"actual_cost":        usage.ActualCost,
+			}).Error
+	})
+	if err != nil {
+		return false, err
+	}
+	return inserted, nil
+}
+
+// FinalizeFailedRequest 写入没有 winner 的终端失败标记。
+func (r *GatewayUsageLogs) FinalizeFailedRequest(requestID string, gatewayKeyID uint) (bool, error) {
+	return r.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID:    requestID,
+		GatewayKeyID: gatewayKeyID,
+		Delivered:    false,
+	})
+}
+
+// FindFinalization 查询请求终态，供运行时处理客户端断开与重放。
+func (r *GatewayUsageLogs) FindFinalization(requestID string) (*GatewayRequestFinalization, error) {
+	var item GatewayRequestFinalization
+	if err := r.db.First(&item, "request_id = ?", strings.TrimSpace(requestID)).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 // CountBefore 统计 created_at < before 的记录数。
 func (r *GatewayUsageLogs) CountBefore(before time.Time) (int64, error) {
 	if before.IsZero() {
@@ -594,21 +918,46 @@ func (r *GatewayUsageLogs) DeleteBefore(before time.Time) (int64, error) {
 	if before.IsZero() {
 		return 0, fmt.Errorf("before time required")
 	}
-	q := r.db.Model(&GatewayUsageLog{})
-	if isSQLite(r.db) {
-		q = q.Where("CAST(strftime('%s', created_at) AS INTEGER) < ?", before.Unix())
-	} else {
-		q = q.Where("created_at < ?", before)
-	}
-	res := q.Delete(&GatewayUsageLog{})
-	return res.RowsAffected, res.Error
+	var deleted int64
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		q := tx.Model(&GatewayUsageLog{})
+		if isSQLite(tx) {
+			q = q.Where("CAST(strftime('%s', created_at) AS INTEGER) < ?", before.Unix())
+		} else {
+			q = q.Where("created_at < ?", before)
+		}
+		res := q.Delete(&GatewayUsageLog{})
+		if res.Error != nil {
+			return res.Error
+		}
+		deleted = res.RowsAffected
+		// Usage rows are the source of truth for retention. Remove settlement
+		// snapshots only after their request has no remaining attempt rows.
+		remaining := tx.Model(&GatewayUsageLog{}).Select("request_id")
+		if err := tx.Where("request_id NOT IN (?)", remaining).Delete(&GatewayWinnerSettlement{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("request_id NOT IN (?)", remaining).Delete(&GatewayRequestFinalization{}).Error
+	})
+	return deleted, err
 }
 
 // DeleteAll 删除全部使用记录，返回删除行数。
 // GORM 要求 Delete 带条件，故使用 1=1。
 func (r *GatewayUsageLogs) DeleteAll() (int64, error) {
-	res := r.db.Where("1 = 1").Delete(&GatewayUsageLog{})
-	return res.RowsAffected, res.Error
+	var deleted int64
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("1 = 1").Delete(&GatewayUsageLog{})
+		if res.Error != nil {
+			return res.Error
+		}
+		deleted = res.RowsAffected
+		if err := tx.Where("1 = 1").Delete(&GatewayWinnerSettlement{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("1 = 1").Delete(&GatewayRequestFinalization{}).Error
+	})
+	return deleted, err
 }
 
 type GatewayUsageQuery struct {
@@ -656,6 +1005,8 @@ type GatewayUsagePage struct {
 
 type GatewayUsageStats struct {
 	TotalRequests            int64   `json:"total_requests"`
+	AttemptCount             int64   `json:"attempt_count"`
+	WinnerCount              int64   `json:"winner_count"`
 	SuccessCount             int64   `json:"success_count"`
 	ErrorCount               int64   `json:"error_count"`
 	TotalInputTokens         int64   `json:"total_input_tokens"`
@@ -665,6 +1016,9 @@ type GatewayUsageStats struct {
 	TotalTokens              int64   `json:"total_tokens"`
 	TotalCost                float64 `json:"total_cost"`
 	TotalActualCost          float64 `json:"total_actual_cost"`
+	TotalUpstreamCost        float64 `json:"total_upstream_cost"`
+	WinnerCost               float64 `json:"winner_cost"`
+	ExtraAttemptCost         float64 `json:"extra_attempt_cost"`
 	AverageDurationMS        float64 `json:"average_duration_ms"`
 	// RPM/TPM：近 5 分钟均值（对齐 sub2api），与筛选时间范围无关；TPM 仅 input+output
 	RPM       int64                 `json:"rpm"`
@@ -1047,6 +1401,8 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 	db := r.applyFilters(r.db.Model(&GatewayUsageLog{}), q)
 	type aggRow struct {
 		TotalRequests            int64
+		AttemptCount             int64
+		WinnerCount              int64
 		SuccessCount             int64
 		ErrorCount               int64
 		TotalInputTokens         int64
@@ -1055,26 +1411,34 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 		TotalCacheReadTokens     int64
 		TotalCost                float64
 		TotalActualCost          float64
+		TotalUpstreamCost        float64
+		WinnerCost               float64
+		ExtraAttemptCost         float64
 		AvgDurationMS            float64
 	}
 	var row aggRow
 	if err := db.Session(&gorm.Session{}).Select(`
-		COUNT(*) as total_requests,
-		COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END),0) as success_count,
-		COALESCE(SUM(CASE WHEN success THEN 0 ELSE 1 END),0) as error_count,
+		COUNT(DISTINCT request_id) as total_requests,
+		COUNT(*) as attempt_count,
+		COUNT(DISTINCT CASE WHEN winner THEN request_id END) as winner_count,
+		COUNT(DISTINCT CASE WHEN winner THEN request_id END) as success_count,
+		COUNT(DISTINCT request_id) - COUNT(DISTINCT CASE WHEN winner THEN request_id END) as error_count,
 		COALESCE(SUM(input_tokens),0) as total_input_tokens,
 		COALESCE(SUM(output_tokens),0) as total_output_tokens,
 		COALESCE(SUM(cache_creation_tokens),0) as total_cache_creation_tokens,
 		COALESCE(SUM(cache_read_tokens),0) as total_cache_read_tokens,
 		COALESCE(SUM(total_cost),0) as total_cost,
 		COALESCE(SUM(actual_cost),0) as total_actual_cost,
+		COALESCE(SUM(actual_cost),0) as total_upstream_cost,
+		COALESCE(SUM(CASE WHEN winner THEN actual_cost ELSE 0 END),0) as winner_cost,
+		COALESCE(SUM(estimated_extra_cost),0) as extra_attempt_cost,
 		COALESCE(AVG(duration_ms),0) as avg_duration_ms
 	`).Scan(&row).Error; err != nil {
 		return nil, err
 	}
 	var endpoints []GatewayEndpointStat
 	_ = r.applyFilters(r.db.Model(&GatewayUsageLog{}), q).
-		Select("inbound_endpoint as endpoint, COUNT(*) as requests").
+		Select("inbound_endpoint as endpoint, COUNT(DISTINCT request_id) as requests").
 		Where("inbound_endpoint <> ''").
 		Group("inbound_endpoint").
 		Order("requests DESC").
@@ -1085,6 +1449,8 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 	rpm, tpm := r.performanceRPMAndTPM(q)
 	return &GatewayUsageStats{
 		TotalRequests:            row.TotalRequests,
+		AttemptCount:             row.AttemptCount,
+		WinnerCount:              row.WinnerCount,
 		SuccessCount:             row.SuccessCount,
 		ErrorCount:               row.ErrorCount,
 		TotalInputTokens:         row.TotalInputTokens,
@@ -1094,6 +1460,9 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 		TotalTokens:              totalTokens,
 		TotalCost:                row.TotalCost,
 		TotalActualCost:          row.TotalActualCost,
+		TotalUpstreamCost:        row.TotalUpstreamCost,
+		WinnerCost:               row.WinnerCost,
+		ExtraAttemptCost:         row.ExtraAttemptCost,
 		AverageDurationMS:        row.AvgDurationMS,
 		RPM:                      rpm,
 		TPM:                      tpm,
@@ -1151,7 +1520,7 @@ func (r *GatewayUsageLogs) performanceRPMAndTPM(q GatewayUsageQuery) (rpm, tpm i
 	var row perfRow
 	db := r.applyFilters(r.db.Model(&GatewayUsageLog{}), qPerf)
 	if err := db.Session(&gorm.Session{}).Select(`
-		COUNT(*) as request_count,
+		COUNT(DISTINCT request_id) as request_count,
 		COALESCE(SUM(input_tokens + output_tokens), 0) as token_count
 	`).Scan(&row).Error; err != nil {
 		return 0, 0

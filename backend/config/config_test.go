@@ -49,4 +49,32 @@ func TestGatewayConfigWithDefaults(t *testing.T) {
 	if custom.ModelsCacheTTLSeconds != DefaultGatewayModelsCacheTTLSeconds {
 		t.Fatalf("models cache ttl = %d", custom.ModelsCacheTTLSeconds)
 	}
+	if cfg.Hedge.DelaySeconds != DefaultGatewayHedgeDelaySeconds ||
+		cfg.Hedge.MaxParallel != DefaultGatewayHedgeMaxParallel ||
+		cfg.Hedge.MaxAttempts != DefaultGatewayHedgeMaxAttempts {
+		t.Fatalf("hedge defaults = %#v", cfg.Hedge)
+	}
+	if cfg.ResponseValidation.StreamMode != DefaultGatewayResponseValidationMode ||
+		cfg.ResponseValidation.PrefixBytes != DefaultGatewayResponseValidationBytes ||
+		cfg.ResponseValidation.PrefixTimeoutMS != DefaultGatewayResponseValidationTimeoutMS {
+		t.Fatalf("response validation defaults = %#v", cfg.ResponseValidation)
+	}
+}
+
+func TestGatewayHedgeAndValidationBoundsNormalize(t *testing.T) {
+	cfg := GatewayConfig{
+		Hedge: GatewayHedgeConfig{DelaySeconds: 999, MaxParallel: 999, MaxAttempts: 1},
+		ResponseValidation: GatewayResponseValidationConfig{
+			StreamMode: "full_buffer", PrefixBytes: 1, PrefixTimeoutMS: 999999,
+		},
+	}.WithDefaults()
+	if cfg.Hedge.DelaySeconds != 300 || cfg.Hedge.MaxParallel != MaxGatewayHedgeParallel || cfg.Hedge.MaxAttempts != MaxGatewayHedgeParallel {
+		t.Fatalf("normalized hedge = %#v", cfg.Hedge)
+	}
+	if cfg.ResponseValidation.StreamMode != "prefix" || cfg.ResponseValidation.PrefixBytes != 1024 || cfg.ResponseValidation.PrefixTimeoutMS != 30000 {
+		t.Fatalf("normalized validation = %#v", cfg.ResponseValidation)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("normalized config should validate: %v", err)
+	}
 }

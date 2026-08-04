@@ -27,7 +27,7 @@ func (rt *Runtime) recordUsage(
 	firstTokenMS *int64,
 	c *gin.Context,
 	meta usageRecordMeta,
-) {
+) uint {
 	priceModel := upstreamModel
 	if priceModel == "" {
 		priceModel = requestedModel
@@ -88,6 +88,29 @@ func (rt *Runtime) recordUsage(
 	if attemptKind == "" {
 		attemptKind = attemptKindPrimary
 	}
+	attemptStatus := strings.TrimSpace(meta.AttemptStatus)
+	if attemptStatus == "" {
+		if success {
+			attemptStatus = storage.GatewayAttemptStatusAccepted
+		} else {
+			attemptStatus = storage.GatewayAttemptStatusError
+		}
+	}
+	settleNow := success && !meta.DeferSettlement
+	winnerCost := meta.Winner || settleNow
+	var validationRuleID *uint
+	if meta.Validation.RuleID > 0 {
+		id := meta.Validation.RuleID
+		validationRuleID = &id
+	}
+	validationReason := ""
+	if meta.Validation.IsRejected() {
+		validationReason = validationErrorInfo(meta.Validation).Summary
+	}
+	estimatedExtraCost := float64(0)
+	if !winnerCost {
+		estimatedExtraCost = cost.ActualCost
+	}
 	item := &storage.GatewayUsageLog{
 		GatewayGroupID:    group.ID,
 		GatewayKeyID:      key.ID,
@@ -103,6 +126,14 @@ func (rt *Runtime) recordUsage(
 		RequestID:             reqID,
 		Attempt:               attempt,
 		AttemptKind:           attemptKind,
+		AttemptStatus:         attemptStatus,
+		// Winner is marked only by the atomic finalizer after downstream
+		// delivery. meta.Winner is still used above to classify extra cost.
+		Winner:                false,
+		ValidationRuleID:      validationRuleID,
+		ValidationRuleName:    meta.Validation.RuleName,
+		ValidationReason:      validationReason,
+		ValidationPostCommit:  meta.Validation.PostCommit,
 		CooldownUntil:         meta.CooldownUntil,
 		RequestedModel:        requestedModel,
 		UpstreamModel:         upstreamModel,
@@ -131,6 +162,8 @@ func (rt *Runtime) recordUsage(
 		ImageOutputCost:       cost.ImageOutputCost,
 		TotalCost:             cost.TotalCost,
 		ActualCost:            cost.ActualCost,
+		EstimatedCost:         cost.ActualCost,
+		EstimatedExtraCost:    estimatedExtraCost,
 		AccountStatsCost:      cost.TotalCost,
 		RateMultiplier:        rate,
 		BillingRateMultiplier: billingRate,
@@ -151,11 +184,40 @@ func (rt *Runtime) recordUsage(
 		UserAgent:             c.Request.UserAgent(),
 		CreatedAt:             time.Now(),
 	}
-	if err := rt.Usage.Create(item); err != nil && rt.Log != nil {
-		rt.Log.Error("write usage log failed", "err", err)
+	if err := rt.Usage.Create(item); err != nil {
+		if rt.Log != nil {
+			rt.Log.Error("write usage log failed", "err", err)
+		}
+		return 0
 	}
-	if success && cost.ActualCost > 0 {
-		_ = rt.Keys.AddQuotaUsed(key.ID, cost.ActualCost)
+	if settleNow {
+		if _, err := rt.Usage.FinalizeRequest(storage.GatewayFinalizeRequestInput{
+			RequestID: reqID, GatewayKeyID: key.ID, Delivered: true,
+			WinnerAttempt: attempt, WinnerUsageLogID: item.ID,
+		}); err != nil && rt.Log != nil {
+			rt.Log.Error("finalize gateway winner failed", "request_id", reqID, "attempt", attempt, "err", err)
+		}
+	}
+	return item.ID
+}
+
+func (rt *Runtime) finalizeUsageWinner(reqID string, key *storage.GatewayKey, attempt int, usageLogID uint) error {
+	if rt == nil || rt.Usage == nil || key == nil {
+		return fmt.Errorf("gateway usage settlement is not configured")
+	}
+	_, err := rt.Usage.FinalizeRequest(storage.GatewayFinalizeRequestInput{
+		RequestID: reqID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: attempt, WinnerUsageLogID: usageLogID,
+	})
+	return err
+}
+
+func (rt *Runtime) finalizeUsageFailure(reqID string, key *storage.GatewayKey) {
+	if rt == nil || rt.Usage == nil || key == nil {
+		return
+	}
+	if _, err := rt.Usage.FinalizeFailedRequest(reqID, key.ID); err != nil && rt.Log != nil {
+		rt.Log.Error("finalize failed gateway request", "request_id", reqID, "err", err)
 	}
 }
 

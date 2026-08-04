@@ -80,8 +80,10 @@ UpstreamOps 主要解决这些痛点：
   - 路由 `upstream_protocol`：`auto` / `openai`（Chat）/ `openai_responses` / `anthropic`
 - 故障转移：网络错误、429、5xx 临时暂停并顺延；组可开「4xx 顺延」；支持组级重试次数、最大切换次数、冷却秒数。
 - **首字超时**（可选）：在仍有可顺延路由时，对首字节等待限时，加速切换到下一条路由。
+- **并发兜底（Hedge，可选，默认关闭）**：主请求超过组级延迟仍无有效结果时，按上限并发启动其它路由；首个通过响应校验的 attempt 获胜并取消仍在运行的 loser。`maxParallel` 包含主请求，`maxAttempts` 限制总尝试数；图片/视频生成和 Realtime 请求自动排除。
+- **响应正则校验（可选，默认关闭）**：按优先级检查 `assistant_text`、`raw_body` 或 `error_message`，支持模型和协议过滤；命中后拒绝当前 attempt 并直接切换其它路由。非流式检查完整响应，流式在提交前检查可配置前缀。
 - User-Agent：路由级 `passthrough` / `group` / `custom`；管理侧拉模型、探测会回落默认 UA。
-- 使用记录对齐 sub2api 字段：endpoint、协议、tokens（含缓存读写分桶）、费用、延迟、首字延迟、成功/失败与上游错误详情；提供列表、stats、模型筛选项与清理。
+- 使用记录对齐 sub2api 字段：endpoint、协议、tokens（含缓存读写分桶）、费用、延迟、首字延迟、attempt 类型/状态、winner、响应规则与上游错误详情；提供列表、stats、模型筛选项与清理。
 - 计费：内置单价表（可覆盖）+ `actual_cost = base_cost × 账号计费倍率`（与上游同步倍率换算一致）。
 - 运行时参数（系统设置 `gateway` 段可热更新）：转发超时、模型列表缓存 TTL、默认暂停秒数、批量运维并发、用量错误落库截断等。
 - 管理入口：Dock「请求网关」页面（`/gateway`）；管理 API 前缀 `/api/gateway/*`（需后台鉴权）。
@@ -290,7 +292,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=请替换为强密码
 ```
 
-Docker 默认拉取 `ghcr.io/bejix/upstream-ops:${IMAGE_TAG:-latest}`，不会在本机编译镜像。配置和数据都会写入宿主机项目目录下的 `data/`。
+Docker 默认拉取 `${IMAGE_REPOSITORY:-ghcr.io/ai8888-shop/upstream-ops}:${IMAGE_TAG:-latest}`，不会在本机编译镜像。镜像到其它仓库时可覆盖 `IMAGE_REPOSITORY`；配置和数据都会写入宿主机项目目录下的 `data/`。
 
 启动：
 
@@ -301,8 +303,17 @@ docker compose up -d
 默认访问地址：
 
 ```text
-http://localhost:8080
+http://localhost:8418
 ```
+
+检查容器和健康端点：
+
+```bash
+docker compose ps
+curl -fsS http://localhost:8418/healthz
+```
+
+`HTTP_PORT` 只修改宿主机映射，容器内端口和健康检查仍使用原版默认的 `8418`。
 
 默认数据文件在容器内：
 
@@ -314,16 +325,21 @@ http://localhost:8080
 
 ### 固定镜像版本
 
-默认镜像 Tag 来自 `.env`：
+默认镜像仓库和 Tag 来自 `.env`：
 
 ```env
+IMAGE_REPOSITORY=ghcr.io/ai8888-shop/upstream-ops
 IMAGE_TAG=latest
 ```
+
+本仓库的 `CI` 工作流会在 Pull Request 和任意分支 push 时执行 Go 测试、Linux/Windows/macOS 编译、前端检查和不推送的 Docker 构建。原有 `Publish Docker Image` 工作流只在 `main`、版本 tag 或手动触发时向当前公开仓库的 GHCR 包推送镜像；公开 fork 首次发布后需确认对应 Package 也是 public，Docker 才能匿名拉取。
+
+公开仓库只提交 `.env.example`。不要提交 `.env`、`data/`、`config.yaml`，也不要把 `APP_SECRET`、上游 API Key、后台密码或数据库密码写入 workflow / README；发布镜像不需要这些运行时秘密。
 
 生产环境建议锁定具体版本，例如：
 
 ```env
-IMAGE_TAG=v0.0.8
+IMAGE_TAG=v0.0.9
 ```
 
 ## MySQL 部署
@@ -350,13 +366,15 @@ MYSQL_PORT=33069
 ### 基础配置
 
 ```env
-HTTP_PORT=8080
+HTTP_PORT=8418
+IMAGE_REPOSITORY=ghcr.io/ai8888-shop/upstream-ops
 IMAGE_TAG=latest
 SERVER_MODE=release
 LOG_LEVEL=info
 ```
 
 - `HTTP_PORT`：宿主机暴露端口。
+- `IMAGE_REPOSITORY`：要拉取的 GHCR 镜像仓库；公开 fork 改成自己的仓库路径。
 - `IMAGE_TAG`：镜像版本。
 - `SERVER_MODE`：Gin 运行模式，通常为 `release`。
 - `LOG_LEVEL`：日志等级。
@@ -468,6 +486,16 @@ gateway:
   usageErrorMsgRunes: 500
   usageErrorHeaderValueRunes: 8192
   usageErrorHeadersJSONBytes: 65536
+  hedge:
+    enabled: false
+    delaySeconds: 10
+    maxParallel: 2
+    maxAttempts: 4
+  responseValidation:
+    enabled: false
+    streamMode: prefix
+    prefixBytes: 8192
+    prefixTimeoutMs: 2000
 ```
 
 - `proxy.enabled`：是否启用全局代理。
@@ -477,7 +505,7 @@ gateway:
 - `proxy.username` / `proxy.password`：代理认证信息，可留空。
 - `upstream.timeoutSeconds`：访问上游站点的请求超时时间。
 - `upstream.userAgent`：访问上游站点时使用的 `User-Agent`（网关管理侧拉模型/探测的默认 UA 回落值）。
-- `gateway.*`：请求转发网关运行时参数（转发超时、模型列表缓存、临时暂停、批量运维并发、用量错误落库截断等），可在系统设置中热更新。
+- `gateway.*`：请求转发网关运行时参数和新建组的 hedge / response validation 默认策略，可在系统设置中热更新；已有组的策略不会被默认值覆盖。
 - `proxy.enabled=false` 时，即使上游渠道、通知渠道或验证码服务开启 `proxy_enabled`，也不会走代理。
 
 代理测试接口：
@@ -819,7 +847,7 @@ POST /api/channels/:id/clear-login-info
 
 | 概念 | 说明 |
 |------|------|
-| **网关组 (Group)** | 配置单元：路由表、组级模型映射、模型列表、重试/顺延/冷却/首字超时、组级 UA |
+| **网关组 (Group)** | 配置单元：路由表、组级模型映射、模型列表、重试/顺延/冷却/首字超时、并发兜底、响应校验、组级 UA |
 | **网关密钥 (Key)** | 客户端鉴权用；绑定到组；支持额度、IP 黑白名单；明文只在创建/揭示时可见 |
 | **路由 (Route)** | 一条可调度的上游目标：同步渠道+源分组，或直连 Provider；含权重、倍率换算、协议、UA 策略 |
 | **直连渠道 (Provider)** | 网关内维护的 base URL + API Key + 默认计费倍率等，无需先做成监控渠道 |
@@ -832,15 +860,17 @@ POST /api/channels/:id/clear-login-info
    - 方式 A：在监控里已有 NewAPI/Sub2API 渠道，并知道要用的源分组。
    - 方式 B：在网关页「直连渠道」新建 Provider（填 base URL、密钥、协议与默认计费倍率）。
 2. **创建网关组**
-   设置排序方向（倍率升/降）、是否扫描后重排、重试与顺延、可选首字超时、组级 UA。
+   设置排序方向（倍率升/降）、是否扫描后重排、重试与顺延，以及可选的首字超时、并发兜底、响应正则校验和组级 UA。
 3. **添加路由**
    选 monitor 或 provider；配置权重、倍率换算、`upstream_protocol`、UA 模式；保存后可点「确保上游密钥」（仅 monitor 路由）。
 4. **模型**
    配置组/路由映射；用「预览 / 同步 / 探测」维护模型列表。
-5. **创建网关密钥**
+5. **响应规则（可选）**
+   在组的「响应规则」页签创建 Go RE2 正则，选择检查目标，并按需限制模型与协议；随后在「编辑组」中启用正则响应校验。
+6. **创建网关密钥**
    把明文 `sk-...` 交给客户端（只显示一次，之后需用「揭示」）。
-6. **客户端**
-   Base URL 指向本服务（如 `http://host:8080`），路径用 `/v1/...`，鉴权见下。
+7. **客户端**
+   Base URL 指向本服务（如 `http://host:8418`），路径用 `/v1/...`，鉴权见下。
 
 ### 客户端鉴权
 
@@ -882,13 +912,11 @@ x-api-key: sk-...
 ```text
 客户端 → 鉴权(密钥/IP/额度) → 读 body → 取 model
        → 按组策略排序可调度路由
-       → 对每条路由:
-            模型映射 → 解析上游协议(auto/固定)
-            → 必要时协议转换 body / path
-            → 发起上游 HTTP（可选首字超时）
-            → 成功则回写客户端（流式可增量转换）并记 usage
-            → 失败且可顺延则临时暂停路由，试下一条
-       → 全部失败则返回最后错误
+       → 主 attempt 立即发起；达到 hedge 延迟后可并发启动其它路由
+       → 每个 attempt: 模型映射 → 协议转换 → 上游 HTTP → 响应校验
+       → 首个有效响应成为 winner，取消未完成 loser，再交付客户端
+       → 正则命中 / 上游失败则按策略直接切换其它路由
+       → 所有 attempt 都记 usage；全部失败则返回最后错误
 ```
 
 ### 协议与互转
@@ -922,13 +950,20 @@ x-api-key: sk-...
 - 开启组的「倍率扫描后重排」时，定时倍率扫描结束后会重写相关组的路由顺序与计费倍率快照。
 - 费用：`base_cost` 按模型单价 × token 桶；`actual_cost = base_cost × 账号计费倍率`（只乘一次）。
 
-### 故障转移与首字超时
+### 故障转移、并发兜底与响应校验
 
 - 默认可顺延：无响应、429、5xx；组开启「4xx 顺延」时全部 4xx 也可顺延。
 - 失败路由可写入临时不可调度截止时间（冷却秒数，默认来自 `gateway.tempPauseSeconds` / 组配置）。
 - 组级：`retry_count`、`failover_max`、`cooldown_seconds`。
 - **首字超时**：配置后，仅当「本请求仍可切换到其它路由」时启用；最后一条可试路由会关闭首字掐断，避免无意义超时。
-- 流式一旦已向客户端提交有效 SSE，一般不再切换路由（避免半截双流）。
+- **并发兜底（默认关闭）**：主 attempt 立即开始；超过 `hedge_delay_seconds` 仍没有通过校验的响应时，按延迟阶梯启动其它路由。`hedge_max_parallel` 包含主请求，`hedge_max_attempts` 是整个请求可启动的 attempt 总上限。第一个通过校验的响应获胜，其余未完成请求会被取消。
+- 图片生成、视频生成与 Realtime/WebSocket 请求始终按原有顺序策略执行，不启用并发兜底；仅把图片作为输入的多模态文本请求不在排除范围内。
+- **响应正则校验（默认关闭）**：规则按数值从小到大的优先级匹配，使用 Go RE2 语法。检查目标可选 `assistant_text`（协议转换后的助手可见文本）、`raw_body` 或 `error_message`；模型/协议过滤留空表示全部，也支持 `*` / `?` 通配。
+- 非流式响应会在交付客户端前检查完整响应。命中后将当前 attempt 记为 `regex_reject` / `rejected`，直接换其它路由，不在同一路由重试。
+- 流式响应采用固定的 `prefix` 模式：最多缓存 `response_validation_prefix_bytes` 或等待 `response_validation_prefix_timeout_ms`，在首次提交客户端前检查。提交后不能再安全切换；后续才出现的匹配只记录为 post-commit 审计事件。
+- 流式一旦已向客户端提交有效 SSE，不再切换路由（避免半截双流）。
+
+管理 UI 位于「请求网关」：在「编辑组」中配置并发兜底与响应校验开关/阈值，在组内「响应规则」页签维护正则规则。系统设置中的同名配置只作为**新建组默认值**；已保存的组继续使用自己的策略。
 
 ### 模型列表模式
 
@@ -966,13 +1001,17 @@ x-api-key: sk-...
 
 ### 用量与计费记录
 
-每次转发（成功或失败）会尽量落一条用量记录，字段风格对齐 sub2api，便于对账：
+每个 primary / retry / failover / hedge / regex rejection attempt（成功、失败、被拒绝或取消）都会尽量落一条用量记录，字段风格对齐 sub2api，便于对账：
 
 - 关联：网关 request id、组、密钥、路由、endpoint、入站/上游协议
 - Token：prompt / completion / total，以及缓存读写等分桶（上游有则记）
 - 费用：`base_cost`（模型单价 × token）、`actual_cost`（再乘账号计费倍率一次）
 - 时延：总延迟、首字延迟（流式）
+- 调度：`attempt`、`attempt_kind`、`attempt_status`、`winner`，以及命中的响应规则与是否为提交后匹配
 - 结果：成功 / 失败；失败含截断后的上游错误摘要与脱敏响应头
+- 额外成本：loser / rejected attempt 的 `estimated_cost`、`estimated_extra_cost`，用于核算上游可能已经产生的费用
+
+**网关 Key 的 `quota_used` 只按最终成功交付的 winner 的 `actual_cost` 增加一次。** loser、正则拒绝、取消和终端失败不会扣网关额度，但它们的 attempt 与可能的上游成本仍保留供审计。请求级 finalization 以 request id 保证并发完成或重放不会重复结算；全部失败时 winner 为 0，额度不增加。
 
 管理页：列表筛选、stats 聚合、按模型筛选项、清理接口。客户端可用 `GET /v1/usage`（网关密钥）查看自身用量（以接口实际返回为准）。
 
@@ -995,7 +1034,7 @@ x-api-key: sk-...
 **Chat 客户端 → Claude 上游（路由协议 anthropic）**
 
 ```bash
-curl -s http://127.0.0.1:8080/v1/chat/completions \
+curl -s http://127.0.0.1:8418/v1/chat/completions \
   -H "Authorization: Bearer sk-你的网关密钥" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1008,7 +1047,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 **Anthropic 客户端**
 
 ```bash
-curl -s http://127.0.0.1:8080/v1/messages \
+curl -s http://127.0.0.1:8418/v1/messages \
   -H "x-api-key: sk-你的网关密钥" \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
@@ -1022,7 +1061,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
 **Responses 客户端（流式）**
 
 ```bash
-curl -sN http://127.0.0.1:8080/v1/responses \
+curl -sN http://127.0.0.1:8418/v1/responses \
   -H "Authorization: Bearer sk-你的网关密钥" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1046,7 +1085,7 @@ curl -sN http://127.0.0.1:8080/v1/responses \
 
 ### 运行时配置（`gateway` 段）
 
-可在 `config.yaml` 或系统设置中调整，**应用配置后热更新**（无需重启进程）。字段 ≤0 时回落内置默认：
+可在 `config.yaml` 或系统设置中调整，**应用配置后热更新**（无需重启进程）。基础运行时字段 ≤0 时回落内置默认；`hedge` 与 `responseValidation` 是创建新网关组时复制的默认策略，不会覆盖已保存的组：
 
 | 配置项 | 默认 | 含义 |
 |--------|------|------|
@@ -1059,10 +1098,34 @@ curl -sN http://127.0.0.1:8080/v1/responses \
 | `usageErrorMsgRunes` | 500 | 用量错误摘要字符上限 |
 | `usageErrorHeaderValueRunes` | 8192 | 单条错误响应头值截断 |
 | `usageErrorHeadersJSONBytes` | 65536 | 错误响应头 JSON 总上限 |
+| `hedge.enabled` | false | 新建组是否默认启用并发兜底 |
+| `hedge.delaySeconds` | 10 | 启动后续并发 attempt 的延迟阶梯（0.1-300 秒） |
+| `hedge.maxParallel` | 2 | 最大并发 attempt，包含主请求（1-32） |
+| `hedge.maxAttempts` | 4 | 单请求总 attempt 上限（1-64，且不小于 `maxParallel`） |
+| `responseValidation.enabled` | false | 新建组是否默认启用响应正则校验 |
+| `responseValidation.streamMode` | `prefix` | 流式校验模式；当前固定为 `prefix` |
+| `responseValidation.prefixBytes` | 8192 | 提交流式响应前最多检查的前缀字节数（1024-1048576） |
+| `responseValidation.prefixTimeoutMs` | 2000 | 从首个有效流内容开始等待前缀的上限（100-30000 毫秒） |
+
+默认关闭的完整示例：
+
+```yaml
+gateway:
+  hedge:
+    enabled: false
+    delaySeconds: 10
+    maxParallel: 2
+    maxAttempts: 4
+  responseValidation:
+    enabled: false
+    streamMode: prefix
+    prefixBytes: 8192
+    prefixTimeoutMs: 2000
+```
 
 注意：`upstream.timeoutSeconds` 主要影响**监控侧**访问上游站点（登录、同步等）；网关转发超时看 `gateway.forwardTimeoutSeconds`。两者不要混用。
 
-组级策略（`retry_count` / `failover_max` / `cooldown_seconds` / 首字超时等）在组上单独配置；未填时会参考上述网关默认。
+组级策略（`retry_count` / `failover_max` / `cooldown_seconds` / 首字超时 / hedge / response validation 等）在组上单独配置；新建时会参考上述网关默认。
 
 ### 管理 API（需后台登录 Token）
 
@@ -1078,6 +1141,8 @@ POST         /api/gateway/groups/:id/routes/ensure-keys
 GET          /api/gateway/groups/:id/models/preview
 POST         /api/gateway/groups/:id/models/sync
 POST         /api/gateway/groups/:id/models/test
+GET/POST     /api/gateway/groups/:id/response-rules
+GET/PUT/DELETE /api/gateway/response-rules/:id
 PUT/DELETE   /api/gateway/keys/:id
 POST         /api/gateway/keys/:id/reveal
 POST         /api/gateway/routes/:id/clear-pause
@@ -1092,6 +1157,35 @@ POST         /api/gateway/usage/cleanup
 GET/PUT      /api/gateway/prices
 GET          /api/gateway/prices/defaults
 DELETE       /api/gateway/prices/:id
+```
+
+组策略通过创建/更新组接口保存，例如：
+
+```json
+{
+  "hedge_enabled": true,
+  "hedge_delay_seconds": 10,
+  "hedge_max_parallel": 2,
+  "hedge_max_attempts": 4,
+  "response_validation_enabled": true,
+  "response_validation_stream_mode": "prefix",
+  "response_validation_prefix_bytes": 8192,
+  "response_validation_prefix_timeout_ms": 2000
+}
+```
+
+创建响应规则的请求体示例（`models_json` / `protocols_json` 是 JSON 字符串数组；`[]` 表示不限制）：
+
+```json
+{
+  "name": "retry temporary upstream replies",
+  "enabled": true,
+  "priority": 10,
+  "pattern": "(?i)temporarily unavailable|please retry",
+  "target": "assistant_text",
+  "models_json": "[\"gpt-*\"]",
+  "protocols_json": "[\"openai_chat\",\"openai_responses\"]"
+}
 ```
 
 ### 后端结构（开发者）
