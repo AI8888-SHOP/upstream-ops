@@ -1,0 +1,115 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional release tag to create, for example v0.0.9
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  frontend:
+    name: Build embedded frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: embedded-frontend
+          path: frontend/dist
+          if-no-files-found: error
+
+  binaries:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: freebsd
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: embedded-frontend
+          path: web/dist
+      - name: Build
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          suffix=''
+          if [[ "$GOOS" == 'windows' ]]; then suffix='.exe'; fi
+          mkdir -p out
+          go build -trimpath -ldflags='-s -w' -o "out/upstream-ops${suffix}" ./cmd/server
+          cp README.md README.zh.md out/
+          if [[ "$GOOS" == 'windows' ]]; then
+            (cd out && zip -9 "../upstream-ops-${GOOS}-${GOARCH}.zip" ./*)
+          else
+            tar -C out -czf "upstream-ops-${GOOS}-${GOARCH}.tar.gz" .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upstream-ops-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: upstream-ops-${{ matrix.goos }}-${{ matrix.goarch }}.*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: binaries
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: upstream-ops-*
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          generate_release_notes: true
+          files: release-assets/*

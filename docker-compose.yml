@@ -2,7 +2,7 @@ name: upstream-ops
 
 services:
   app:
-    image: ghcr.io/bejix/upstream-ops:${IMAGE_TAG:-latest}
+    image: ${IMAGE_REPOSITORY:-ghcr.io/ai8888-shop/upstream-ops}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: ["-config", "/app/data/config.yaml"]
     environment:
@@ -19,7 +19,7 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       AUTH_TOKEN_SECRET: ${AUTH_TOKEN_SECRET:-}
     ports:
-      - "${HTTP_PORT:-8080}:8418"
+      - "${HTTP_PORT:-8418}:8418"
     volumes:
       - ./data:/app/data
     healthcheck:

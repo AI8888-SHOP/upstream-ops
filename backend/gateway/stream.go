@@ -30,6 +30,29 @@ type streamAttemptResult struct {
 	DownstreamComplete bool
 	StreamErr          error
 	Err                error
+	// ValidationRejection is a pre-commit response-rule match. It is a direct
+	// route switch signal and must not consume same-route retry budget.
+	ValidationRejection validationResult
+	// PostCommitValidation is informational audit data; it can never trigger a
+	// route switch after bytes were exposed to the client.
+	PostCommitValidation validationResult
+}
+
+type preserveAttemptCancelContextKey struct{}
+
+func withPreservedAttemptCancel(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, preserveAttemptCancelContextKey{}, true)
+}
+
+func preserveAttemptCancel(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	value, _ := ctx.Value(preserveAttemptCancelContextKey{}).(bool)
+	return value
 }
 
 // buildUpstreamHTTPRequest 构建上游 HTTP 请求（forwardOnce / forwardStream 共用）。

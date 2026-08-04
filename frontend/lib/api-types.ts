@@ -294,6 +294,18 @@ export interface SystemGatewayConfig {
   usageErrorMsgRunes: number
   usageErrorHeaderValueRunes: number
   usageErrorHeadersJSONBytes: number
+  hedge: {
+    enabled: boolean
+    delaySeconds: number
+    maxParallel: number
+    maxAttempts: number
+  }
+  responseValidation: {
+    enabled: boolean
+    streamMode: "prefix"
+    prefixBytes: number
+    prefixTimeoutMs: number
+  }
 }
 
 export interface SystemConfig {
@@ -641,6 +653,22 @@ export interface GatewayGroup {
    * 可能增加计费（上游已计费却换路由再请求）。
    */
   first_token_timeout_sec?: number
+  /** 超过延迟仍无有效响应时，并发启动其它路由（媒体与 Realtime 请求自动排除） */
+  hedge_enabled?: boolean
+  /** 并发兜底启动延迟，支持小数秒 */
+  hedge_delay_seconds?: number
+  /** 同时在途请求上限，包含主请求 */
+  hedge_max_parallel?: number
+  /** 单个客户端请求允许启动的上游 attempt 总数 */
+  hedge_max_attempts?: number
+  /** 是否启用响应内容正则校验 */
+  response_validation_enabled?: boolean
+  /** 流式校验模式；当前为 prefix */
+  response_validation_stream_mode?: "prefix"
+  /** 提交流给客户端前最多缓存的字节数 */
+  response_validation_prefix_bytes?: number
+  /** 流式前缀最长等待时间 */
+  response_validation_prefix_timeout_ms?: number
   /**
    * 组级统一 User-Agent。路由 user_agent_mode=group 时使用；
    * 转发 / 模型测试 / 拉模型渠道共用。
@@ -840,8 +868,19 @@ export interface GatewayUsageLog {
   request_id: string
   /** 同一 request_id 下第几次尝试（从 1 起） */
   attempt?: number
-  /** primary | retry | failover */
+  /** primary | retry | failover | hedge | regex_reject */
   attempt_kind?: string
+  /** 该 attempt 是否为最终交付并结算给网关密钥的 winner */
+  winner?: boolean
+  /** 正则拒绝时命中的规则 */
+  validation_rule_id?: number
+  validation_rule_name?: string
+  validation_reason?: string
+  validation_post_commit?: boolean
+  attempt_status?: "accepted" | "rejected" | "error" | "canceled" | "lost" | string
+  estimated_cost?: number
+  /** loser/rejected attempt 可能产生的上游成本 */
+  estimated_extra_cost?: number
   /** 本条失败触发的冷却截止 */
   cooldown_until?: string | null
   requested_model: string
@@ -904,6 +943,27 @@ export interface GatewayUsageLog {
   source_api_key_name?: string
 }
 
+export type GatewayResponseValidationTarget =
+  | "assistant_text"
+  | "raw_body"
+  | "error_message"
+
+export interface GatewayResponseRule {
+  id: number
+  gateway_group_id: number
+  name: string
+  enabled: boolean
+  priority: number
+  pattern: string
+  target: GatewayResponseValidationTarget
+  /** JSON string array；空数组表示全部模型 */
+  models_json?: string
+  /** JSON string array；空数组表示全部协议 */
+  protocols_json?: string
+  created_at: string
+  updated_at: string
+}
+
 export interface GatewayUsagePage {
   items: GatewayUsageLog[]
   total: number
@@ -915,6 +975,10 @@ export interface GatewayUsagePage {
 
 export interface GatewayUsageStats {
   total_requests: number
+  /** 物理上游 attempt 总数；total_requests 是唯一客户端请求数。 */
+  attempt_count?: number
+  /** 已实际交付并完成结算的请求数。 */
+  winner_count?: number
   success_count: number
   error_count: number
   total_input_tokens: number
@@ -924,6 +988,12 @@ export interface GatewayUsageStats {
   total_tokens: number
   total_cost: number
   total_actual_cost: number
+  /** 所有上游 attempt 的实际成本合计。 */
+  total_upstream_cost?: number
+  /** 仅 winner 的网关结算成本。 */
+  winner_cost?: number
+  /** loser/rejected/canceled attempt 的估算额外成本。 */
+  extra_attempt_cost?: number
   average_duration_ms: number
   /** 近 5 分钟平均每分钟请求数 */
   rpm?: number

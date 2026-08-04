@@ -459,6 +459,21 @@ const (
 	GatewayRequestTypeUnknown = 0
 	GatewayRequestTypeSync    = 1
 	GatewayRequestTypeStream  = 2
+
+	GatewayResponseRuleTargetAssistantText = "assistant_text"
+	GatewayResponseRuleTargetRawBody       = "raw_body"
+	GatewayResponseRuleTargetErrorMessage  = "error_message"
+
+	GatewayAttemptKindPrimary     = "primary"
+	GatewayAttemptKindRetry       = "retry"
+	GatewayAttemptKindFailover    = "failover"
+	GatewayAttemptKindHedge       = "hedge"
+	GatewayAttemptKindRegexReject = "regex_reject"
+
+	GatewayAttemptStatusAccepted = "accepted"
+	GatewayAttemptStatusRejected = "rejected"
+	GatewayAttemptStatusError    = "error"
+	GatewayAttemptStatusCanceled = "canceled"
 )
 
 // GatewayProvider 直连上游（Base URL + API Key），不登录、不监控余额。
@@ -517,6 +532,16 @@ type GatewayGroup struct {
 	// 首字/首字节超时（秒）：0=关闭；>0 时等待首字节超过该时间则主动断开并走重试/顺延。
 	// 可能造成上游已计费但客户端未收完，从而重复请求增加费用。
 	FirstTokenTimeoutSec int `gorm:"not null;default:0" json:"first_token_timeout_sec"`
+	// HedgeMaxParallel 包含主请求；HedgeMaxAttempts 是请求允许启动的 attempt 总数。
+	HedgeEnabled      bool    `gorm:"not null;default:false" json:"hedge_enabled"`
+	HedgeDelaySeconds float64 `gorm:"not null;default:10" json:"hedge_delay_seconds"`
+	HedgeMaxParallel  int     `gorm:"not null;default:2" json:"hedge_max_parallel"`
+	HedgeMaxAttempts  int     `gorm:"not null;default:4" json:"hedge_max_attempts"`
+	// 响应校验按组启用；流式响应只在提交客户端前检查 prefix。
+	ResponseValidationEnabled         bool   `gorm:"not null;default:false" json:"response_validation_enabled"`
+	ResponseValidationStreamMode      string `gorm:"size:16;not null;default:'prefix'" json:"response_validation_stream_mode"`
+	ResponseValidationPrefixBytes     int    `gorm:"not null;default:8192" json:"response_validation_prefix_bytes"`
+	ResponseValidationPrefixTimeoutMS int    `gorm:"not null;default:2000" json:"response_validation_prefix_timeout_ms"`
 	// UserAgent 组级统一 User-Agent。路由 mode=group 时使用；留空表示组未配置。
 	// 不用 omitempty：空串也要返回，前端编辑回填才能区分「未配置」与「字段缺失」。
 	UserAgent string `gorm:"size:512;not null;default:''" json:"user_agent"`
@@ -606,6 +631,24 @@ func (r *GatewayRoute) NormalizeSourceKind() string {
 
 func (GatewayRoute) TableName() string { return "gateway_routes" }
 
+// GatewayResponseRule 是组级响应内容拒绝规则。ModelsJSON / ProtocolsJSON
+// 保存 JSON 字符串数组；空数组表示不限制。
+type GatewayResponseRule struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	GatewayGroupID uint      `gorm:"not null;index;uniqueIndex:idx_gateway_response_rule_group_name" json:"gateway_group_id"`
+	Name           string    `gorm:"size:128;not null;uniqueIndex:idx_gateway_response_rule_group_name" json:"name"`
+	Enabled        bool      `gorm:"not null;default:false;index" json:"enabled"`
+	Priority       int       `gorm:"not null;default:0;index" json:"priority"`
+	Pattern        string    `gorm:"type:text;not null" json:"pattern"`
+	Target         string    `gorm:"size:32;not null;default:'assistant_text'" json:"target"`
+	ModelsJSON     string    `gorm:"type:text;not null" json:"models_json"`
+	ProtocolsJSON  string    `gorm:"type:text;not null" json:"protocols_json"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+func (GatewayResponseRule) TableName() string { return "gateway_response_rules" }
+
 // GatewayUsageLog 记录每一次网关转发请求的用量与费用参考。
 // Source* 字段为请求当时的路由快照：路由保存会换 id 时，历史记录仍可展示上游密钥/源分组。
 type GatewayUsageLog struct {
@@ -624,8 +667,15 @@ type GatewayUsageLog struct {
 	RequestID               string    `gorm:"size:64;not null;index" json:"request_id"`
 	// 同一 RequestID 下的尝试序号（从 1 起）；用于使用记录关联
 	Attempt                 int       `gorm:"not null;default:1;index" json:"attempt"`
-	// primary | retry | failover
+	// primary | retry | failover | hedge | regex_reject
 	AttemptKind             string    `gorm:"size:16;not null;default:'primary'" json:"attempt_kind,omitempty"`
+	// accepted | rejected | error | canceled；保留 Success 兼容原版查询。
+	AttemptStatus           string    `gorm:"size:16;not null;default:'';index" json:"attempt_status,omitempty"`
+	Winner                  bool      `gorm:"not null;default:false;index" json:"winner"`
+	ValidationRuleID        *uint     `gorm:"index" json:"validation_rule_id,omitempty"`
+	ValidationRuleName      string    `gorm:"size:128;not null;default:''" json:"validation_rule_name,omitempty"`
+	ValidationReason        string    `gorm:"type:text" json:"validation_reason,omitempty"`
+	ValidationPostCommit    bool      `gorm:"not null;default:false" json:"validation_post_commit"`
 	// 本条失败后写入的冷却截止（若有），便于日志展示
 	CooldownUntil           *time.Time `json:"cooldown_until,omitempty"`
 	RequestedModel          string    `gorm:"size:256;not null;index" json:"requested_model"`
@@ -658,6 +708,10 @@ type GatewayUsageLog struct {
 	ImageOutputCost         float64   `gorm:"not null;default:0" json:"image_output_cost"`
 	TotalCost               float64   `gorm:"not null;default:0" json:"total_cost"`
 	ActualCost              float64   `gorm:"not null;default:0" json:"actual_cost"`
+	// EstimatedCost 是该 attempt 的估算上游成本；EstimatedExtraCost 仅用于
+	// loser / rejected attempt 的额外成本核算，不参与网关 Key 扣费。
+	EstimatedCost           float64   `gorm:"not null;default:0" json:"estimated_cost"`
+	EstimatedExtraCost      float64   `gorm:"not null;default:0" json:"estimated_extra_cost"`
 	AccountStatsCost        float64   `gorm:"not null;default:0" json:"account_stats_cost"`
 	RateMultiplier          float64   `gorm:"not null;default:1" json:"rate_multiplier"`
 	BillingRateMultiplier   float64   `gorm:"not null;default:1" json:"billing_rate_multiplier"`
@@ -680,6 +734,33 @@ type GatewayUsageLog struct {
 }
 
 func (GatewayUsageLog) TableName() string { return "gateway_usage_logs" }
+
+// GatewayRequestFinalization 是请求级不可变终态标记。成功交付和终端失败都写入，
+// 以 request_id 主键保证并发/重放只会完成一次结算。
+type GatewayRequestFinalization struct {
+	RequestID        string    `gorm:"size:64;primaryKey" json:"request_id"`
+	GatewayKeyID     uint      `gorm:"not null;index" json:"gateway_key_id"`
+	Delivered        bool      `gorm:"not null;default:false;index" json:"delivered"`
+	WinnerAttempt    int       `gorm:"not null;default:0" json:"winner_attempt"`
+	WinnerUsageLogID uint      `gorm:"not null;default:0;index" json:"winner_usage_log_id"`
+	ActualCost       float64   `gorm:"not null;default:0" json:"actual_cost"`
+	CreatedAt        time.Time `gorm:"not null" json:"created_at"`
+}
+
+func (GatewayRequestFinalization) TableName() string { return "gateway_request_finalizations" }
+
+// GatewayWinnerSettlement 保存已成功交付的唯一 winner 结算快照。
+type GatewayWinnerSettlement struct {
+	RequestID         string    `gorm:"size:64;primaryKey" json:"request_id"`
+	GatewayKeyID      uint      `gorm:"not null;index" json:"gateway_key_id"`
+	RouteID           uint      `gorm:"not null;default:0;index" json:"route_id"`
+	WinnerAttempt     int       `gorm:"not null" json:"winner_attempt"`
+	GatewayUsageLogID uint      `gorm:"not null;default:0;index" json:"gateway_usage_log_id"`
+	ActualCost        float64   `gorm:"not null;default:0" json:"actual_cost"`
+	CreatedAt         time.Time `gorm:"not null" json:"created_at"`
+}
+
+func (GatewayWinnerSettlement) TableName() string { return "gateway_winner_settlements" }
 
 // ModelPriceOverride 覆盖内置模型单价（per-token，USD）。
 type ModelPriceOverride struct {

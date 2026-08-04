@@ -584,6 +584,34 @@ function ResultBadge({ u }: { u: GatewayUsageLog }) {
       </span>
     )
   }
+  if (u.attempt_status === "rejected") {
+    return (
+      <span className="inline-flex items-center rounded bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-800 dark:bg-rose-900/40 dark:text-rose-200">
+        已拒绝
+      </span>
+    )
+  }
+  if (u.attempt_status === "canceled") {
+    return (
+      <span className="inline-flex items-center rounded bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
+        已取消
+      </span>
+    )
+  }
+  if (u.attempt_status === "accepted" && !u.winner) {
+    return (
+      <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+        未获胜
+      </span>
+    )
+  }
+  if (u.winner) {
+    return (
+      <span className="inline-flex items-center rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200">
+        已获胜
+      </span>
+    )
+  }
   if (u.success) {
     return (
       <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200">
@@ -609,6 +637,18 @@ function ResultText({ u }: { u: GatewayUsageLog }) {
       </span>
     )
   }
+  if (u.attempt_status === "rejected") {
+    return <span className="text-rose-600 dark:text-rose-400">已拒绝</span>
+  }
+  if (u.attempt_status === "canceled") {
+    return <span className="text-zinc-600 dark:text-zinc-300">已取消</span>
+  }
+  if (u.attempt_status === "accepted" && !u.winner) {
+    return <span className="text-slate-600 dark:text-slate-300">未获胜</span>
+  }
+  if (u.winner) {
+    return <span className="text-emerald-600 dark:text-emerald-400">已获胜</span>
+  }
   if (u.success) {
     return <span className="text-emerald-600 dark:text-emerald-400">成功</span>
   }
@@ -623,6 +663,28 @@ function hasErrorDetail(u: GatewayUsageLog) {
     u.upstream_error_headers ||
     u.upstream_url
   )
+}
+
+function hasValidationDetail(u: GatewayUsageLog) {
+  return !!(
+    u.validation_rule_id ||
+    u.validation_rule_name ||
+    u.validation_reason ||
+    u.validation_post_commit
+  )
+}
+
+function canShowAttemptDetail(u: GatewayUsageLog) {
+  return (
+    hasValidationDetail(u) ||
+    (hasErrorDetail(u) && (!u.success || isClientDisconnectResult(u)))
+  )
+}
+
+function detailToggleLabel(u: GatewayUsageLog) {
+  if (isClientDisconnectResult(u)) return "断开详情"
+  if (hasValidationDetail(u)) return "校验详情"
+  return "错误详情"
 }
 
 function tryPrettyJSON(raw: string): string {
@@ -690,6 +752,10 @@ function attemptKindLabel(kind?: string) {
       return "重试"
     case "failover":
       return "顺延"
+    case "hedge":
+      return "并发兜底"
+    case "regex_reject":
+      return "正则拒绝"
     case "primary":
       return "首次"
     default:
@@ -710,7 +776,12 @@ function AttemptBadge({
   const attempt = u.attempt && u.attempt > 0 ? u.attempt : 1
   const kind = (u.attempt_kind || "").trim()
   const multi = (chainTotal ?? 0) > 1
-  const isRetryish = kind === "retry" || kind === "failover" || attempt > 1
+  const isRetryish =
+    kind === "retry" ||
+    kind === "failover" ||
+    kind === "hedge" ||
+    kind === "regex_reject" ||
+    attempt > 1
   if (!multi && !isRetryish) return null
 
   const label =
@@ -722,7 +793,11 @@ function AttemptBadge({
     <span
       className={cn(
         "inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
-        kind === "failover"
+        kind === "regex_reject"
+          ? "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200"
+          : kind === "hedge"
+            ? "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200"
+            : kind === "failover"
           ? "bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-200"
           : kind === "retry"
             ? "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200"
@@ -810,9 +885,8 @@ function ChainTimeline({
               : r.channel_id
                 ? `#${r.channel_id}`
                 : "—")
-          const canShowError =
-            hasErrorDetail(r) && (!r.success || isClientDisconnectResult(r))
-          const errOpen = canShowError && !!errorOpen[r.id]
+          const canShowDetail = canShowAttemptDetail(r)
+          const errOpen = canShowDetail && !!errorOpen[r.id]
           return (
             <li
               key={r.id}
@@ -838,7 +912,30 @@ function ChainTimeline({
                 <span className="tabular-nums text-muted-foreground">
                   {formatDurationMS(r.duration_ms)}
                 </span>
-                {canShowError ? (
+                {hasValidationDetail(r) ? (
+                  <span
+                    className={cn(
+                      "max-w-[14rem] truncate text-[11px]",
+                      r.validation_post_commit
+                        ? "text-amber-700 dark:text-amber-300"
+                        : "text-rose-700 dark:text-rose-300",
+                    )}
+                    title={r.validation_reason || r.validation_rule_name || "响应校验命中"}
+                  >
+                    {r.validation_rule_name ||
+                      (r.validation_rule_id ? `规则 #${r.validation_rule_id}` : "响应规则")}
+                    {r.validation_post_commit ? " · 提交后命中" : " · 已拒绝"}
+                  </span>
+                ) : null}
+                {(r.estimated_extra_cost || 0) > 0 ? (
+                  <span
+                    className="text-[11px] tabular-nums text-amber-700 dark:text-amber-300"
+                    title="该未获胜或被拒绝 attempt 可能产生的额外上游成本"
+                  >
+                    额外 {money6(r.estimated_extra_cost || 0)}
+                  </span>
+                ) : null}
+                {canShowDetail ? (
                   <button
                     type="button"
                     className="text-[11px] text-violet-700 underline-offset-2 hover:underline dark:text-violet-300"
@@ -846,9 +943,7 @@ function ChainTimeline({
                   >
                     {errOpen
                       ? "收起详情"
-                      : isClientDisconnectResult(r)
-                        ? "断开详情"
-                        : "错误详情"}
+                      : detailToggleLabel(r)}
                   </button>
                 ) : null}
               </div>
@@ -868,6 +963,7 @@ function ChainTimeline({
 function ErrorDetailPanel({ u }: { u: GatewayUsageLog }) {
   const bodyPretty = u.upstream_error_body ? tryPrettyJSON(u.upstream_error_body) : ""
   const headersPretty = formatUpstreamHeaders(u.upstream_error_headers)
+  const auditOnly = !!u.validation_post_commit && u.success
   const fullDebug = [
     `request_id: ${u.request_id || "—"}`,
     `attempt: ${u.attempt ?? 1}`,
@@ -876,6 +972,12 @@ function ErrorDetailPanel({ u }: { u: GatewayUsageLog }) {
     `channel: ${u.channel_name || u.channel_id || "—"}`,
     `status: ${u.status_code || 0}`,
     `type: ${u.error_type || "—"}`,
+    `attempt_status: ${u.attempt_status || "—"}`,
+    `winner: ${u.winner ? "true" : "false"}`,
+    `validation_rule: ${u.validation_rule_name || u.validation_rule_id || "—"}`,
+    `validation_reason: ${u.validation_reason || "—"}`,
+    `validation_post_commit: ${u.validation_post_commit ? "true" : "false"}`,
+    `estimated_extra_cost: ${money6(u.estimated_extra_cost || 0)}`,
     `url: ${u.upstream_url || "—"}`,
     `cooldown_until: ${u.cooldown_until || "—"}`,
     "",
@@ -893,15 +995,31 @@ function ErrorDetailPanel({ u }: { u: GatewayUsageLog }) {
   ].join("\n")
 
   return (
-    <div className="space-y-3 rounded-lg border border-red-200/80 bg-red-50/50 p-3 text-xs dark:border-red-900/50 dark:bg-red-950/20">
+    <div
+      className={cn(
+        "space-y-3 rounded-lg border p-3 text-xs",
+        auditOnly
+          ? "border-amber-200/80 bg-amber-50/50 dark:border-amber-900/50 dark:bg-amber-950/20"
+          : "border-red-200/80 bg-red-50/50 dark:border-red-900/50 dark:bg-red-950/20",
+      )}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="font-medium text-red-800 dark:text-red-200">上游错误详情</div>
+        <div
+          className={cn(
+            "font-medium",
+            auditOnly
+              ? "text-amber-900 dark:text-amber-200"
+              : "text-red-800 dark:text-red-200",
+          )}
+        >
+          {auditOnly ? "响应校验审计" : "上游错误详情"}
+        </div>
         <Button
           type="button"
           size="sm"
           variant="outline"
           className="h-7 gap-1 text-xs"
-          onClick={() => void copyText("错误详情", fullDebug)}
+          onClick={() => void copyText(auditOnly ? "校验审计" : "错误详情", fullDebug)}
         >
           <Copy className="size-3" /> 复制全部
         </Button>
@@ -920,9 +1038,27 @@ function ErrorDetailPanel({ u }: { u: GatewayUsageLog }) {
           <div>
             #{u.attempt && u.attempt > 0 ? u.attempt : 1}
             {u.attempt_kind ? ` · ${attemptKindLabel(u.attempt_kind)}` : ""}
+            {u.winner ? " · winner" : ""}
             {u.cooldown_until ? ` · 冷却至 ${fullDateTime(u.cooldown_until)}` : ""}
           </div>
         </div>
+        {hasValidationDetail(u) ? (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              响应校验
+            </div>
+            <div className="space-y-0.5 break-all">
+              <div>
+                {u.validation_rule_name ||
+                  (u.validation_rule_id ? `规则 #${u.validation_rule_id}` : "响应规则")}
+                {u.validation_post_commit ? " · 提交后命中（仅审计）" : " · 已拒绝并切换"}
+              </div>
+              {u.validation_reason ? (
+                <div className="text-muted-foreground">{u.validation_reason}</div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         <div>
           <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Upstream URL</div>
           <div className="font-mono break-all">{u.upstream_url || "—"}</div>
@@ -1102,6 +1238,7 @@ function TokenCell({ u }: { u: GatewayUsageLog }) {
 function CostCell({ u }: { u: GatewayUsageLog }) {
   const standard = u.total_cost || 0
   const actual = u.actual_cost || 0
+  const extra = u.estimated_extra_cost || 0
   return (
     <div className="text-sm">
       <div className="flex items-center gap-1.5">
@@ -1164,9 +1301,20 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
               <span className="text-muted-foreground">实收</span>
               <span className="text-green-400">{money6(actual)}</span>
             </div>
+            {extra > 0 ? (
+              <div className="flex justify-between gap-6 text-amber-700 dark:text-amber-300">
+                <span>额外上游成本</span>
+                <span>{money6(extra)}</span>
+              </div>
+            ) : null}
           </TooltipContent>
         </Tooltip>
       </div>
+      {extra > 0 ? (
+        <div className="mt-0.5 text-[11px] tabular-nums text-amber-600 dark:text-amber-400" title="loser/rejected attempt 的可能额外上游成本，不计入网关 Key 配额">
+          额外 {money6(extra)}
+        </div>
+      ) : null}
       {/* 原样式：橙色副行；内容改为标准费用（未乘倍率），避免与实收重复 */}
       <div
         className="mt-0.5 text-[11px] text-orange-500 dark:text-orange-400 tabular-nums"
@@ -1288,9 +1436,11 @@ export function GatewayUsageTable({
       if (seenReq.has(rid)) continue
       seenReq.add(rid)
       const chain = chainByReq.get(rid)!
-      // 主行 = 最终成功，否则最后一次尝试
+      // 主行优先使用实际交付并结算的 winner；兼容旧记录时再回退到最终成功。
       const final =
-        [...chain].reverse().find((r) => r.success) || chain[chain.length - 1]
+        chain.find((r) => r.winner) ||
+        [...chain].reverse().find((r) => r.success) ||
+        chain[chain.length - 1]
       mainRows.push(final)
     } else {
       mainRows.push(u)
@@ -1413,12 +1563,10 @@ export function GatewayUsageTable({
                     : undefined
                 const hasChain = chainTotal > 1
                 const chainExpanded = hasChain && !!chainOpen[rid]
-                const canError =
-                  hasErrorDetail(u) &&
-                  (!u.success || isClientDisconnectResult(u))
+                const canDetail = canShowAttemptDetail(u)
                 const errExpanded = !!errorOpen[u.id]
-                // 单箭头：有链路优先展开链路；无链路且有错误则展开错误
-                const showToggle = hasChain || canError
+                // 单箭头：有链路优先展开链路；无链路时展开错误或校验详情
+                const showToggle = hasChain || canDetail
                 const rowOpen = hasChain ? chainExpanded : errExpanded
 
                 return (
@@ -1449,8 +1597,8 @@ export function GatewayUsageTable({
                                   ? "收起请求链路"
                                   : `展开请求链路（${chainTotal} 次）`
                                 : rowOpen
-                                  ? "收起错误详情"
-                                  : "展开错误详情"
+                                  ? "收起详情"
+                                  : `展开${detailToggleLabel(u)}`
                             }
                             onClick={() => {
                               if (hasChain) {
@@ -1735,7 +1883,7 @@ export function GatewayUsageTable({
                         </TableCell>
                       </TableRow>
                     ) : null}
-                    {!hasChain && canError && errExpanded ? (
+                    {!hasChain && canDetail && errExpanded ? (
                       <TableRow className="hover:bg-transparent">
                         <TableCell colSpan={colSpan} className="bg-muted/20 p-3">
                           <ErrorDetailPanel u={u} />

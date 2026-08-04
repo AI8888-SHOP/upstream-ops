@@ -8,7 +8,7 @@ import type {
 } from "@/lib/api-types"
 
 export type MainTab = "gateway" | "providers" | "usage" | "prices"
-export type ConfigTab = "keys" | "routes" | "models"
+export type ConfigTab = "keys" | "routes" | "models" | "response-rules"
 
 export type ModelSourceLabel = {
   key: string
@@ -32,6 +32,13 @@ export type GroupFormState = {
   failover_on_4xx: boolean
   cooldown_seconds: string
   first_token_timeout_sec: string
+  hedge_enabled: boolean
+  hedge_delay_seconds: string
+  hedge_max_parallel: string
+  hedge_max_attempts: string
+  response_validation_enabled: boolean
+  response_validation_prefix_bytes: string
+  response_validation_prefix_timeout_ms: string
   /** 组级统一 User-Agent；路由选「组」时使用 */
   user_agent: string
 }
@@ -487,6 +494,13 @@ export const emptyGroupForm = (): GroupFormState => ({
   failover_on_4xx: false,
   cooldown_seconds: "30",
   first_token_timeout_sec: "0",
+  hedge_enabled: false,
+  hedge_delay_seconds: "10",
+  hedge_max_parallel: "2",
+  hedge_max_attempts: "4",
+  response_validation_enabled: false,
+  response_validation_prefix_bytes: "8192",
+  response_validation_prefix_timeout_ms: "2000",
   user_agent: "",
 })
 

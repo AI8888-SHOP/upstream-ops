@@ -68,6 +68,18 @@ const defaultGatewayConfig: SystemGatewayConfig = {
   usageErrorMsgRunes: 500,
   usageErrorHeaderValueRunes: 8192,
   usageErrorHeadersJSONBytes: 65536,
+  hedge: {
+    enabled: false,
+    delaySeconds: 10,
+    maxParallel: 2,
+    maxAttempts: 4,
+  },
+  responseValidation: {
+    enabled: false,
+    streamMode: "prefix",
+    prefixBytes: 8192,
+    prefixTimeoutMs: 2000,
+  },
 };
 
 function patchGateway(
@@ -81,6 +93,44 @@ function patchGateway(
     gateway: {
       ...(prev.gateway ?? defaultGatewayConfig),
       [key]: value,
+    },
+  };
+}
+
+function patchGatewayHedge(
+  prev: SystemConfig | null,
+  key: keyof SystemGatewayConfig["hedge"],
+  value: number | boolean,
+): SystemConfig | null {
+  if (!prev) return prev;
+  return {
+    ...prev,
+    gateway: {
+      ...(prev.gateway ?? defaultGatewayConfig),
+      hedge: {
+        ...defaultGatewayConfig.hedge,
+        ...(prev.gateway?.hedge ?? {}),
+        [key]: value,
+      },
+    },
+  };
+}
+
+function patchGatewayValidation(
+  prev: SystemConfig | null,
+  key: keyof SystemGatewayConfig["responseValidation"],
+  value: number | boolean | "prefix",
+): SystemConfig | null {
+  if (!prev) return prev;
+  return {
+    ...prev,
+    gateway: {
+      ...(prev.gateway ?? defaultGatewayConfig),
+      responseValidation: {
+        ...defaultGatewayConfig.responseValidation,
+        ...(prev.gateway?.responseValidation ?? {}),
+        [key]: value,
+      },
     },
   };
 }
@@ -126,7 +176,18 @@ export default function SettingsPage() {
       const cfg = query.data.config;
       setForm({
         ...cfg,
-        gateway: { ...defaultGatewayConfig, ...(cfg.gateway ?? {}) },
+        gateway: {
+          ...defaultGatewayConfig,
+          ...(cfg.gateway ?? {}),
+          hedge: {
+            ...defaultGatewayConfig.hedge,
+            ...(cfg.gateway?.hedge ?? {}),
+          },
+          responseValidation: {
+            ...defaultGatewayConfig.responseValidation,
+            ...(cfg.gateway?.responseValidation ?? {}),
+          },
+        },
       });
     }
   }, [query.data]);
@@ -1129,6 +1190,98 @@ export default function SettingsPage() {
                   }
                 />
               </Field>
+            </div>
+            <div className="space-y-4 border-t border-border pt-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <Label className="text-sm font-medium">新建组默认并发兜底</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    主请求超过延迟仍无有效结果时并发启动其它路由。图片、视频生成和 Realtime 自动排除。
+                  </p>
+                </div>
+                <Switch
+                  checked={form.gateway.hedge.enabled}
+                  onCheckedChange={(checked) =>
+                    setForm((prev) => patchGatewayHedge(prev, "enabled", checked))
+                  }
+                />
+              </div>
+              <div className="grid gap-4 md:grid-cols-3">
+                <Field label="启动延迟（秒）">
+                  <Input
+                    type="number"
+                    min={0.1}
+                    max={300}
+                    step={0.1}
+                    value={String(form.gateway.hedge.delaySeconds)}
+                    onChange={(e) =>
+                      setForm((prev) => patchGatewayHedge(prev, "delaySeconds", num(e.target.value)))
+                    }
+                  />
+                </Field>
+                <Field label="最大并发" description="包含主请求，范围 1-32。">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={32}
+                    value={String(form.gateway.hedge.maxParallel)}
+                    onChange={(e) =>
+                      setForm((prev) => patchGatewayHedge(prev, "maxParallel", num(e.target.value)))
+                    }
+                  />
+                </Field>
+                <Field label="最大尝试" description="必须不小于最大并发，范围 1-64。">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={64}
+                    value={String(form.gateway.hedge.maxAttempts)}
+                    onChange={(e) =>
+                      setForm((prev) => patchGatewayHedge(prev, "maxAttempts", num(e.target.value)))
+                    }
+                  />
+                </Field>
+              </div>
+            </div>
+            <div className="space-y-4 border-t border-border pt-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <Label className="text-sm font-medium">新建组默认响应校验</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    非流式检查完整响应；流式采用 prefix 模式，在首次提交客户端前完成规则检查。
+                  </p>
+                </div>
+                <Switch
+                  checked={form.gateway.responseValidation.enabled}
+                  onCheckedChange={(checked) =>
+                    setForm((prev) => patchGatewayValidation(prev, "enabled", checked))
+                  }
+                />
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field label="前缀上限（字节）" description="范围 1024-1048576。">
+                  <Input
+                    type="number"
+                    min={1024}
+                    max={1048576}
+                    value={String(form.gateway.responseValidation.prefixBytes)}
+                    onChange={(e) =>
+                      setForm((prev) => patchGatewayValidation(prev, "prefixBytes", num(e.target.value)))
+                    }
+                  />
+                </Field>
+                <Field label="前缀等待（毫秒）" description="范围 100-30000。">
+                  <Input
+                    type="number"
+                    min={100}
+                    max={30000}
+                    value={String(form.gateway.responseValidation.prefixTimeoutMs)}
+                    onChange={(e) =>
+                      setForm((prev) => patchGatewayValidation(prev, "prefixTimeoutMs", num(e.target.value)))
+                    }
+                  />
+                </Field>
+              </div>
             </div>
           </SectionCard>
 
