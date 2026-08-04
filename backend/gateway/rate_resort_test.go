@@ -203,3 +203,76 @@ func TestUpdateGroup_RateResortTurnedOnReorders(t *testing.T) {
 		t.Fatalf("turn-on should reorder: %+v / %+v", list[0], list[1])
 	}
 }
+
+func TestSaveRoutes_PersistsLiveGroupRateByID(t *testing.T) {
+	db := openGatewayTestDB(t)
+	groupsRepo := storage.NewGatewayGroups(db)
+	routesRepo := storage.NewGatewayRoutes(db)
+
+	group := &storage.GatewayGroup{
+		Name:              "save-live-group-rate",
+		Status:            storage.GatewayGroupStatusActive,
+		RateSortDirection: "asc",
+	}
+	if err := groupsRepo.Create(group); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	lowID, middleID, highID := int64(60), int64(63), int64(70)
+	fake := &fakeChannelAPIForResort{
+		groups: map[uint][]connector.APIKeyGroup{
+			1: {
+				{ID: &highID, Name: "high", Ratio: 0.07},
+				// 上游名带尾随空格，保存输入会 trim；应优先按稳定的分组 ID 匹配。
+				{ID: &middleID, Name: "Team/plus典韦 🪓 ", Ratio: 0.063},
+				{ID: &lowID, Name: "low", Ratio: 0.06},
+			},
+		},
+	}
+	svc := NewService(groupsRepo, storage.NewGatewayKeys(db), routesRepo, nil, nil, nil, fake, nil, nil)
+
+	_, err := svc.SaveRoutes(group.ID, []RouteInput{
+		{
+			SourceKind: storage.GatewayRouteSourceMonitor, SourceChannelID: 1,
+			SourceGroupID: &highID, SourceGroupName: "high", Weight: 1,
+			RateConvertMode: "raw", BillingRateMultiplier: 1, Enabled: true,
+		},
+		{
+			SourceKind: storage.GatewayRouteSourceMonitor, SourceChannelID: 1,
+			SourceGroupID: &middleID, SourceGroupName: "Team/plus典韦 🪓", Weight: 1,
+			RateConvertMode: "raw", BillingRateMultiplier: 1, Enabled: true,
+		},
+		{
+			SourceKind: storage.GatewayRouteSourceMonitor, SourceChannelID: 1,
+			SourceGroupID: &lowID, SourceGroupName: "low", Weight: 1,
+			RateConvertMode: "raw", BillingRateMultiplier: 1, Enabled: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("SaveRoutes: %v", err)
+	}
+
+	persisted, err := routesRepo.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatalf("list persisted routes: %v", err)
+	}
+	if len(persisted) != 3 {
+		t.Fatalf("persisted routes len=%d, want 3", len(persisted))
+	}
+	if persisted[0].SourceGroupID == nil || *persisted[0].SourceGroupID != lowID ||
+		persisted[1].SourceGroupID == nil || *persisted[1].SourceGroupID != middleID ||
+		persisted[2].SourceGroupID == nil || *persisted[2].SourceGroupID != highID {
+		t.Fatalf("persisted order should be 0.06 < 0.063 < 0.07: %+v", persisted)
+	}
+	if persisted[1].SourceGroupName != "Team/plus典韦 🪓" {
+		t.Fatalf("middle source group name=%q", persisted[1].SourceGroupName)
+	}
+	if persisted[0].BillingRateMultiplier != 0.06 ||
+		persisted[1].BillingRateMultiplier != 0.063 ||
+		persisted[2].BillingRateMultiplier != 0.07 {
+		t.Fatalf("persisted billing should be 0.06 / 0.063 / 0.07, got %v / %v / %v",
+			persisted[0].BillingRateMultiplier,
+			persisted[1].BillingRateMultiplier,
+			persisted[2].BillingRateMultiplier)
+	}
+}

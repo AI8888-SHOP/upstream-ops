@@ -79,6 +79,39 @@ func TestRateForRoute_GroupRatio(t *testing.T) {
 	}
 }
 
+func TestRateForRoute_GroupNameFallbackTrimsWhitespace(t *testing.T) {
+	route := &storage.GatewayRoute{
+		SourceGroupName:  "Team/plus典韦 🪓",
+		RateConvertMode: "raw",
+		RateConvertValue: 1,
+	}
+	groups := []connector.APIKeyGroup{
+		{Name: "Team/plus典韦 🪓 ", Ratio: 0.063},
+	}
+	got := RateForRoute(route, groups)
+	if got != 0.063 {
+		t.Fatalf("got %v want 0.063", got)
+	}
+}
+
+func TestRateForRoute_PrefersGroupIDOverName(t *testing.T) {
+	wantedID, otherID := int64(54), int64(55)
+	route := &storage.GatewayRoute{
+		SourceGroupID:    &wantedID,
+		SourceGroupName:  "Team/plus典韦 🪓",
+		RateConvertMode:  "raw",
+		RateConvertValue: 1,
+	}
+	groups := []connector.APIKeyGroup{
+		{ID: &otherID, Name: "Team/plus典韦 🪓", Ratio: 1},
+		{ID: &wantedID, Name: "renamed upstream group", Ratio: 0.063},
+	}
+	got := RateForRoute(route, groups)
+	if got != 0.063 {
+		t.Fatalf("got %v want 0.063", got)
+	}
+}
+
 func TestRateForRoute_FallbackBillingMultiplier(t *testing.T) {
 	// 列表显示 0.05 且已落库，但运行时拉不到源分组时不应变成 1
 	route := &storage.GatewayRoute{

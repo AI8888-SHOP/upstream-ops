@@ -73,6 +73,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { apiFetch } from "@/lib/api";
 import { formatRatio, relativeTime } from "@/lib/format";
 import { useChannels } from "@/lib/queries";
+import { findSourceGroupRatio } from "@/lib/source-groups";
 import { cn } from "@/lib/utils";
 import type {
   RateSnapshot,
@@ -221,13 +222,12 @@ function accountRateMultiplier(
   groups: RateSnapshot[],
 ) {
   if (account.rate_convert_mode === "custom") return account.rate_convert_value;
-  const sourceGroupName = account.source_group_name.trim();
-  const sourceGroupID = Number(account.source_group_id || 0);
   const sourceRatio =
-    (sourceGroupName
-      ? groups.find((group) => group.model_name === sourceGroupName)?.ratio
-      : groups.find((group) => group.remote_group_id === sourceGroupID)
-          ?.ratio) ?? 1;
+    findSourceGroupRatio(
+      groups,
+      account.source_group_id,
+      account.source_group_name,
+    ) ?? 1;
   switch (account.rate_convert_mode) {
     case "multiply_100":
       return sourceRatio * 100;

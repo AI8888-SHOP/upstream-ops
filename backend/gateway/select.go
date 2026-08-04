@@ -39,9 +39,18 @@ func RateForRoute(route *storage.GatewayRoute, groups []connector.APIKeyGroup) f
 		}
 		return rateconvert.Convert(1, mode, route.RateConvertValue)
 	}
-	for _, g := range groups {
-		if (route.SourceGroupID != nil && g.ID != nil && *g.ID == *route.SourceGroupID) ||
-			(sourceGroupName != "" && strings.EqualFold(g.Name, sourceGroupName)) {
+	if route.SourceGroupID != nil {
+		for _, g := range groups {
+			if g.ID != nil && *g.ID == *route.SourceGroupID {
+				return rateconvert.Convert(g.Ratio, mode, route.RateConvertValue)
+			}
+		}
+	}
+	if sourceGroupName != "" {
+		for _, g := range groups {
+			if !strings.EqualFold(strings.TrimSpace(g.Name), sourceGroupName) {
+				continue
+			}
 			return rateconvert.Convert(g.Ratio, mode, route.RateConvertValue)
 		}
 	}

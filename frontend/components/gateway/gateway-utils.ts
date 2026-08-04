@@ -6,6 +6,7 @@ import type {
   GatewayRouteSourceKind,
   RateSnapshot,
 } from "@/lib/api-types"
+import { findSourceGroupRatio } from "@/lib/source-groups"
 
 export type MainTab = "gateway" | "providers" | "usage" | "prices"
 export type ConfigTab = "keys" | "routes" | "models" | "response-rules"
@@ -347,12 +348,15 @@ export function routeAccountRate(
   if (route.rate_convert_mode === "custom") {
     return Number(route.rate_convert_value) || 0
   }
-  const sourceGroupName = (route.source_group_name ?? "").trim()
-  const sourceGroupID = Number(route.source_group_id || 0)
-  const sourceRatio =
-    (sourceGroupName
-      ? groups.find((g) => g.model_name === sourceGroupName)?.ratio
-      : groups.find((g) => g.remote_group_id === sourceGroupID)?.ratio) ?? 1
+  const sourceRatio = findSourceGroupRatio(
+    groups,
+    route.source_group_id,
+    route.source_group_name,
+  )
+  if (sourceRatio == null) {
+    const persistedRate = Number(route.billing_rate_multiplier)
+    return Number.isFinite(persistedRate) && persistedRate > 0 ? persistedRate : 1
+  }
   switch (route.rate_convert_mode) {
     case "multiply_100":
       return sourceRatio * 100

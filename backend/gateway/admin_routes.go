@@ -184,6 +184,16 @@ func (a *AdminService) SaveRoutes(groupID uint, inputs []RouteInput) ([]storage.
 		a.enrichRouteSourceGroupName(&list[i], groupsByChannel[list[i].SourceChannelID])
 	}
 	list = OrderRoutesByRate(list, groupsByChannel, dir)
+	// 监控路由的计费倍率以服务端刚拉到的源分组为准，不能持久化客户端提交的旧快照。
+	// provider 已在上方按 default/custom 规则处理，保持其独立计费语义。
+	for i := range list {
+		if list[i].NormalizeSourceKind() == storage.GatewayRouteSourceProvider {
+			continue
+		}
+		if rate := RateForRoute(&list[i], groupsByChannel[list[i].SourceChannelID]); rate > 0 {
+			list[i].BillingRateMultiplier = rate
+		}
+	}
 	if err := a.Routes.SaveForGroup(groupID, list); err != nil {
 		return nil, err
 	}
