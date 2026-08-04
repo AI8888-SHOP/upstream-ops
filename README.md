@@ -96,6 +96,8 @@ UpstreamOps focuses on these problems:
 - Supports Cloudflare Turnstile solving for upstream login flows.
 - Opens upstream site URLs directly from channel cards.
 - Supports clearing saved login information from channel cards.
+- Supports channel-level recharge multiplier conversion for balance, spending, and redeem values. Empty or non-positive values keep the upstream result; valid values can divide or multiply and are rounded to four decimal places.
+- Supports channel-level group multiplier conversion for upstream model/group rates and API Key group ratios. It uses the same divide/multiply algorithm and affects rate snapshots, change notifications, gateway scheduling, upstream sync, and API Key displays.
 - Supports a "only show groups with created keys" toggle: when enabled, channel cards, group dialogs, rate panels, and rate-change notifications only cover groups that already have API keys; gateway forwarding, upstream sync, and notification settings still see all groups, and local rate snapshots always keep the full set.
 - Deleting a channel cleans related snapshots, rates, announcements, notification cooldowns, and notification logs.
 
@@ -132,6 +134,7 @@ UpstreamOps focuses on these problems:
 - Filters small rate changes by minimum percentage.
 - Supports notification subscriptions filtered by upstream channel and rate group.
 - Provides a full channel group overview with search and sorting by channel or rate.
+- Applies the configured channel group multiplier before storing and displaying rates; existing channels with no group multiplier keep upstream values unchanged.
 
 ### Subscription Management and Usage Monitoring
 
@@ -326,7 +329,7 @@ Commit only `.env.example` to a public repository. Never commit `.env`, `data/`,
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.9
+IMAGE_TAG=v0.0.10
 ```
 
 ## MySQL Deployment
@@ -504,6 +507,13 @@ POST /api/settings/proxy/test
 ## Upstream Channel Configuration
 
 Upstream channels can enable `proxy_enabled` individually. Upstream login, balance sync, rate sync, announcement sync, API key management, recharge, redeem, and subscription APIs use proxy only when both global proxy and channel proxy are enabled.
+
+Channel-level conversions are configured in the channel form or channel create/update API:
+
+- `recharge_multiplier` / `recharge_multiplier_mode`: converts balance, spending, and redeem values.
+- `group_multiplier` / `group_multiplier_mode`: converts upstream model/group rates and API Key group ratios.
+- A missing or non-positive multiplier preserves the upstream value. `divide` means `upstream / value`; `multiply` means `upstream × value`. Results use the same four-decimal rounding as recharge conversion.
+- Group conversion runs before a Sub2API synchronization account or gateway route applies its own rate conversion, so the two configured factors are applied in sequence exactly once.
 
 ### NewAPI
 

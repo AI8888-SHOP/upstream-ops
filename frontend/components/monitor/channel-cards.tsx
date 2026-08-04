@@ -115,6 +115,14 @@ function rechargeMultiplierTip(c: Channel) {
   return `充值倍率：跟随上游（${mode}）`
 }
 
+function groupMultiplierTip(c: Channel) {
+  if (c.group_multiplier == null || c.group_multiplier <= 0) {
+    return "分组倍率：保留上游原值"
+  }
+  const operation = c.group_multiplier_mode === "multiply" ? "原倍率 × 换算值" : "原倍率 / 换算值"
+  return `分组倍率换算值：${decimal(c.group_multiplier, 4)}（${operation}）`
+}
+
 /** ratioTone 按倍率给 chip 上色，与 ChannelRatesPanel 共用同一套规则。 */
 function ratioTone(r: number): string {
   if (r <= 0.8) return "bg-success/10 text-success ring-success/20"
@@ -209,6 +217,7 @@ function InlineRates({ channel }: { channel: Channel }) {
                   {"最近更新："}
                   {relativeTime(r.last_seen_at)}
                 </p>
+                <p className="mt-0.5 text-muted-foreground">{groupMultiplierTip(channel)}</p>
               </TooltipContent>
             </Tooltip>
           ))}

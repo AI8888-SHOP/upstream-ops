@@ -66,6 +66,8 @@ type channelInput struct {
 	BalanceThreshold       float64                `json:"balance_threshold"`
 	RechargeMultiplier     *float64               `json:"recharge_multiplier"`
 	RechargeMultiplierMode string                 `json:"recharge_multiplier_mode"`
+	GroupMultiplier        *float64               `json:"group_multiplier"`
+	GroupMultiplierMode    string                 `json:"group_multiplier_mode"`
 	MonitorEnabled         bool                   `json:"monitor_enabled"`
 	OnlyCreatedKeyGroupsEnabled bool             `json:"only_created_key_groups_enabled"`
 }
@@ -87,6 +89,8 @@ type channelUpdateInput struct {
 	BalanceThreshold       *float64                `json:"balance_threshold"`
 	RechargeMultiplier     *float64                `json:"recharge_multiplier"`
 	RechargeMultiplierMode *string                 `json:"recharge_multiplier_mode"`
+	GroupMultiplier        *float64                `json:"group_multiplier"`
+	GroupMultiplierMode    *string                 `json:"group_multiplier_mode"`
 	MonitorEnabled         *bool                   `json:"monitor_enabled"`
 	OnlyCreatedKeyGroupsEnabled *bool             `json:"only_created_key_groups_enabled"`
 }
@@ -173,6 +177,8 @@ func createChannel(c *gin.Context, d *Deps) {
 		BalanceThreshold:       in.BalanceThreshold,
 		RechargeMultiplier:     in.RechargeMultiplier,
 		RechargeMultiplierMode: in.RechargeMultiplierMode,
+		GroupMultiplier:        in.GroupMultiplier,
+		GroupMultiplierMode:    in.GroupMultiplierMode,
 		MonitorEnabled:         in.MonitorEnabled,
 		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
 	})
@@ -273,6 +279,8 @@ func updateChannel(c *gin.Context, d *Deps) {
 		BalanceThreshold:       in.BalanceThreshold,
 		RechargeMultiplier:     in.RechargeMultiplier,
 		RechargeMultiplierMode: in.RechargeMultiplierMode,
+		GroupMultiplier:        in.GroupMultiplier,
+		GroupMultiplierMode:    in.GroupMultiplierMode,
 		MonitorEnabled:         in.MonitorEnabled,
 		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
 	})

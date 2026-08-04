@@ -397,3 +397,66 @@ func TestTestLoginFailsWhenSessionAuthFails(t *testing.T) {
 		t.Fatalf("saved session = %#v, want nil", saved)
 	}
 }
+
+func TestApplyGroupMultiplierToAPIKey(t *testing.T) {
+	multiplier := 2.0
+	key := &connector.APIKey{GroupRatio: 1.23456}
+	applyGroupMultiplierToAPIKey(key, &connector.Channel{
+		GroupMultiplier:     &multiplier,
+		GroupMultiplierMode: connector.RechargeMultiplierModeMultiply,
+	})
+	if key.GroupRatio != 2.4691 {
+		t.Fatalf("group ratio = %v, want 2.4691", key.GroupRatio)
+	}
+}
+
+func TestApplyGroupMultiplierToAPIKeyWithoutConfiguration(t *testing.T) {
+	key := &connector.APIKey{GroupRatio: 1.234567}
+	applyGroupMultiplierToAPIKey(key, &connector.Channel{})
+	if key.GroupRatio != 1.234567 {
+		t.Fatalf("group ratio = %v, want upstream value", key.GroupRatio)
+	}
+}
+
+func TestChannelGroupMultiplierCRUD(t *testing.T) {
+	svc, _ := testService(t)
+	multiplier := 2.0
+	created, err := svc.Create(CreateInput{
+		Name:              "group-ratio",
+		Type:              storage.ChannelTypeNewAPI,
+		SiteURL:           "https://example.com",
+		Username:          "user",
+		Password:          "password",
+		CredentialMode:    storage.CredentialModePassword,
+		GroupMultiplier:   &multiplier,
+		GroupMultiplierMode: connector.RechargeMultiplierModeMultiply,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.GroupMultiplier == nil || *created.GroupMultiplier != 2 || created.GroupMultiplierMode != connector.RechargeMultiplierModeMultiply {
+		t.Fatalf("created group multiplier = %#v mode=%q", created.GroupMultiplier, created.GroupMultiplierMode)
+	}
+
+	updatedMultiplier := 4.0
+	updatedMode := "invalid"
+	updated, err := svc.Update(created.ID, UpdateInput{
+		GroupMultiplier:     &updatedMultiplier,
+		GroupMultiplierMode: &updatedMode,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.GroupMultiplier == nil || *updated.GroupMultiplier != 4 || updated.GroupMultiplierMode != connector.RechargeMultiplierModeDivide {
+		t.Fatalf("updated group multiplier = %#v mode=%q", updated.GroupMultiplier, updated.GroupMultiplierMode)
+	}
+
+	clear := 0.0
+	updated, err = svc.Update(created.ID, UpdateInput{GroupMultiplier: &clear})
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if updated.GroupMultiplier != nil {
+		t.Fatalf("cleared group multiplier = %v, want nil", *updated.GroupMultiplier)
+	}
+}

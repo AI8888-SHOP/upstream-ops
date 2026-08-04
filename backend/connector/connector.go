@@ -39,6 +39,8 @@ type Channel struct {
 	ProxyURL               string
 	RechargeMultiplier     *float64
 	RechargeMultiplierMode string
+	GroupMultiplier        *float64
+	GroupMultiplierMode    string
 	// TurnstileToken 由调用方在 Login 前预先求解打码后填入；为空则直接发起登录。
 	TurnstileToken string
 }
@@ -65,6 +67,16 @@ func ApplyRechargeMultiplier(value float64, multiplier *float64, mode string) fl
 		return round4(value * *multiplier)
 	}
 	return round4(value / *multiplier)
+}
+
+// NormalizeGroupMultiplierMode and ApplyGroupMultiplier intentionally share
+// the recharge conversion semantics so both controls behave identically.
+func NormalizeGroupMultiplierMode(mode string) string {
+	return NormalizeRechargeMultiplierMode(mode)
+}
+
+func ApplyGroupMultiplier(value float64, multiplier *float64, mode string) float64 {
+	return ApplyRechargeMultiplier(value, multiplier, mode)
 }
 
 func round4(value float64) float64 {
