@@ -2,12 +2,55 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestRunHedgeTerminalFailureStopsWithoutWinner(t *testing.T) {
+	want := errors.New("transport failover disabled")
+	result, err := runHedge(
+		context.Background(),
+		false,
+		hedgePolicy{MaxAttempts: 4},
+		func(context.Context, hedgeAttemptInfo) (int, error) {
+			return 0, stopHedgeAttempts(want)
+		},
+		func(int) (bool, error) { return true, nil },
+		hedgeHooks[int]{},
+	)
+	if !errors.Is(err, want) {
+		t.Fatalf("err=%v, want %v", err, want)
+	}
+	if result.Winner != nil || len(result.Attempts) != 1 {
+		t.Fatalf("winner=%+v attempts=%d, want no winner and one attempt", result.Winner, len(result.Attempts))
+	}
+}
+
+func TestRunHedgeSequentialPlanPreservesExplicitAttemptBudget(t *testing.T) {
+	var calls atomic.Int32
+	maxAttempts := maxHedgeAttempts + 3
+	result, err := runHedge(
+		context.Background(),
+		false,
+		hedgePolicy{MaxAttempts: maxAttempts},
+		func(context.Context, hedgeAttemptInfo) (int, error) {
+			calls.Add(1)
+			return 0, errors.New("retryable failure")
+		},
+		nil,
+		hedgeHooks[int]{},
+	)
+	if !errors.Is(err, errHedgeExhausted) {
+		t.Fatalf("err=%v, want exhausted", err)
+	}
+	if got := int(calls.Load()); got != maxAttempts || len(result.Attempts) != maxAttempts {
+		t.Fatalf("calls=%d attempts=%d, want %d", got, len(result.Attempts), maxAttempts)
+	}
+}
 
 func TestRunHedgeDelayedFallbackWinsAndCancelsPrimary(t *testing.T) {
 	var calls atomic.Int32

@@ -24,6 +24,32 @@ var (
 	errHedgeCanceled  = errors.New("hedge request canceled")
 )
 
+// hedgeTerminalError stops the attempt ladder without selecting a winner.
+// It is used when an auxiliary feature (for example response validation) has
+// a larger route plan than the legacy transport failover policy permits.
+type hedgeTerminalError struct{ err error }
+
+func (e *hedgeTerminalError) Error() string {
+	if e == nil || e.err == nil {
+		return "hedge attempt terminated"
+	}
+	return e.err.Error()
+}
+
+func (e *hedgeTerminalError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func stopHedgeAttempts(err error) error {
+	if err == nil {
+		err = errHedgeExhausted
+	}
+	return &hedgeTerminalError{err: err}
+}
+
 // hedgePolicy controls the launch ladder. MaxParallel includes the primary
 // request and MaxAttempts is the total request budget.
 type hedgePolicy struct {
@@ -252,8 +278,15 @@ func runHedge[T any](ctx context.Context, eligible bool, policy hedgePolicy, run
 	if run == nil {
 		return hedgeRunResult[T]{}, errors.New("hedge attempt function is nil")
 	}
+	if !policy.Enabled || !eligible {
+		maxAttempts := policy.MaxAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = defaultHedgeMaxAttempts
+		}
+		return runSequentialHedge(ctx, maxAttempts, run, validate, hooks)
+	}
 	policy = policy.normalized()
-	if !policy.Enabled || !eligible || policy.MaxParallel <= 1 || policy.MaxAttempts <= 1 {
+	if policy.MaxParallel <= 1 || policy.MaxAttempts <= 1 {
 		return runSequentialHedge(ctx, policy.MaxAttempts, run, validate, hooks)
 	}
 
@@ -324,6 +357,8 @@ func runHedge[T any](ctx context.Context, eligible bool, policy hedgePolicy, run
 			stopHedgeTimer(timer)
 			attempt := completion.result
 			delete(active, attempt.Info.Number)
+			var terminalErr *hedgeTerminalError
+			terminal := errors.As(attempt.Err, &terminalErr)
 			if attempt.Err != nil {
 				attempt.Outcome = hedgeOutcomeError
 			} else if validate == nil {
@@ -340,6 +375,13 @@ func runHedge[T any](ctx context.Context, eligible bool, policy hedgePolicy, run
 			completed[attempt.Info.Number] = attempt
 			if hooks.OnComplete != nil {
 				hooks.OnComplete(attempt)
+			}
+			if terminal {
+				cancel()
+				collectActiveHedgeAttempts(active, completions, completed, validate, hooks, false)
+				result.Attempts = orderedHedgeAttempts(completed)
+				result.FinishedAt = time.Now()
+				return result, terminalErr.err
 			}
 			if attempt.Accepted {
 				winner := attempt
@@ -386,6 +428,8 @@ func runSequentialHedge[T any](ctx context.Context, maxAttempts int, run hedgeAt
 		}
 		value, err := run(ctx, info)
 		attempt := hedgeAttemptResult[T]{Info: info, Value: value, Err: err, FinishedAt: time.Now()}
+		var terminalErr *hedgeTerminalError
+		terminal := errors.As(err, &terminalErr)
 		if err != nil {
 			attempt.Outcome = hedgeOutcomeError
 		} else if validate == nil {
@@ -403,6 +447,9 @@ func runSequentialHedge[T any](ctx context.Context, maxAttempts int, run hedgeAt
 		result.FinishedAt = attempt.FinishedAt
 		if hooks.OnComplete != nil {
 			hooks.OnComplete(attempt)
+		}
+		if terminal {
+			return result, terminalErr.err
 		}
 		if attempt.Accepted {
 			winner := attempt

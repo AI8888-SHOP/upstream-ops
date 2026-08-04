@@ -112,6 +112,12 @@ func (a *coordinatedForwardAttempt) gateCommitError() error {
 	return a.gateCommitErr
 }
 
+func (a *coordinatedForwardAttempt) setTerminal(value bool) {
+	a.streamMu.Lock()
+	a.Terminal = value
+	a.streamMu.Unlock()
+}
+
 func (a *coordinatedForwardAttempt) setStreamResult(result streamAttemptResult) {
 	a.streamMu.Lock()
 	a.streamResult = result
@@ -161,13 +167,16 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		Delay: time.Duration(req.group.HedgeDelaySeconds * float64(time.Second)),
 		MaxParallel: req.group.HedgeMaxParallel,
 		MaxAttempts: len(plan),
-	}.normalized()
-	if policy.MaxAttempts > len(plan) {
-		policy.MaxAttempts = len(plan)
+	}
+	if policy.MaxParallel <= 0 {
+		policy.MaxParallel = defaultHedgeMaxParallel
+	}
+	if policy.MaxParallel > policy.MaxAttempts {
+		policy.MaxParallel = policy.MaxAttempts
 	}
 
 	var states sync.Map
-	var rejectedRoutes sync.Map
+	var excludedRoutes sync.Map
 	run := func(ctx context.Context, info hedgeAttemptInfo) (*coordinatedForwardAttempt, error) {
 		entry := plan[info.Number-1]
 		attempt := &coordinatedForwardAttempt{
@@ -176,7 +185,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		}
 		states.Store(info.Number, attempt)
 		defer close(attempt.runnerDone)
-		if _, rejected := rejectedRoutes.Load(attempt.Route.ID); rejected {
+		if _, excluded := excludedRoutes.Load(attempt.Route.ID); excluded {
 			attempt.Skipped = true
 			attempt.Err = errSkippedRejectedRoute
 			return attempt, attempt.Err
@@ -188,27 +197,55 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 				Detail: fmt.Sprintf("config error\nroute_id: %d\nsource_kind: %s\nerror: %s\n", attempt.Route.ID, attempt.Route.NormalizeSourceKind(), err.Error()),
 			}
 			attempt.DurationMS = time.Since(attempt.StartedAt).Milliseconds()
+			// Preparation errors are route-local and are not useful to retry on the
+			// same route. They may move to another route only when the legacy
+			// transport failover policy allows it; response validation alone must
+			// not turn a configuration error into a route switch.
+			excludedRoutes.Store(attempt.Route.ID, struct{}{})
+			if !req.hedgeActive && !coordinatedTransportFailoverEnabled(req.group) {
+				return attempt, stopHedgeAttempts(err)
+			}
 			return attempt, err
 		}
-		attemptTimeout := req.firstToken
-		if info.Number >= len(plan) {
-			attemptTimeout = 0
-		}
+		attemptTimeout := coordinatedAttemptFirstTokenTimeout(
+			req.firstToken, req.group, req.hedgeActive, plan, info.Number, attempt.Route.ID,
+		)
+		var runErr error
 		if req.stream {
-			return rt.runCoordinatedStreamAttempt(ctx, &req, attempt, attemptTimeout)
+			_, runErr = rt.runCoordinatedStreamAttempt(ctx, &req, attempt, attemptTimeout)
+		} else {
+			_, runErr = rt.runCoordinatedNonStreamAttempt(ctx, &req, attempt, attemptTimeout)
 		}
-		return rt.runCoordinatedNonStreamAttempt(ctx, &req, attempt, attemptTimeout)
+		// Response validation is allowed to switch routes even when the legacy
+		// transport failover toggle is off. Ordinary transport/status failures
+		// must retain the original retry/failover semantics, however; make the
+		// first such result terminal so the coordinator does not accidentally
+		// treat the validation route budget as a transport failover budget.
+		if !req.hedgeActive && !coordinatedTransportFailoverEnabled(req.group) {
+			validation, status, _, terminal := attempt.validationSnapshot()
+			if !validation.IsRejected() {
+				failed := runErr != nil || terminal || status < 200 || status >= 300
+				if failed && !coordinatedSameRouteRetryAllowed(req.group, attempt) {
+					attempt.setTerminal(true)
+					if runErr == nil {
+						runErr = fmt.Errorf("upstream status %d", status)
+					}
+					return attempt, stopHedgeAttempts(runErr)
+				}
+			}
+		}
+		return attempt, runErr
 	}
 	validate := func(attempt *coordinatedForwardAttempt) (bool, error) {
 		if attempt == nil || attempt.Skipped {
 			return false, errSkippedRejectedRoute
 		}
 		validation, status, _, terminal := attempt.validationSnapshot()
-		if validation.IsRejected() {
-			rejectedRoutes.Store(attempt.Route.ID, struct{}{})
+		if validation.IsRejected() && !validation.PostCommit {
+			excludedRoutes.Store(attempt.Route.ID, struct{}{})
 			return false, &responseRejectedError{Result: validation}
 		}
-		return (status >= 200 && status < 300) || terminal, nil
+		return (status >= 200 && status < 300) || terminal || validation.PostCommit, nil
 	}
 	hooks := hedgeHooks[*coordinatedForwardAttempt]{
 		OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
@@ -267,12 +304,6 @@ func buildCoordinatedRoutePlan(candidates []ScoredRoute, group *storage.GatewayG
 	if hedgeActive {
 		maxAttempts := hedgePolicy{MaxAttempts: group.HedgeMaxAttempts}.normalized().MaxAttempts
 		routeLimit = minInt(len(candidates), maxAttempts)
-	} else if group.RetryEnabled && group.FailoverEnabled {
-		failoverMax := group.FailoverMax
-		if failoverMax < 0 {
-			failoverMax = 0
-		}
-		routeLimit = minInt(len(candidates), 1+failoverMax)
 	} else if validationEnabled {
 		// A pre-commit response-rule match is an explicit route-switch signal.
 		// It must not be gated by the ordinary transport failover toggle (and it
@@ -285,6 +316,12 @@ func buildCoordinatedRoutePlan(candidates []ScoredRoute, group *storage.GatewayG
 		} else {
 			routeLimit = len(candidates)
 		}
+	} else if group.RetryEnabled && group.FailoverEnabled {
+		failoverMax := group.FailoverMax
+		if failoverMax < 0 {
+			failoverMax = 0
+		}
+		routeLimit = minInt(len(candidates), 1+failoverMax)
 	}
 	retries := 0
 	if group.RetryEnabled {
@@ -311,6 +348,46 @@ func buildCoordinatedRoutePlan(candidates []ScoredRoute, group *storage.GatewayG
 		}
 	}
 	return plan
+}
+
+func coordinatedTransportFailoverEnabled(group *storage.GatewayGroup) bool {
+	return group != nil && group.RetryEnabled && group.FailoverEnabled && group.FailoverMax > 0
+}
+
+func coordinatedSameRouteRetryAllowed(group *storage.GatewayGroup, attempt *coordinatedForwardAttempt) bool {
+	return group != nil && group.RetryEnabled && attempt != nil && attempt.Plan.TryOnRoute+1 < attempt.Plan.MaxTries
+}
+
+// coordinatedAttemptFirstTokenTimeout keeps the legacy timeout contract when
+// response validation has expanded the route plan: a first-token timeout is a
+// transport failover trigger, not a reason to switch routes solely for regex
+// validation. Hedge attempts retain their independent timeout ladder.
+func coordinatedAttemptFirstTokenTimeout(
+	configured time.Duration,
+	group *storage.GatewayGroup,
+	hedgeActive bool,
+	plan []coordinatedRoutePlan,
+	number int,
+	routeID uint,
+) time.Duration {
+	if configured <= 0 {
+		return 0
+	}
+	if hedgeActive {
+		if number > 0 && number < len(plan) {
+			return configured
+		}
+		return 0
+	}
+	if !coordinatedTransportFailoverEnabled(group) || number <= 0 {
+		return 0
+	}
+	for index := number; index < len(plan); index++ {
+		if plan[index].Candidate.Route.ID != routeID {
+			return configured
+		}
+	}
+	return 0
 }
 
 func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, attempt *coordinatedForwardAttempt) error {
@@ -732,7 +809,7 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 				upstreamBody, attempt.UpstreamURL, req.c.Request.Method,
 			)
 		}
-		if validation.IsRejected() && validation.PostCommit {
+		if isWinner && validation.IsRejected() && validation.PostCommit {
 			attemptStatus = storage.GatewayAttemptStatusAccepted
 		}
 		if attemptStatus == storage.GatewayAttemptStatusError && req.group.RetryEnabled &&
