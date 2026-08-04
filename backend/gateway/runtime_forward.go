@@ -52,8 +52,21 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 
-	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	groupMapping := ParseModelMapping(group.ModelMappingJSON)
+	filteredRoutes, modelFilterErr := rt.filterRoutesForRequestedModel(routes, requestedModel, groupMapping)
+	if modelFilterErr != nil {
+		rt.finalizeUsageFailure(reqID, key)
+		rt.writeGatewayError(c, kind, http.StatusInternalServerError, "api_error", modelFilterErr.Error())
+		return
+	}
+	if strings.TrimSpace(requestedModel) != "" && len(filteredRoutes) == 0 {
+		rt.finalizeUsageFailure(reqID, key)
+		rt.writeGatewayError(c, kind, http.StatusServiceUnavailable, "model_not_found",
+			fmt.Sprintf("no available channel for model %s", requestedModel))
+		return
+	}
+	routes = filteredRoutes
+	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	validator, validationErr := rt.responseValidatorForGroup(group)
 	if validationErr != nil {
 		rt.finalizeUsageFailure(reqID, key)
@@ -530,6 +543,11 @@ func (rt *Runtime) forwardOnce(
 	if target == nil {
 		return 0, nil, nil, nil, errors.New("upstream target is nil")
 	}
+	release, err := rt.acquireUpstreamConcurrency(ctx, target)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	defer release()
 
 	// 可取消：首字超时需能打断卡住的 Do / body 读
 	reqCtx, abortReq := context.WithCancel(ctx)

@@ -346,7 +346,8 @@ export function routeAccountRate(
   groups: RateSnapshot[],
 ): number {
   if (route.rate_convert_mode === "custom") {
-    return Number(route.rate_convert_value) || 0
+    const custom = Number(route.rate_convert_value)
+    return Number.isFinite(custom) ? custom : 0
   }
   const sourceRatio = findSourceGroupRatio(
     groups,
@@ -380,11 +381,22 @@ export function routeEffectiveRate(
     }
     const pid = Number(route.gateway_provider_id) || 0
     const p = providers.find((x) => x.id === pid)
-    return p?.default_billing_rate && p.default_billing_rate > 0
-      ? p.default_billing_rate
+    const providerRate = Number(p?.default_billing_rate)
+    return Number.isFinite(providerRate) && providerRate > 0
+      ? providerRate
       : 1
   }
   return routeAccountRate(route, groups)
+}
+
+function compareRouteRates(a: unknown, b: unknown, direction: number) {
+  const rateA = Number(a)
+  const rateB = Number(b)
+  const finiteA = Number.isFinite(rateA)
+  const finiteB = Number.isFinite(rateB)
+  if (finiteA !== finiteB) return finiteA ? -1 : 1
+  if (!finiteA) return 0
+  return (rateA - rateB) * direction
 }
 
 /**
@@ -409,7 +421,7 @@ export function sortGatewayRouteRows(
       }
     })
     .sort((a, b) => {
-      const rateDiff = (a.rate - b.rate) * dir
+      const rateDiff = compareRouteRates(a.rate, b.rate, dir)
       if (rateDiff !== 0) return rateDiff
       const wa = Number(a.route.weight) || 1
       const wb = Number(b.route.weight) || 1

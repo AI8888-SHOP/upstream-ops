@@ -82,6 +82,11 @@ func (s *Service) UpdateProvider(id uint, in UpdateProviderInput) (*storage.Gate
 	return s.admin().UpdateProvider(id, in)
 }
 
+// PreviewProviderModels 拉取直连渠道实时模型并返回当前选择。
+func (s *Service) PreviewProviderModels(ctx context.Context, id uint) (*ProviderModelsPreview, error) {
+	return s.admin().PreviewProviderModels(ctx, id)
+}
+
 // DeleteProvider 删除直连渠道。
 func (s *Service) DeleteProvider(id uint) error {
 	return s.admin().DeleteProvider(id)

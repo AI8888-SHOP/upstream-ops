@@ -88,8 +88,12 @@ func TestStreamResponseValidatorPrefixTimeoutAndLateAudit(t *testing.T) {
 	}
 	stream.Commit()
 	result := stream.Consume([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"blocked\"}}]}\n\n"))
+	if result.IsRejected() {
+		t.Fatalf("post-commit consume must not reject or trigger a retry: %+v", result)
+	}
+	result = stream.AuditPostCommit()
 	if !result.IsRejected() || !result.PostCommit || result.RuleID != 5 {
-		t.Fatalf("late result=%+v", result)
+		t.Fatalf("late audit result=%+v", result)
 	}
 }
 
@@ -132,5 +136,29 @@ func TestResponseValidatorPartialSSEJSONIgnoresMetadata(t *testing.T) {
 	payload := []byte(`data: {"model":"blocked","metadata":{"text":"blocked"},"choices":[{"delta":{"content":"safe`)
 	if result := stream.Consume(payload); result.IsRejected() {
 		t.Fatalf("metadata unexpectedly matched assistant text: %+v", result)
+	}
+}
+
+func BenchmarkStreamResponseValidatorPostCommit(b *testing.B) {
+	v, err := newResponseValidator(responseValidationConfig{
+		Enabled: true, StreamMode: "prefix", PrefixBytes: 8192, PrefixTimeout: time.Second,
+	}, []responseRuleSpec{
+		{ID: 8, Name: "late", Enabled: true, Pattern: `(?i)blocked`, Target: "assistant_text"},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	stream := v.NewStreamValidator("openai_chat", "gpt-test")
+	stream.Commit()
+	payload := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"safe\"}}]}\n\n")
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stream.Consume(payload)
+	}
+	b.StopTimer()
+	if result := stream.AuditPostCommit(); result.IsRejected() {
+		b.Fatalf("unexpected audit rejection: %+v", result)
 	}
 }

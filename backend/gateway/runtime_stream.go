@@ -135,6 +135,12 @@ func (rt *Runtime) forwardStream(
 	converted bool,
 	firstTokenTimeout time.Duration,
 ) streamAttemptResult {
+	release, err := rt.acquireUpstreamConcurrency(ctx, target)
+	if err != nil {
+		return streamAttemptResult{Err: err}
+	}
+	defer release()
+
 	clientCtx := context.Background()
 	if c != nil && c.Request != nil && c.Request.Context() != nil {
 		clientCtx = c.Request.Context()

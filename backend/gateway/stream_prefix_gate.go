@@ -247,6 +247,9 @@ func (g *streamPrefixGateWriter) Finish() validationResult {
 		return g.rejection
 	}
 	if g.committed {
+		if late := g.validator.AuditPostCommit(); late.IsRejected() {
+			g.lateMatch = late
+		}
 		if g.lateMatch.IsRejected() {
 			return g.lateMatch
 		}
@@ -255,6 +258,9 @@ func (g *streamPrefixGateWriter) Finish() validationResult {
 	result := g.validator.Finalize()
 	if result.IsRejected() {
 		g.rejection = result
+	}
+	if late := g.validator.AuditPostCommit(); late.IsRejected() {
+		g.lateMatch = late
 	}
 	g.stopTimerLocked()
 	g.signalReadyLocked(result)

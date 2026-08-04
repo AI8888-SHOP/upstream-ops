@@ -31,10 +31,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import { Checkbox } from "@/components/ui/checkbox"
 import { useConfirm } from "@/components/ui/confirm-dialog"
 import { apiFetch } from "@/lib/api"
 import type {
   GatewayProvider,
+  GatewayProviderModelPolicy,
+  GatewayProviderModelsPreview,
   GatewayProviderPage,
   GatewayUpstreamProtocol,
 } from "@/lib/api-types"
@@ -47,6 +50,9 @@ type ProviderForm = {
   upstream_protocol: GatewayUpstreamProtocol
   default_billing_rate: string
   auth_style: string
+  model_policy: GatewayProviderModelPolicy
+  allowed_models: string[]
+  concurrency_limit: string
   enabled: boolean
   proxy_enabled: boolean
   notes: string
@@ -59,6 +65,9 @@ const emptyForm = (): ProviderForm => ({
   upstream_protocol: "auto",
   default_billing_rate: "1",
   auth_style: "both",
+  model_policy: "all",
+  allowed_models: [],
+  concurrency_limit: "0",
   enabled: true,
   proxy_enabled: false,
   notes: "",
@@ -74,6 +83,8 @@ export function GatewayProvidersPanel() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<GatewayProvider | null>(null)
   const [form, setForm] = useState<ProviderForm>(emptyForm())
+  const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [modelsLoading, setModelsLoading] = useState(false)
 
   const load = useCallback(
     async (p = pageNum, query = q) => {
@@ -103,7 +114,19 @@ export function GatewayProvidersPanel() {
   function openCreate() {
     setEditing(null)
     setForm(emptyForm())
+    setAvailableModels([])
     setDialogOpen(true)
+  }
+
+  function parseAllowedModels(raw?: string): string[] {
+    if (!raw) return []
+    try {
+      const value = JSON.parse(raw)
+      if (!Array.isArray(value)) return []
+      return Array.from(new Set(value.map((item) => String(item).trim()).filter(Boolean)))
+    } catch {
+      return []
+    }
   }
 
   function openEdit(item: GatewayProvider) {
@@ -115,11 +138,39 @@ export function GatewayProvidersPanel() {
       upstream_protocol: item.upstream_protocol || "auto",
       default_billing_rate: String(item.default_billing_rate ?? 1),
       auth_style: item.auth_style || "both",
+      model_policy: item.model_policy || "all",
+      allowed_models: parseAllowedModels(item.allowed_models_json),
+      concurrency_limit: String(item.concurrency_limit ?? 0),
       enabled: item.enabled !== false,
       proxy_enabled: !!item.proxy_enabled,
       notes: item.notes || "",
     })
+    setAvailableModels([])
     setDialogOpen(true)
+  }
+
+  async function refreshModels() {
+    if (!editing) {
+      toast.info("保存直连渠道后才能拉取模型")
+      return
+    }
+    setModelsLoading(true)
+    try {
+      const preview = await apiFetch<GatewayProviderModelsPreview>(
+        `/gateway/providers/${editing.id}/models/preview`,
+      )
+      setAvailableModels(preview.available)
+      setForm((prev) => ({
+        ...prev,
+        model_policy: preview.model_policy || prev.model_policy,
+        allowed_models: preview.allowed_models,
+      }))
+      toast.success(`已获取 ${preview.available.length} 个模型`)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "拉取模型失败")
+    } finally {
+      setModelsLoading(false)
+    }
   }
 
   async function save() {
@@ -142,6 +193,11 @@ export function GatewayProvidersPanel() {
       toast.error("计费倍率须为正数")
       return
     }
+    const concurrencyLimit = Number(form.concurrency_limit)
+    if (!Number.isInteger(concurrencyLimit) || concurrencyLimit < 0 || concurrencyLimit > 4096) {
+      toast.error("并发上限须为 0-4096 的整数")
+      return
+    }
     setBusy(true)
     try {
       if (editing) {
@@ -151,6 +207,9 @@ export function GatewayProvidersPanel() {
           upstream_protocol: form.upstream_protocol,
           default_billing_rate: rate,
           auth_style: form.auth_style,
+          model_policy: form.model_policy,
+          allowed_models_json: JSON.stringify(form.allowed_models),
+          concurrency_limit: concurrencyLimit,
           enabled: form.enabled,
           proxy_enabled: form.proxy_enabled,
           notes: form.notes.trim(),
@@ -171,6 +230,9 @@ export function GatewayProvidersPanel() {
             upstream_protocol: form.upstream_protocol,
             default_billing_rate: rate,
             auth_style: form.auth_style,
+            model_policy: form.model_policy,
+            allowed_models_json: JSON.stringify(form.allowed_models),
+            concurrency_limit: concurrencyLimit,
             enabled: form.enabled,
             proxy_enabled: form.proxy_enabled,
             notes: form.notes.trim(),
@@ -268,6 +330,8 @@ export function GatewayProvidersPanel() {
                   <TableHead>Base URL</TableHead>
                   <TableHead>协议</TableHead>
                   <TableHead>默认倍率</TableHead>
+                  <TableHead>并发</TableHead>
+                  <TableHead>模型</TableHead>
                   <TableHead>Key</TableHead>
                   <TableHead>代理</TableHead>
                   <TableHead>状态</TableHead>
@@ -277,13 +341,13 @@ export function GatewayProvidersPanel() {
               <TableBody>
                 {loading && items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={10} className="h-24 text-center text-muted-foreground">
                       <Loader2 className="mx-auto size-4 animate-spin" />
                     </TableCell>
                   </TableRow>
                 ) : items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={10} className="h-24 text-center text-muted-foreground">
                       暂无直连渠道，点击右上角「新建」添加
                     </TableCell>
                   </TableRow>
@@ -306,6 +370,14 @@ export function GatewayProvidersPanel() {
                       </TableCell>
                       <TableCell className="tabular-nums text-sm">
                         {p.default_billing_rate}
+                      </TableCell>
+                      <TableCell className="tabular-nums text-sm">
+                        {p.concurrency_limit ? p.concurrency_limit : "不限"}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {p.model_policy === "allowlist"
+                          ? `白名单 ${parseAllowedModels(p.allowed_models_json).length}`
+                          : "全部"}
                       </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
                         {p.api_key_hint || "—"}
@@ -493,6 +565,18 @@ export function GatewayProvidersPanel() {
                   </SelectContent>
                 </Select>
               </div>
+              <div className="space-y-1">
+                <Label>并发上限</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="4096"
+                  step="1"
+                  value={form.concurrency_limit}
+                  onChange={(e) => setForm({ ...form, concurrency_limit: e.target.value })}
+                />
+                <p className="text-[11px] text-muted-foreground">0 表示不限制；同一渠道跨网关组共享</p>
+              </div>
               <div className="flex items-end gap-2 pb-1">
                 <Switch
                   checked={form.enabled}
@@ -500,6 +584,80 @@ export function GatewayProvidersPanel() {
                 />
                 <Label>启用</Label>
               </div>
+            </div>
+            <div className="space-y-2 rounded-lg border border-border px-3 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <Label>可用模型</Label>
+                  <p className="text-[11px] text-muted-foreground">直连渠道不勾选的上游模型不会参与调度</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={form.model_policy}
+                    onValueChange={(v) =>
+                      setForm({ ...form, model_policy: v as GatewayProviderModelPolicy })
+                    }
+                  >
+                    <SelectTrigger className="w-32">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">全部模型</SelectItem>
+                      <SelectItem value="allowlist">仅选中模型</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={!editing || modelsLoading}
+                    title="刷新上游模型"
+                    onClick={() => void refreshModels()}
+                  >
+                    <RefreshCw className={cn("size-3.5", modelsLoading && "animate-spin")} />
+                  </Button>
+                </div>
+              </div>
+              {form.model_policy === "allowlist" ? (
+                <>
+                  {availableModels.length > 0 ? (
+                    <div className="grid max-h-40 gap-1 overflow-y-auto rounded border p-2 sm:grid-cols-2">
+                      {availableModels.map((model) => {
+                        const checked = form.allowed_models.includes(model)
+                        return (
+                          <label key={model} className="flex min-w-0 items-center gap-2 rounded px-1 py-1 text-xs hover:bg-muted">
+                            <Checkbox
+                              checked={checked}
+                              onCheckedChange={(value) =>
+                                setForm((prev) => ({
+                                  ...prev,
+                                  allowed_models: value
+                                    ? Array.from(new Set([...prev.allowed_models, model]))
+                                    : prev.allowed_models.filter((item) => item !== model),
+                                }))
+                              }
+                            />
+                            <span className="truncate" title={model}>{model}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  ) : null}
+                  <Textarea
+                    rows={3}
+                    value={form.allowed_models.join("\n")}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        allowed_models: Array.from(
+                          new Set(e.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)),
+                        ),
+                      })
+                    }
+                    placeholder="每行一个上游模型 ID"
+                  />
+                </>
+              ) : null}
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
               <div>

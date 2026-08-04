@@ -125,6 +125,37 @@ func TestRateForRoute_FallbackBillingMultiplier(t *testing.T) {
 	}
 }
 
+func TestRateForRoute_LegacyGroupIDPlaceholder(t *testing.T) {
+	groupID := int64(63)
+	route := &storage.GatewayRoute{
+		SourceGroupName:       "id:63",
+		RateConvertMode:       "raw",
+		BillingRateMultiplier: 1,
+	}
+	groups := []connector.APIKeyGroup{{ID: &groupID, Name: "Team/plus典韦 🪓", Ratio: 0.063}}
+	if got := RateForRoute(route, groups); got != 0.063 {
+		t.Fatalf("legacy ID placeholder should use live group ratio, got %v", got)
+	}
+}
+
+func TestOrderRoutesByRate_LegacyPlaceholderUsesLiveThreeDecimalRate(t *testing.T) {
+	lowID, middleID, highID := int64(60), int64(63), int64(70)
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 1, SourceGroupName: "id:70", Weight: 1, RateConvertMode: "raw"},
+		{ID: 2, Position: 1, SourceChannelID: 1, SourceGroupName: "id:63", Weight: 1, RateConvertMode: "raw"},
+		{ID: 3, Position: 2, SourceChannelID: 1, SourceGroupName: "id:60", Weight: 1, RateConvertMode: "raw"},
+	}
+	groups := map[uint][]connector.APIKeyGroup{1: {
+		{ID: &highID, Name: "high", Ratio: 0.07},
+		{ID: &middleID, Name: "Team/plus典韦 🪓", Ratio: 0.063},
+		{ID: &lowID, Name: "low", Ratio: 0.06},
+	}}
+	ordered := OrderRoutesByRate(routes, groups, "asc")
+	if len(ordered) != 3 || ordered[0].ID != 3 || ordered[1].ID != 2 || ordered[2].ID != 1 {
+		t.Fatalf("live rates should order 0.06 < 0.063 < 0.07, got ids %d/%d/%d", ordered[0].ID, ordered[1].ID, ordered[2].ID)
+	}
+}
+
 func TestOrderRoutesByRate_SameRateHigherWeightFirst(t *testing.T) {
 	routes := []storage.GatewayRoute{
 		{ID: 1, Position: 0, Weight: 1, Enabled: true, RateConvertMode: "custom", RateConvertValue: 0.05, SourceAPIKeyCipher: "x"},

@@ -58,6 +58,9 @@ type Service struct {
 	// Runtime 数据面；嵌入 *Service 共享依赖。
 	Runtime *Runtime
 
+	upstreamConcurrencyMu sync.Mutex
+	upstreamConcurrency   *upstreamConcurrencyRegistry
+
 	mu          sync.RWMutex
 	proxyConfig config.ProxyConfig
 	upstream    config.UpstreamConfig
@@ -65,6 +68,11 @@ type Service struct {
 
 	modelsCacheMu sync.Mutex
 	modelsCache   map[uint]modelsCacheEntry // keyed by group id
+
+	// responseValidatorCache stores immutable, compiled response rules by group.
+	// The cache is invalidated by response-rule CRUD and group policy changes.
+	responseValidatorCacheMu sync.RWMutex
+	responseValidatorCache   map[uint]responseValidatorCacheEntry
 
 	// 源分组列表缓存（ListAPIKeyGroups 远程调用昂贵；列表接口不再实时拉，运行时/保存仍可复用缓存）
 	channelGroupsCacheMu sync.Mutex
@@ -106,7 +114,9 @@ func NewService(
 		Log:                log,
 		gatewayCfg:         config.GatewayConfig{}.WithDefaults(),
 		modelsCache:        map[uint]modelsCacheEntry{},
+		responseValidatorCache: map[uint]responseValidatorCacheEntry{},
 		channelGroupsCache: map[uint]channelGroupsCacheEntry{},
+		upstreamConcurrency: newUpstreamConcurrencyRegistry(),
 	}
 	s.Admin = &AdminService{Service: s}
 	s.Runtime = &Runtime{Service: s}
@@ -122,6 +132,7 @@ func (s *Service) SetProviders(p *storage.GatewayProviders) {
 // A setter keeps NewService source-compatible with existing integrations and tests.
 func (s *Service) SetResponseRules(rules *storage.GatewayResponseRules) {
 	s.ResponseRules = rules
+	s.InvalidateAllResponseValidators()
 }
 
 // ListDefaultPrices 返回内置模型价目（管理端只读）。

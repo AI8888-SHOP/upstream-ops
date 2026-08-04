@@ -243,13 +243,18 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 		}
 	}
 	a.invalidateModelsCache(id)
+	a.InvalidateResponseValidator(id)
 	return item, nil
 }
 
 // DeleteGroup 删除分组。
 func (a *AdminService) DeleteGroup(id uint) error {
 	a.invalidateModelsCache(id)
-	return a.Groups.Delete(id)
+	if err := a.Groups.Delete(id); err != nil {
+		return err
+	}
+	a.InvalidateResponseValidator(id)
+	return nil
 }
 
 // ListGroups 列出分组。

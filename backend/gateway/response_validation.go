@@ -197,28 +197,46 @@ func (v *responseValidator) match(protocolName, model string, raw, assistant, er
 		if !responseRuleApplies(rule, protocolName, model) {
 			continue
 		}
-		var candidate []byte
-		switch rule.Target {
-		case "raw_body":
-			candidate = raw
-		case "error_message":
-			candidate = errorMessage
-		default:
-			candidate = assistant
-		}
-		if len(candidate) == 0 || !rule.re.Match(candidate) {
-			continue
-		}
-		matched := string(candidate)
-		if len(matched) > 4096 {
-			matched = matched[:4096]
-		}
-		return validationResult{
-			Decision: validationRejected, RuleID: rule.ID, RuleName: rule.Name,
-			Target: rule.Target, Pattern: rule.Pattern, MatchedOn: matched, PostCommit: postCommit,
+		if result := matchCompiledResponseRule(rule, raw, assistant, errorMessage, postCommit); result.IsRejected() {
+			return result
 		}
 	}
 	return acceptedValidation()
+}
+
+func (v *responseValidator) matchCompiled(rules []compiledResponseRule, raw, assistant, errorMessage []byte, postCommit bool) validationResult {
+	if !v.Enabled() {
+		return acceptedValidation()
+	}
+	for _, rule := range rules {
+		if result := matchCompiledResponseRule(rule, raw, assistant, errorMessage, postCommit); result.IsRejected() {
+			return result
+		}
+	}
+	return acceptedValidation()
+}
+
+func matchCompiledResponseRule(rule compiledResponseRule, raw, assistant, errorMessage []byte, postCommit bool) validationResult {
+	var candidate []byte
+	switch rule.Target {
+	case "raw_body":
+		candidate = raw
+	case "error_message":
+		candidate = errorMessage
+	default:
+		candidate = assistant
+	}
+	if len(candidate) == 0 || !rule.re.Match(candidate) {
+		return acceptedValidation()
+	}
+	matched := string(candidate)
+	if len(matched) > 4096 {
+		matched = matched[:4096]
+	}
+	return validationResult{
+		Decision: validationRejected, RuleID: rule.ID, RuleName: rule.Name,
+		Target: rule.Target, Pattern: rule.Pattern, MatchedOn: matched, PostCommit: postCommit,
+	}
 }
 
 func responseRuleApplies(rule compiledResponseRule, protocolName, model string) bool {
@@ -251,27 +269,49 @@ func selectorMatches(selectors []string, value string) bool {
 func pendingValidation() validationResult  { return validationResult{Decision: validationPending} }
 func acceptedValidation() validationResult { return validationResult{Decision: validationAccepted} }
 
-// streamResponseValidator buffers and validates only the configured prefix.
-// Once Ready accepts it, later matches are returned with PostCommit=true for
-// audit and never switch the already-visible response.
+// streamResponseValidator validates the configured prefix before a stream is
+// exposed. After the prefix is accepted, later bytes are retained only for a
+// single end-of-stream audit; they never switch an already-visible response.
 type streamResponseValidator struct {
 	validator      *responseValidator
 	protocolName   string
 	model          string
+	rules          []compiledResponseRule
+	needsAssistant bool
+	needsError     bool
 	firstContentAt time.Time
 	bytesSeen      int
 	prefixReady    bool
 	committed      bool
 	prefixRaw      []byte
 	postRaw        []byte
+	prefixDirty    bool
+	prefixResult   validationResult
+	postAuditDone  bool
 	result         validationResult
 	postResult     validationResult
 }
 
 func (v *responseValidator) NewStreamValidator(protocolName, model string) *streamResponseValidator {
+	protocolName = strings.TrimSpace(protocolName)
+	model = strings.TrimSpace(model)
 	s := &streamResponseValidator{
-		validator: v, protocolName: strings.TrimSpace(protocolName), model: strings.TrimSpace(model),
-		result: pendingValidation(),
+		validator: v, protocolName: protocolName, model: model,
+		prefixResult: pendingValidation(), result: pendingValidation(),
+	}
+	if v != nil && v.StreamEnabled() {
+		for _, rule := range v.rules {
+			if !responseRuleApplies(rule, protocolName, model) {
+				continue
+			}
+			s.rules = append(s.rules, rule)
+			switch rule.Target {
+			case "assistant_text":
+				s.needsAssistant = true
+			case "error_message":
+				s.needsError = true
+			}
+		}
 	}
 	if !v.StreamEnabled() {
 		s.result = acceptedValidation()
@@ -296,7 +336,7 @@ func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
 
 	if s.prefixReady || s.committed {
 		s.appendPost(chunk)
-		return s.matchPostCommit()
+		return s.currentResult()
 	}
 	remaining := s.validator.PrefixBytes() - s.bytesSeen
 	if remaining < 0 {
@@ -309,6 +349,7 @@ func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
 	if prefixLen > 0 {
 		s.prefixRaw = append(s.prefixRaw, chunk[:prefixLen]...)
 		s.bytesSeen += prefixLen
+		s.prefixDirty = true
 		if result := s.matchPrefix(); result.IsRejected() {
 			s.result = result
 			return result
@@ -324,9 +365,6 @@ func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
 	}
 	if prefixLen < len(chunk) {
 		s.appendPost(chunk[prefixLen:])
-		if result := s.matchPostCommit(); result.IsRejected() {
-			return result
-		}
 	}
 	return s.currentResult()
 }
@@ -370,6 +408,40 @@ func (s *streamResponseValidator) Finalize() validationResult {
 	return s.result
 }
 
+// AuditPostCommit performs the informational post-commit check at most once.
+// A post-commit match is never a route switch signal because the response may
+// already have been exposed to the client.
+func (s *streamResponseValidator) AuditPostCommit() validationResult {
+	if s == nil || s.validator == nil || !s.validator.StreamEnabled() {
+		return acceptedValidation()
+	}
+	if s.postAuditDone {
+		if s.postResult.IsRejected() {
+			return s.postResult
+		}
+		return acceptedValidation()
+	}
+	s.postAuditDone = true
+	if len(s.postRaw) == 0 {
+		return acceptedValidation()
+	}
+	combined := make([]byte, 0, len(s.prefixRaw)+len(s.postRaw))
+	combined = append(combined, s.prefixRaw...)
+	combined = append(combined, s.postRaw...)
+	var assistant, errorMessage []byte
+	if s.needsAssistant {
+		assistant = []byte(extractAssistantText(combined, http.Header{"Content-Type": []string{"text/event-stream"}}))
+	}
+	if s.needsError {
+		errorMessage = []byte(extractResponseErrorMessage(combined, nil))
+	}
+	result := s.validator.matchCompiled(s.rules, combined, assistant, errorMessage, true)
+	if result.IsRejected() {
+		s.postResult = result
+	}
+	return result
+}
+
 func (s *streamResponseValidator) Commit() {
 	if s == nil {
 		return
@@ -409,37 +481,44 @@ func (s *streamResponseValidator) currentResult() validationResult {
 }
 
 func (s *streamResponseValidator) matchPrefix() validationResult {
-	assistant := []byte(extractAssistantText(s.prefixRaw, http.Header{"Content-Type": []string{"text/event-stream"}}))
-	errorMessage := []byte(extractResponseErrorMessage(s.prefixRaw, nil))
-	return s.validator.match(s.protocolName, s.model, s.prefixRaw, assistant, errorMessage, false)
+	if !s.prefixDirty {
+		return s.prefixResult
+	}
+	var assistant, errorMessage []byte
+	if s.needsAssistant {
+		assistant = []byte(extractAssistantText(s.prefixRaw, http.Header{"Content-Type": []string{"text/event-stream"}}))
+	}
+	if s.needsError {
+		errorMessage = []byte(extractResponseErrorMessage(s.prefixRaw, nil))
+	}
+	s.prefixResult = s.validator.matchCompiled(s.rules, s.prefixRaw, assistant, errorMessage, false)
+	s.prefixDirty = false
+	return s.prefixResult
 }
 
 func (s *streamResponseValidator) appendPost(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
+	if len(chunk) >= postCommitValidationBytes {
+		if cap(s.postRaw) < postCommitValidationBytes {
+			s.postRaw = make([]byte, postCommitValidationBytes)
+		} else {
+			s.postRaw = s.postRaw[:postCommitValidationBytes]
+		}
+		copy(s.postRaw, chunk[len(chunk)-postCommitValidationBytes:])
+		return
+	}
+	if cap(s.postRaw) < postCommitValidationBytes {
+		buffer := make([]byte, 0, postCommitValidationBytes)
+		buffer = append(buffer, s.postRaw...)
+		s.postRaw = buffer
+	}
+	if overflow := len(s.postRaw) + len(chunk) - postCommitValidationBytes; overflow > 0 {
+		copy(s.postRaw, s.postRaw[overflow:])
+		s.postRaw = s.postRaw[:len(s.postRaw)-overflow]
+	}
 	s.postRaw = append(s.postRaw, chunk...)
-	if len(s.postRaw) > postCommitValidationBytes {
-		trimmed := make([]byte, postCommitValidationBytes)
-		copy(trimmed, s.postRaw[len(s.postRaw)-postCommitValidationBytes:])
-		s.postRaw = trimmed
-	}
-}
-
-func (s *streamResponseValidator) matchPostCommit() validationResult {
-	if len(s.postRaw) == 0 {
-		return acceptedValidation()
-	}
-	combined := make([]byte, 0, len(s.prefixRaw)+len(s.postRaw))
-	combined = append(combined, s.prefixRaw...)
-	combined = append(combined, s.postRaw...)
-	assistant := []byte(extractAssistantText(combined, http.Header{"Content-Type": []string{"text/event-stream"}}))
-	errorMessage := []byte(extractResponseErrorMessage(combined, nil))
-	result := s.validator.match(s.protocolName, s.model, combined, assistant, errorMessage, true)
-	if result.IsRejected() {
-		s.postResult = result
-	}
-	return result
 }
 
 const maxPartialJSONDepth = 64

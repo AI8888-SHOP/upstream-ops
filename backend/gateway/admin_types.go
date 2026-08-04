@@ -100,6 +100,9 @@ type CreateProviderInput struct {
 	BaseURL            string  `json:"base_url"`
 	APIKey             string  `json:"api_key"`
 	UpstreamProtocol   string  `json:"upstream_protocol"`
+	ModelPolicy        string  `json:"model_policy"`
+	AllowedModelsJSON  string  `json:"allowed_models_json"`
+	ConcurrencyLimit   int     `json:"concurrency_limit"`
 	DefaultBillingRate float64 `json:"default_billing_rate"`
 	AuthStyle          string  `json:"auth_style"`
 	Enabled            *bool   `json:"enabled"`
@@ -114,12 +117,23 @@ type UpdateProviderInput struct {
 	BaseURL            *string  `json:"base_url"`
 	APIKey             *string  `json:"api_key"`
 	UpstreamProtocol   *string  `json:"upstream_protocol"`
+	ModelPolicy        *string  `json:"model_policy"`
+	AllowedModelsJSON  *string  `json:"allowed_models_json"`
+	ConcurrencyLimit   *int     `json:"concurrency_limit"`
 	DefaultBillingRate *float64 `json:"default_billing_rate"`
 	AuthStyle          *string  `json:"auth_style"`
 	Enabled            *bool    `json:"enabled"`
 	ProxyEnabled       *bool    `json:"proxy_enabled"`
 	ExtraHeadersJSON   *string  `json:"extra_headers"`
 	Notes              *string  `json:"notes"`
+}
+
+// ProviderModelsPreview 返回直连渠道实时模型与当前选择，不包含任何密钥信息。
+type ProviderModelsPreview struct {
+	ProviderID     uint     `json:"provider_id"`
+	ModelPolicy    string   `json:"model_policy"`
+	Available      []string `json:"available"`
+	AllowedModels []string `json:"allowed_models"`
 }
 
 // RouteInput 保存路由时的单条输入。

@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,23 @@ type ScoredRoute struct {
 	Route         storage.GatewayRoute
 	EffectiveRate float64
 	BillingRate   float64
+}
+
+// parseSourceGroupIDRef keeps old routes sortable when only the display
+// placeholder (for example, "id:63") was persisted and SourceGroupID is nil.
+func parseSourceGroupIDRef(value string) (int64, bool) {
+	compact := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), "")
+	prefixes := []string{"id:", "sourceid:", "源id:"}
+	for _, prefix := range prefixes {
+		if !strings.HasPrefix(compact, prefix) {
+			continue
+		}
+		id, err := strconv.ParseInt(strings.TrimPrefix(compact, prefix), 10, 64)
+		if err == nil && id > 0 {
+			return id, true
+		}
+	}
+	return 0, false
 }
 
 // RateForRoute 计算路由有效倍率（对齐同步账号 rateMultiplierForAccount）。
@@ -33,15 +52,21 @@ func RateForRoute(route *storage.GatewayRoute, groups []connector.APIKeyGroup) f
 		return rateconvert.Convert(1, mode, route.RateConvertValue)
 	}
 	sourceGroupName := strings.TrimSpace(route.SourceGroupName)
-	if route.SourceGroupID == nil && sourceGroupName == "" {
+	groupID := route.SourceGroupID
+	if (groupID == nil || *groupID <= 0) && sourceGroupName != "" {
+		if id, ok := parseSourceGroupIDRef(sourceGroupName); ok {
+			groupID = &id
+		}
+	}
+	if groupID == nil && sourceGroupName == "" {
 		if route.BillingRateMultiplier > 0 {
 			return route.BillingRateMultiplier
 		}
 		return rateconvert.Convert(1, mode, route.RateConvertValue)
 	}
-	if route.SourceGroupID != nil {
+	if groupID != nil {
 		for _, g := range groups {
-			if g.ID != nil && *g.ID == *route.SourceGroupID {
+			if g.ID != nil && *g.ID == *groupID {
 				return rateconvert.Convert(g.Ratio, mode, route.RateConvertValue)
 			}
 		}
@@ -83,6 +108,22 @@ func IsRouteSchedulable(route *storage.GatewayRoute, now time.Time) bool {
 // direction: asc 低倍率优先；desc 高倍率优先。
 // 同倍率：权重大优先；再比 position；再比 id。
 func routeRateLess(a, b storage.GatewayRoute, rateA, rateB float64, desc bool) bool {
+	finiteA := !math.IsNaN(rateA) && !math.IsInf(rateA, 0)
+	finiteB := !math.IsNaN(rateB) && !math.IsInf(rateB, 0)
+	if finiteA != finiteB {
+		return finiteA
+	}
+	if !finiteA {
+		// Keep malformed rates deterministic without allowing NaN to make the
+		// comparator claim that neither route is less than the other.
+		if a.Weight != b.Weight {
+			return a.Weight > b.Weight
+		}
+		if a.Position != b.Position {
+			return a.Position < b.Position
+		}
+		return a.ID < b.ID
+	}
 	if rateA != rateB {
 		if desc {
 			return rateA > rateB

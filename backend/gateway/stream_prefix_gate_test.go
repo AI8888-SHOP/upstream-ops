@@ -86,6 +86,44 @@ func TestStreamPrefixGateTimeoutMakesShortPrefixSelectable(t *testing.T) {
 	}
 }
 
+func TestStreamPrefixGatePostCommitAuditDoesNotRejectWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	context, _ := gin.CreateTestContext(recorder)
+	validator := mustResponseValidator(t, 4, time.Second, responseRuleSpec{
+		ID: 4, Name: "late", Enabled: true, Pattern: `blocked`, Target: "raw_body",
+	})
+	gate := newStreamPrefixGateWriter(context.Writer, validator.NewStreamValidator("openai_chat", "gpt-test"))
+	written := make(chan error, 1)
+	go func() {
+		_, err := gate.Write([]byte("safe"))
+		written <- err
+	}()
+	select {
+	case decision := <-gate.Ready():
+		if !decision.IsAccepted() {
+			t.Fatalf("decision=%+v", decision)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prefix was not accepted")
+	}
+	if err := gate.Win(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.Write([]byte(" data: blocked\n\n")); err != nil {
+		t.Fatalf("post-commit write unexpectedly failed: %v", err)
+	}
+	if result := gate.Finish(); !result.IsRejected() || !result.PostCommit || result.RuleID != 4 {
+		t.Fatalf("audit result=%+v", result)
+	}
+	if got := recorder.Body.String(); got != "safe data: blocked\n\n" {
+		t.Fatalf("downstream body=%q", got)
+	}
+}
+
 func TestCleanupCoordinatedStreamLosersWaitsForResult(t *testing.T) {
 	originalCleanup := hedgeCleanupTimeout
 	hedgeCleanupTimeout = time.Second

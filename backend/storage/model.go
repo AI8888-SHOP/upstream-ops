@@ -57,6 +57,9 @@ type Channel struct {
 	GroupMultiplier        *float64       `json:"group_multiplier,omitempty"`
 	GroupMultiplierMode    string         `gorm:"size:16;not null;default:'divide'" json:"group_multiplier_mode"`
 	MonitorEnabled         bool           `gorm:"default:true" json:"monitor_enabled"`
+	// ConcurrencyLimit limits all gateway attempts that resolve to this monitor channel.
+	// Zero preserves the legacy unlimited behavior.
+	ConcurrencyLimit       int            `gorm:"not null;default:0" json:"concurrency_limit"`
 	// OnlyCreatedKeyGroupsEnabled 开启后仅展示与监听"已创建密钥的分组"。
 	// 影响：渠道卡片 / 分组对话框 / 全局倍率面板的分组列表，以及倍率变动通知。
 	// 不影响 RateSnapshot 本地存储（始终保留全部分组），网关、上游同步、通知设置
@@ -433,6 +436,11 @@ const (
 	GatewayModelsModeManual = "manual"
 	GatewayModelsModeHybrid = "hybrid"
 
+	// 直连渠道模型策略。旧数据 model_policy 为空时按 all 兼容；allowlist
+	// 仅允许 allowed_models_json 中列出的最终上游模型 ID。
+	GatewayProviderModelPolicyAll       = "all"
+	GatewayProviderModelPolicyAllowlist = "allowlist"
+
 	// 上游协议（路由 / 直连渠道）
 	//   auto | openai_chat | openai_responses | anthropic
 	//   openai 为 openai_chat 的历史别名，读写时仍接受
@@ -488,6 +496,11 @@ type GatewayProvider struct {
 	APIKeyCipher        string    `gorm:"type:text;not null" json:"-"`
 	APIKeyHint          string    `gorm:"size:64;not null;default:''" json:"api_key_hint"`
 	UpstreamProtocol    string    `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
+	ModelPolicy         string    `gorm:"size:16;not null;default:'all'" json:"model_policy"`
+	AllowedModelsJSON   string    `gorm:"type:text;not null;default:'[]'" json:"allowed_models_json"`
+	// ConcurrencyLimit is shared by every gateway route that references this provider.
+	// Zero preserves the legacy unlimited behavior.
+	ConcurrencyLimit     int       `gorm:"not null;default:0" json:"concurrency_limit"`
 	DefaultBillingRate  float64   `gorm:"not null;default:1" json:"default_billing_rate"`
 	AuthStyle           string    `gorm:"size:16;not null;default:'both'" json:"auth_style"`
 	Enabled             bool      `gorm:"not null;default:true;index" json:"enabled"`

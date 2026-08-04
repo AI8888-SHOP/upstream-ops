@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/bejix/upstream-ops/backend/storage"
 )
@@ -12,6 +11,9 @@ import (
 func (rt *Runtime) responseValidatorForGroup(group *storage.GatewayGroup) (*responseValidator, error) {
 	if group == nil || !group.ResponseValidationEnabled {
 		return newResponseValidator(responseValidationConfig{}, nil)
+	}
+	if cached := rt.cachedResponseValidator(group); cached != nil {
+		return cached, nil
 	}
 	if rt.ResponseRules == nil {
 		return nil, fmt.Errorf("response validation repository is not configured")
@@ -35,12 +37,12 @@ func (rt *Runtime) responseValidatorForGroup(group *storage.GatewayGroup) (*resp
 			Pattern: row.Pattern, Target: row.Target, Models: models, Protocols: protocols,
 		})
 	}
-	return newResponseValidator(responseValidationConfig{
-		Enabled:       group.ResponseValidationEnabled,
-		StreamMode:    group.ResponseValidationStreamMode,
-		PrefixBytes:   group.ResponseValidationPrefixBytes,
-		PrefixTimeout: time.Duration(group.ResponseValidationPrefixTimeoutMS) * time.Millisecond,
-	}, rules)
+	validator, err := newResponseValidator(responseValidationConfigForGroup(group), rules)
+	if err != nil {
+		return nil, err
+	}
+	rt.cacheResponseValidator(group, validator)
+	return validator, nil
 }
 
 func decodeResponseRuleSelectors(raw string) ([]string, error) {

@@ -63,6 +63,7 @@ export interface Channel {
   group_multiplier?: number | null
   group_multiplier_mode: RechargeMultiplierMode
   monitor_enabled: boolean
+  concurrency_limit: number
   only_created_key_groups_enabled: boolean
   last_balance?: number | null
   last_balance_at?: string | null
@@ -703,12 +704,17 @@ export interface GatewayKeyCreateResult {
 /** monitor = 监控渠道；provider = 直连 BaseURL+Key */
 export type GatewayRouteSourceKind = "monitor" | "provider"
 
+export type GatewayProviderModelPolicy = "all" | "allowlist"
+
 export interface GatewayProvider {
   id: number
   name: string
   base_url: string
   api_key_hint: string
   upstream_protocol: GatewayUpstreamProtocol
+  model_policy?: GatewayProviderModelPolicy
+  allowed_models_json?: string
+  concurrency_limit?: number
   default_billing_rate: number
   auth_style?: string
   enabled: boolean
@@ -737,8 +743,16 @@ export interface GatewayProviderOption {
   base_url: string
   api_key_hint: string
   upstream_protocol: GatewayUpstreamProtocol
+  concurrency_limit?: number
   default_billing_rate: number
   enabled: boolean
+}
+
+export interface GatewayProviderModelsPreview {
+  provider_id: number
+  model_policy: GatewayProviderModelPolicy
+  available: string[]
+  allowed_models: string[]
 }
 
 export interface GatewayRoute {

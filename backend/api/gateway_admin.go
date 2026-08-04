@@ -60,6 +60,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 
 		// providers（直连渠道）— options 须在 :id 之前注册
 		gp.GET("/providers/options", func(c *gin.Context) { listGatewayProviderOptions(c, d) })
+		gp.GET("/providers/:id/models/preview", func(c *gin.Context) { previewGatewayProviderModels(c, d) })
 		gp.GET("/providers", func(c *gin.Context) { listGatewayProviders(c, d) })
 		gp.POST("/providers", func(c *gin.Context) { createGatewayProvider(c, d) })
 		gp.PUT("/providers/:id", func(c *gin.Context) { updateGatewayProvider(c, d) })
@@ -222,6 +223,7 @@ func createGatewayGroupResponseRule(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	d.Gateway.InvalidateResponseValidator(groupID)
 	c.JSON(http.StatusCreated, responseRuleView(*item))
 }
 
@@ -306,6 +308,7 @@ func updateGatewayResponseRule(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	d.Gateway.InvalidateResponseValidator(item.GatewayGroupID)
 	c.JSON(http.StatusOK, responseRuleView(*item))
 }
 
@@ -320,7 +323,8 @@ func deleteGatewayResponseRule(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "response rule repository unavailable"})
 		return
 	}
-	if _, err := repo.FindByID(id); err != nil {
+	item, err := repo.FindByID(id)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "response rule not found"})
 		return
 	}
@@ -328,6 +332,7 @@ func deleteGatewayResponseRule(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	d.Gateway.InvalidateResponseValidator(item.GatewayGroupID)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -358,6 +363,7 @@ func listGatewayProviderOptions(c *gin.Context, d *Deps) {
 		BaseURL            string  `json:"base_url"`
 		APIKeyHint         string  `json:"api_key_hint"`
 		UpstreamProtocol   string  `json:"upstream_protocol"`
+		ConcurrencyLimit   int     `json:"concurrency_limit"`
 		DefaultBillingRate float64 `json:"default_billing_rate"`
 		Enabled            bool    `json:"enabled"`
 	}
@@ -365,7 +371,8 @@ func listGatewayProviderOptions(c *gin.Context, d *Deps) {
 	for _, p := range list {
 		items = append(items, opt{
 			ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, APIKeyHint: p.APIKeyHint,
-			UpstreamProtocol: p.UpstreamProtocol, DefaultBillingRate: p.DefaultBillingRate, Enabled: p.Enabled,
+			UpstreamProtocol: p.UpstreamProtocol, ConcurrencyLimit: p.ConcurrencyLimit,
+			DefaultBillingRate: p.DefaultBillingRate, Enabled: p.Enabled,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
@@ -402,6 +409,20 @@ func updateGatewayProvider(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, item)
+}
+
+func previewGatewayProviderModels(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	preview, err := d.Gateway.PreviewProviderModels(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, preview)
 }
 
 func deleteGatewayProvider(c *gin.Context, d *Deps) {
