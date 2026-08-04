@@ -329,7 +329,7 @@ Commit only `.env.example` to a public repository. Never commit `.env`, `data/`,
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.10
+IMAGE_TAG=v0.0.11
 ```
 
 ## MySQL Deployment
