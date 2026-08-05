@@ -252,6 +252,19 @@ func (rt *Runtime) sortRoutesWithAffinity(
 			return normal
 		}
 	}
+	for index := range normal {
+		if normal[index].Route.ID != affinity.PreferredRouteID {
+			continue
+		}
+		if index == 0 {
+			return normal
+		}
+		prioritized := make([]ScoredRoute, 0, len(normal))
+		prioritized = append(prioritized, normal[index])
+		prioritized = append(prioritized, normal[:index]...)
+		prioritized = append(prioritized, normal[index+1:]...)
+		return prioritized
+	}
 	for _, route := range routes {
 		if route.ID != affinity.PreferredRouteID {
 			continue

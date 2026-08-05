@@ -26,6 +26,7 @@ export type GroupFormState = {
   status: "active" | "disabled"
   rate_resort_enabled: boolean
   max_billing_rate_multiplier: string
+  load_balance_route_count: string
   retry_enabled: boolean
   retry_count: string
   failover_enabled: boolean
@@ -505,6 +506,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   status: "active",
   rate_resort_enabled: false,
   max_billing_rate_multiplier: "0",
+  load_balance_route_count: "1",
   retry_enabled: true,
   retry_count: "0",
   failover_enabled: true,

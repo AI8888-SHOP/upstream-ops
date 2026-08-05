@@ -725,6 +725,7 @@ export function GatewayPage() {
       status: g.status === "disabled" ? "disabled" : "active",
       rate_resort_enabled: !!g.rate_resort_enabled,
       max_billing_rate_multiplier: String(g.max_billing_rate_multiplier ?? 0),
+      load_balance_route_count: String(g.load_balance_route_count ?? 1),
       retry_enabled: g.retry_enabled !== false,
       retry_count: String(g.retry_count ?? 0),
       failover_enabled: g.failover_enabled !== false,
@@ -789,9 +790,14 @@ export function GatewayPage() {
       Number.isFinite(maxBillingRateInput) && maxBillingRateInput > 0
         ? Math.min(1_000_000, maxBillingRateInput)
         : 0
+    const loadBalanceRouteCount = Math.max(
+      1,
+      Math.min(64, Math.floor(Number(groupForm.load_balance_route_count) || 1)),
+    )
     const policy = {
       rate_resort_enabled: groupForm.rate_resort_enabled,
       max_billing_rate_multiplier: maxBillingRateMultiplier,
+      load_balance_route_count: loadBalanceRouteCount,
       retry_enabled: groupForm.retry_enabled,
       retry_count: retryCount,
       failover_enabled: groupForm.failover_enabled,

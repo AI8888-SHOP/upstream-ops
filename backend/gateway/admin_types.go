@@ -16,6 +16,7 @@ type CreateGroupInput struct {
 	RateSortDirection    string `json:"rate_sort_direction"`
 	RateResortEnabled    *bool  `json:"rate_resort_enabled"`
 	MaxBillingRateMultiplier *float64 `json:"max_billing_rate_multiplier"`
+	LoadBalanceRouteCount *int `json:"load_balance_route_count"`
 	ModelMappingJSON     string `json:"model_mapping"`
 	ModelsJSON           string `json:"models_json"`
 	ModelsMode           string `json:"models_mode"`
@@ -46,6 +47,7 @@ type UpdateGroupInput struct {
 	RateSortDirection    *string `json:"rate_sort_direction"`
 	RateResortEnabled    *bool   `json:"rate_resort_enabled"`
 	MaxBillingRateMultiplier *float64 `json:"max_billing_rate_multiplier"`
+	LoadBalanceRouteCount *int `json:"load_balance_route_count"`
 	ModelMappingJSON     *string `json:"model_mapping"`
 	ModelsJSON           *string `json:"models_json"`
 	ModelsMode           *string `json:"models_mode"`

@@ -635,6 +635,8 @@ export interface GatewayGroup {
   rate_resort_enabled?: boolean
   /** 0 disables the guard; over-limit routes are excluded from scheduling. */
   max_billing_rate_multiplier?: number
+  /** Number of highest-priority distinct channels used for normal request load balancing. */
+  load_balance_route_count?: number
   model_mapping?: string
   models_json?: string
   models_mode: GatewayModelsMode

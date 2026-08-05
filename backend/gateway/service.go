@@ -61,6 +61,8 @@ type Service struct {
 
 	upstreamConcurrencyMu sync.Mutex
 	upstreamConcurrency   *upstreamConcurrencyRegistry
+	loadBalanceMu         sync.RWMutex
+	loadBalanceStates     map[loadBalancePoolKey]*loadBalancePoolState
 
 	mu          sync.RWMutex
 	proxyConfig config.ProxyConfig
@@ -125,6 +127,7 @@ func NewService(
 		channelGroupsCache: map[uint]channelGroupsCacheEntry{},
 		routeAffinities:    map[routeAffinityKey]routeAffinityEntry{},
 		upstreamConcurrency: newUpstreamConcurrencyRegistry(),
+		loadBalanceStates:   map[loadBalancePoolKey]*loadBalancePoolState{},
 	}
 	s.Admin = &AdminService{Service: s}
 	s.Runtime = &Runtime{Service: s}

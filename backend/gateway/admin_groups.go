@@ -92,6 +92,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.MaxBillingRateMultiplier != nil {
 		maxBillingRate = normalizeMaxBillingRateMultiplier(*in.MaxBillingRateMultiplier)
 	}
+	loadBalanceRouteCount := 1
+	if in.LoadBalanceRouteCount != nil {
+		loadBalanceRouteCount = normalizeLoadBalanceRouteCount(*in.LoadBalanceRouteCount)
+	}
 	pos, err := a.Groups.NextPosition()
 	if err != nil {
 		return nil, err
@@ -104,6 +108,7 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		RateSortDirection:    dir,
 		RateResortEnabled:    rateResort,
 		MaxBillingRateMultiplier: maxBillingRate,
+		LoadBalanceRouteCount: loadBalanceRouteCount,
 		ModelMappingJSON:     strings.TrimSpace(in.ModelMappingJSON),
 		ModelsJSON:           strings.TrimSpace(in.ModelsJSON),
 		ModelsMode:           mode,
@@ -173,6 +178,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 		next := normalizeMaxBillingRateMultiplier(*in.MaxBillingRateMultiplier)
 		rateLimitChanged = next != normalizeMaxBillingRateMultiplier(item.MaxBillingRateMultiplier)
 		item.MaxBillingRateMultiplier = next
+	}
+	if in.LoadBalanceRouteCount != nil {
+		item.LoadBalanceRouteCount = normalizeLoadBalanceRouteCount(*in.LoadBalanceRouteCount)
 	}
 	if in.ModelMappingJSON != nil {
 		item.ModelMappingJSON = strings.TrimSpace(*in.ModelMappingJSON)
@@ -260,12 +268,14 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	}
 	a.invalidateModelsCache(id)
 	a.InvalidateResponseValidator(id)
+	a.resetLoadBalanceGroup(id)
 	return item, nil
 }
 
 // DeleteGroup 删除分组。
 func (a *AdminService) DeleteGroup(id uint) error {
 	a.invalidateModelsCache(id)
+	a.resetLoadBalanceGroup(id)
 	if err := a.Groups.Delete(id); err != nil {
 		return err
 	}

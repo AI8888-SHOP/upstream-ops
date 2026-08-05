@@ -143,6 +143,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 	for {
 		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity, requestedModel)
+		if routesTried == 0 {
+			candidates = rt.orderLoadBalancedCandidates(candidates, group, &affinity)
+		}
 		if len(candidates) == 0 {
 			break
 		}

@@ -747,6 +747,27 @@ export function GroupFormDialog({
           </div>
 
           <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
+            <Label>负载均衡渠道数</Label>
+            <Input
+              type="number"
+              min={1}
+              max={64}
+              step={1}
+              value={groupForm.load_balance_route_count}
+              onChange={(e) =>
+                setGroupForm({
+                  ...groupForm,
+                  load_balance_route_count: e.target.value,
+                })
+              }
+            />
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              普通请求会在当前优先级最高的 X 个不同渠道之间分流；同一会话仍优先沿用原渠道。设为
+              1 可保持原有调度方式。此项不是并发兜底，每个请求仍只选择一个首选渠道。
+            </p>
+          </div>
+
+          <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
             <Label>User-Agent</Label>
             <Input
               value={groupForm.user_agent}

@@ -152,6 +152,7 @@ func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, vali
 func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	groupsByChannel := rt.loadGroupsByChannel(req.c.Request.Context(), req.routes)
 	candidates := rt.sortRoutesWithAffinity(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil, &req.affinity, req.requestedModel)
+	candidates = rt.orderLoadBalancedCandidates(candidates, req.group, &req.affinity)
 	if req.affinity.Recovery && req.hedgeActive {
 		// A cooled route must complete its single recovery probe before any
 		// concurrent hedge is launched; fallback resumes after that probe fails.

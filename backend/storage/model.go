@@ -529,6 +529,9 @@ type GatewayGroup struct {
 	// 关闭时仅在保存路由 / 改排序方向时落库顺序；运行时仍按实时倍率 SortRoutes。
 	RateResortEnabled bool `gorm:"not null;default:false" json:"rate_resort_enabled"`
 	MaxBillingRateMultiplier float64 `gorm:"not null;default:0" json:"max_billing_rate_multiplier"`
+	// LoadBalanceRouteCount controls how many highest-priority physical upstreams
+	// may receive normal requests. It does not change per-request hedge parallelism.
+	LoadBalanceRouteCount int `gorm:"not null;default:1" json:"load_balance_route_count"`
 	ModelMappingJSON  string    `gorm:"type:text" json:"model_mapping,omitempty"`
 	ModelsJSON        string    `gorm:"type:text" json:"models_json,omitempty"`
 	ModelsMode        string    `gorm:"size:16;not null;default:'auto'" json:"models_mode"`
