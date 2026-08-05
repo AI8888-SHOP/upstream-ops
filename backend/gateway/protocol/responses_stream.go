@@ -60,6 +60,14 @@ func (s *ResponsesToAnthropicStream) Feed(eventName, data string) [][]byte {
 	}
 	if typ == "" {
 		// 裸 Response 对象（少见）
+		if resp, ok := payload["response"].(map[string]any); ok && resp != nil {
+			switch st, _ := resp["status"].(string); st {
+			case "failed":
+				return s.handleFailed(payload)
+			case "completed", "incomplete":
+				return s.handleCompleted(payload)
+			}
+		}
 		if _, ok := payload["output"]; ok {
 			return s.handleCompletedPayload(payload)
 		}
