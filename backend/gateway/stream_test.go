@@ -137,6 +137,157 @@ func TestForwardStream_PassthroughChunks(t *testing.T) {
 	}
 }
 
+func TestForwardStream_ResponsesLifecycleDoesNotStopFirstTokenTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(250 * time.Millisecond)
+	}))
+	defer upstream.Close()
+
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	target := &upstreamTarget{BaseURL: upstream.URL, APIKey: "k"}
+	res := (&Service{}).forwardStream(
+		c.Request.Context(), c, target, "/v1/responses", http.MethodPost, nil,
+		[]byte(`{"model":"m","stream":true,"input":"hi"}`),
+		protocol.KindOpenAIResponses, protocol.KindOpenAIResponses, "m", false, 100*time.Millisecond,
+	)
+	if !errors.Is(res.Err, errFirstTokenTimeout) {
+		t.Fatalf("err=%v, want first token timeout", res.Err)
+	}
+	if res.Committed || rec.Body.Len() != 0 {
+		t.Fatalf("lifecycle metadata reached client: committed=%v body=%q", res.Committed, rec.Body.String())
+	}
+}
+
+func TestForwardStream_ResponsesLifecycleFlushesWithFirstOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(80 * time.Millisecond)
+		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	target := &upstreamTarget{BaseURL: upstream.URL, APIKey: "k"}
+	res := (&Service{}).forwardStream(
+		c.Request.Context(), c, target, "/v1/responses", http.MethodPost, nil,
+		[]byte(`{"model":"m","stream":true,"input":"hi"}`),
+		protocol.KindOpenAIResponses, protocol.KindOpenAIResponses, "m", false, 500*time.Millisecond,
+	)
+	if res.Err != nil || !res.Committed {
+		t.Fatalf("result=%+v", res)
+	}
+	if res.FirstTokenMS == nil || *res.FirstTokenMS < 40 {
+		t.Fatalf("first_token_ms=%v, lifecycle event was counted as output", res.FirstTokenMS)
+	}
+	body := rec.Body.String()
+	if created, output := strings.Index(body, "response.created"), strings.Index(body, "response.output_text.delta"); created < 0 || output < 0 || created > output {
+		t.Fatalf("buffered lifecycle/output order is invalid: %s", body)
+	}
+}
+
+func TestForwardStream_ConvertedResponsesLifecycleDoesNotStopFirstTokenTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(200 * time.Millisecond)
+	}))
+	defer upstream.Close()
+
+	cases := []struct {
+		name       string
+		clientKind protocol.Kind
+		path       string
+		body       string
+	}{
+		{"chat", protocol.KindOpenAIChat, "/v1/chat/completions", `{"model":"m","stream":true,"messages":[]}`},
+		{"anthropic", protocol.KindAnthropic, "/v1/messages", `{"model":"m","stream":true,"messages":[]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, tc.path, nil)
+			res := (&Service{}).forwardStream(
+				c.Request.Context(), c, &upstreamTarget{BaseURL: upstream.URL, APIKey: "k"},
+				"/v1/responses", http.MethodPost, nil, []byte(tc.body),
+				tc.clientKind, protocol.KindOpenAIResponses, "m", true, 75*time.Millisecond,
+			)
+			if !errors.Is(res.Err, errFirstTokenTimeout) {
+				t.Fatalf("err=%v, want first token timeout", res.Err)
+			}
+			if res.Committed || rec.Body.Len() != 0 {
+				t.Fatalf("lifecycle metadata reached client: committed=%v body=%q", res.Committed, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestForwardStream_ConvertedResponsesLifecycleEOFIsError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n")
+	}))
+	defer upstream.Close()
+
+	cases := []struct {
+		name       string
+		clientKind protocol.Kind
+		path       string
+		body       string
+	}{
+		{"responses", protocol.KindOpenAIResponses, "/v1/responses", `{"model":"m","stream":true,"input":"hi"}`},
+		{"chat", protocol.KindOpenAIChat, "/v1/chat/completions", `{"model":"m","stream":true,"messages":[]}`},
+		{"anthropic", protocol.KindAnthropic, "/v1/messages", `{"model":"m","stream":true,"messages":[]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, tc.path, nil)
+			res := (&Service{}).forwardStream(
+				c.Request.Context(), c, &upstreamTarget{BaseURL: upstream.URL, APIKey: "k"},
+				"/v1/responses", http.MethodPost, nil, []byte(tc.body),
+				tc.clientKind, protocol.KindOpenAIResponses, "m", true, 0,
+			)
+			if res.Err == nil || !strings.Contains(res.Err.Error(), "ended before output or terminal event") {
+				t.Fatalf("err=%v, want lifecycle-only EOF error", res.Err)
+			}
+			if res.Committed || rec.Body.Len() != 0 {
+				t.Fatalf("lifecycle-only stream reached client: committed=%v body=%q", res.Committed, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestForwardStream_UpstreamErrorNotCommitted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +518,9 @@ func TestSSEFrameIsTerminal(t *testing.T) {
 		{"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n", true},
 		{"event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n", true},
 		{"event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n", true},
+		{"event: response.error\ndata: {\"type\":\"response.error\"}\n\n", true},
+		{"event: response.canceled\ndata: {\"type\":\"response.canceled\"}\n\n", true},
+		{"data: {\"type\":\"error\",\"message\":\"busy\"}\n\n", true},
 		{"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n", false},
 		{"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n", false},
 		{": ping\n\n", false},
@@ -375,6 +529,30 @@ func TestSSEFrameIsTerminal(t *testing.T) {
 	for _, tc := range cases {
 		if got := (&Runtime{Service: &Service{}}).sseFrameIsTerminal([]byte(tc.in)); got != tc.want {
 			t.Fatalf("(&Runtime{Service: &Service{}}).sseFrameIsTerminal(%q)=%v want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResponsesSSEEventIsLifecycle(t *testing.T) {
+	cases := []struct {
+		eventName string
+		data      string
+		want      bool
+	}{
+		{"response.created", `{"type":"response.created"}`, true},
+		{"response.in_progress", `{"type":"response.in_progress"}`, true},
+		{"response.queued", `{"type":"response.queued"}`, true},
+		{"response.output_item.added", `{"type":"response.output_item.added"}`, true},
+		{"response.content_part.added", `{"type":"response.content_part.added"}`, true},
+		{"response.output_text.delta", `{"type":"response.output_text.delta","delta":"x"}`, false},
+		{"response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","delta":"{}"}`, false},
+		{"response.failed", `{"type":"response.failed"}`, false},
+		{"error", `{"type":"error","message":"busy"}`, false},
+		{"response.created", `{not-json`, true},
+	}
+	for _, tc := range cases {
+		if got := responsesSSEEventIsLifecycle(tc.eventName, tc.data); got != tc.want {
+			t.Fatalf("event=%q data=%q got=%v want=%v", tc.eventName, tc.data, got, tc.want)
 		}
 	}
 }

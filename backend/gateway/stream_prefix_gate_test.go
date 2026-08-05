@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"errors"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -83,6 +85,84 @@ func TestStreamPrefixGateTimeoutMakesShortPrefixSelectable(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("prefix timeout did not make the gate ready")
+	}
+}
+
+func TestStreamPrefixGateResponsesMetadataTimeoutKeepsFailureRetryable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	context, _ := gin.CreateTestContext(recorder)
+	validator := mustResponseValidator(t, 4096, 10*time.Millisecond, responseRuleSpec{
+		ID: 5, Name: "overloaded", Enabled: true,
+		Pattern: `(?i)servers are currently overloaded`, Target: "error_message",
+	})
+	gate := newStreamPrefixGateWriter(context.Writer, validator.NewStreamValidator("openai_responses", "gpt-test"))
+	created := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n")
+	if _, err := gate.Write(created); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case decision := <-gate.Ready():
+		t.Fatalf("metadata-only prefix became ready: %+v", decision)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	failed := []byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}}}\n\n")
+	if _, err := gate.Write(failed); err == nil {
+		t.Fatal("response.failed was not rejected")
+	}
+	decision := <-gate.Ready()
+	if !decision.IsRejected() || decision.PostCommit || decision.RuleID != 5 {
+		t.Fatalf("decision=%+v, want pre-commit rejection", decision)
+	}
+	if gate.DownstreamCommitted() || recorder.Body.Len() != 0 {
+		t.Fatalf("failed stream reached downstream: %q", recorder.Body.String())
+	}
+}
+
+func TestStreamPrefixGateResponsesPreCommitBufferHasHardLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	context, _ := gin.CreateTestContext(recorder)
+	validator := mustResponseValidator(t, 128, time.Hour, responseRuleSpec{
+		ID: 6, Name: "blocked", Enabled: true, Pattern: `blocked`, Target: "raw_body",
+	})
+	gate := newStreamPrefixGateWriter(context.Writer, validator.NewStreamValidator("openai_responses", "gpt-test"))
+	frame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"metadata\":\"" + strings.Repeat("x", maxResponsesClassifyBytes) + "\"}\n\n")
+	for {
+		gate.mu.Lock()
+		fits := len(gate.buffer)+len(frame) <= maxResponsesPreCommitBytes
+		gate.mu.Unlock()
+		if !fits {
+			break
+		}
+		if _, err := gate.Write(frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gate.mu.Lock()
+	buffered := len(gate.buffer)
+	gate.mu.Unlock()
+	if buffered > maxResponsesPreCommitBytes {
+		t.Fatalf("pre-commit buffer=%d, limit=%d", buffered, maxResponsesPreCommitBytes)
+	}
+
+	lastWrite := make(chan error, 1)
+	go func() {
+		_, err := gate.Write(frame)
+		lastWrite <- err
+	}()
+	if err := <-lastWrite; !errors.Is(err, errStreamGateBufferLimit) {
+		t.Fatalf("buffer-limit error=%v, want %v", err, errStreamGateBufferLimit)
+	}
+	gate.mu.Lock()
+	buffered = len(gate.buffer)
+	gate.mu.Unlock()
+	if buffered > maxResponsesPreCommitBytes {
+		t.Fatalf("released pre-commit buffer=%d, limit=%d", buffered, maxResponsesPreCommitBytes)
+	}
+	if gate.DownstreamCommitted() || recorder.Body.Len() != 0 {
+		t.Fatalf("overflowed prefix reached downstream: %q", recorder.Body.String())
 	}
 }
 

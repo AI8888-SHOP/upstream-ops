@@ -409,6 +409,7 @@ func (rt *Runtime) forwardStreamIncremental(
 		lastDownstreamAt = time.Now()
 		usageBuf         bytes.Buffer
 		tokens           UsageTokens
+		responsesLifecycleBuffer []byte
 	)
 
 	stopFirstTimer := func() {
@@ -423,7 +424,7 @@ func (rt *Runtime) forwardStreamIncremental(
 		}
 	}
 
-	writeFrames := func(frames [][]byte) error {
+	writeFrames := func(frames [][]byte, countsAsFirstToken bool) error {
 		if len(frames) == 0 {
 			return nil
 		}
@@ -432,6 +433,8 @@ func (rt *Runtime) forwardStreamIncremental(
 				return err
 			}
 			streamStarted = true
+		}
+		if countsAsFirstToken && result.FirstTokenMS == nil {
 			ms := time.Since(start).Milliseconds()
 			result.FirstTokenMS = &ms
 			stopFirstTimer()
@@ -455,6 +458,10 @@ func (rt *Runtime) forwardStreamIncremental(
 					result.Err = err
 					return err
 				}
+				if errors.Is(err, errStreamGateBufferLimit) {
+					result.Err = err
+					return err
+				}
 				result.ClientDisconnected = true
 				return err
 			}
@@ -468,7 +475,31 @@ func (rt *Runtime) forwardStreamIncremental(
 		return nil
 	}
 
-	processEvent := func(lines []string) error {
+	eventCountsAsFirstToken := func(lines []string) bool {
+		if !rt.sseEventHasPayload(lines) {
+			return false
+		}
+		if upKind != protocol.KindOpenAIResponses {
+			return true
+		}
+		eventName, data := rt.parseSSEEventLines(lines)
+		return !responsesSSEEventIsLifecycle(eventName, data)
+	}
+
+	markFirstToken := func(lines []string) bool {
+		counts := eventCountsAsFirstToken(lines)
+		if counts && !sawUpstreamData {
+			sawUpstreamData = true
+			stopFirstTimer()
+			if result.FirstTokenMS == nil {
+				ms := time.Since(start).Milliseconds()
+				result.FirstTokenMS = &ms
+			}
+		}
+		return counts
+	}
+
+	processEvent := func(lines []string, countsAsFirstToken bool) error {
 		if len(lines) == 0 {
 			return nil
 		}
@@ -510,8 +541,47 @@ func (rt *Runtime) forwardStreamIncremental(
 			}
 			b.WriteByte('\n')
 			frames = [][]byte{[]byte(b.String())}
+			if upKind == protocol.KindOpenAIResponses && responsesSSEEventIsLifecycle(eventName, data) {
+				frame := frames[0]
+				if len(responsesLifecycleBuffer)+len(frame) > maxResponsesLifecycleBufferBytes {
+					return fmt.Errorf("Responses lifecycle prefix exceeded %d bytes", maxResponsesLifecycleBufferBytes)
+				}
+				responsesLifecycleBuffer = append(responsesLifecycleBuffer, frame...)
+				return nil
+			}
+			if len(responsesLifecycleBuffer) > 0 {
+				combined := make([]byte, 0, len(responsesLifecycleBuffer)+len(frames[0]))
+				combined = append(combined, responsesLifecycleBuffer...)
+				combined = append(combined, frames[0]...)
+				responsesLifecycleBuffer = nil
+				frames[0] = combined
+			}
 		}
-		return writeFrames(frames)
+		// Responses structural events (including output_item.added) may produce
+		// converter metadata such as message_start/content_block_start. Keep
+		// those frames with the raw lifecycle prefix until real content or a
+		// terminal event arrives, so a later failed event remains retryable.
+		if upKind == protocol.KindOpenAIResponses && !countsAsFirstToken && len(frames) > 0 {
+			var size int
+			for _, frame := range frames {
+				size += len(frame)
+			}
+			if len(responsesLifecycleBuffer)+size > maxResponsesLifecycleBufferBytes {
+				return fmt.Errorf("Responses lifecycle prefix exceeded %d bytes", maxResponsesLifecycleBufferBytes)
+			}
+			for _, frame := range frames {
+				responsesLifecycleBuffer = append(responsesLifecycleBuffer, frame...)
+			}
+			return nil
+		}
+		if len(responsesLifecycleBuffer) > 0 && len(frames) > 0 {
+			combined := make([]byte, 0, len(responsesLifecycleBuffer)+len(frames[0]))
+			combined = append(combined, responsesLifecycleBuffer...)
+			combined = append(combined, frames[0]...)
+			responsesLifecycleBuffer = nil
+			frames[0] = combined
+		}
+		return writeFrames(frames, countsAsFirstToken)
 	}
 
 	sendTerminalError := func(errType, msg string) {
@@ -541,7 +611,7 @@ func (rt *Runtime) forwardStreamIncremental(
 		case chat2resp != nil:
 			frames = chat2resp.Close()
 		}
-		return writeFrames(frames)
+		return writeFrames(frames, true)
 	}
 
 	for {
@@ -646,13 +716,18 @@ func (rt *Runtime) forwardStreamIncremental(
 			if !ok {
 				// 上游结束
 				if len(pendingLines) > 0 {
-					if err := processEvent(pendingLines); err != nil {
+					countsAsFirstToken := markFirstToken(pendingLines)
+					if err := processEvent(pendingLines, countsAsFirstToken); err != nil {
 						if result.Err == nil {
 							result.Err = err
 						}
 						return result
 					}
 					pendingLines = pendingLines[:0]
+				}
+				if upKind == protocol.KindOpenAIResponses && !sawUpstreamData {
+					result.Err = errors.New("upstream Responses stream ended before output or terminal event")
+					return result
 				}
 				if !streamStarted {
 					// 空流
@@ -669,7 +744,7 @@ func (rt *Runtime) forwardStreamIncremental(
 						// 无任何输出：视为成功空流，commit 空 SSE 结束
 						if anth2oai == nil && oai2anth == nil && resp2anth == nil && resp2oai == nil && anth2resp == nil && chat2resp == nil {
 							doneFrame := []byte("data: [DONE]\n\n")
-							if err := writeFrames([][]byte{doneFrame}); err != nil {
+							if err := writeFrames([][]byte{doneFrame}, true); err != nil {
 								if result.Err == nil {
 									result.Err = err
 								}
@@ -732,15 +807,8 @@ func (rt *Runtime) forwardStreamIncremental(
 					continue
 				}
 				// 有效事件：才算「有首字」
-				if !sawUpstreamData {
-					sawUpstreamData = true
-					stopFirstTimer()
-					if result.FirstTokenMS == nil {
-						ms := time.Since(start).Milliseconds()
-						result.FirstTokenMS = &ms
-					}
-				}
-				if err := processEvent(pendingLines); err != nil {
+				countsAsFirstToken := markFirstToken(pendingLines)
+				if err := processEvent(pendingLines, countsAsFirstToken); err != nil {
 					if result.Err == nil {
 						result.Err = err
 					}

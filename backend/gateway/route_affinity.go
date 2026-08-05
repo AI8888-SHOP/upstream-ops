@@ -369,6 +369,13 @@ func (a *routeAffinityContext) recoveryBlockedUntil(current *time.Time, now time
 	return &until
 }
 
+func (a *routeAffinityContext) preservePreferredOnCooldown(routeID uint) {
+	if a == nil || routeID == 0 || routeID != a.PreferredRouteID {
+		return
+	}
+	a.PreservePreferred = true
+}
+
 func (a routeAffinityContext) shouldRememberRoute(routeID uint) bool {
 	if !a.PreservePreferred || a.PreferredRouteID == 0 {
 		return true

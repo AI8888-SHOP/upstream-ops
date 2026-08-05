@@ -539,6 +539,16 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 				attempt.UpstreamURL, req.c.Request.Method,
 			)
 		}
+		// Publish transport/error state before Finish can signal a pending gate.
+		// Otherwise a final validation-accepted decision could win a race with a
+		// first-token timeout or a pre-commit buffer failure.
+		attempt.streamMu.Lock()
+		attempt.applyStreamResultLocked(result)
+		attempt.ClientBody = clientBody
+		attempt.Validation = validation
+		attempt.ErrInfo = errInfo
+		attempt.Terminal = terminal
+		attempt.streamMu.Unlock()
 		final := gate.Finish()
 		if final.IsRejected() && !final.PostCommit {
 			result.ValidationRejection = final
@@ -860,7 +870,12 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			if strings.TrimSpace(errInfo.Detail) != "" {
 				pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 			}
-			_ = rt.Routes.SetModelTempUnschedulable(attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID)
+			cooldownErr := rt.Routes.SetModelTempUnschedulable(
+				attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID,
+			)
+			if cooldownErr == nil && storage.NormalizeGatewayModel(attempt.UpstreamModel) != "" {
+				req.affinity.preservePreferredOnCooldown(attempt.Route.ID)
+			}
 			attempt.UsageMeta.CooldownUntil = &until
 		}
 		success := status >= 200 && status < 300 && attemptErr == nil &&

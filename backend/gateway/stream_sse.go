@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const maxResponsesLifecycleBufferBytes = 1 << 20
+
 func (rt *Runtime) parseSSEEventLines(lines []string) (eventName, data string) {
 	var dataParts []string
 	for _, line := range lines {
@@ -26,6 +28,22 @@ func (rt *Runtime) parseSSEEventLines(lines []string) (eventName, data string) {
 	}
 	data = strings.Join(dataParts, "\n")
 	return eventName, data
+}
+
+// responsesSSEEventIsLifecycle reports metadata-only Responses events. They
+// describe request state but do not contain client-visible model output.
+func responsesSSEEventIsLifecycle(eventName, data string) bool {
+	eventType := strings.TrimSpace(eventName)
+	payload := strings.TrimSpace(data)
+	if payload != "" && payload != "[DONE]" {
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(payload), &envelope); err == nil && strings.TrimSpace(envelope.Type) != "" {
+			eventType = envelope.Type
+		}
+	}
+	return isResponsesLifecycleEvent(eventType)
 }
 
 // sseEventHasPayload 判断 SSE 事件是否包含可提交的有效载荷（非纯注释）。
@@ -72,13 +90,20 @@ func (rt *Runtime) sseFrameIsTerminal(frame []byte) bool {
 	if strings.Contains(s, "event: response.completed") || strings.Contains(s, "event:response.completed") ||
 		strings.Contains(s, "event: response.done") || strings.Contains(s, "event:response.done") ||
 		strings.Contains(s, "event: response.failed") || strings.Contains(s, "event:response.failed") ||
-		strings.Contains(s, "event: response.incomplete") || strings.Contains(s, "event:response.incomplete") {
+		strings.Contains(s, "event: response.incomplete") || strings.Contains(s, "event:response.incomplete") ||
+		strings.Contains(s, "event: response.error") || strings.Contains(s, "event:response.error") ||
+		strings.Contains(s, "event: response.canceled") || strings.Contains(s, "event:response.canceled") ||
+		strings.Contains(s, "event: response.cancelled") || strings.Contains(s, "event:response.cancelled") {
 		return true
 	}
 	if strings.Contains(s, `"type":"response.completed"`) || strings.Contains(s, `"type": "response.completed"`) ||
 		strings.Contains(s, `"type":"response.done"`) || strings.Contains(s, `"type": "response.done"`) ||
 		strings.Contains(s, `"type":"response.failed"`) || strings.Contains(s, `"type": "response.failed"`) ||
-		strings.Contains(s, `"type":"response.incomplete"`) || strings.Contains(s, `"type": "response.incomplete"`) {
+		strings.Contains(s, `"type":"response.incomplete"`) || strings.Contains(s, `"type": "response.incomplete"`) ||
+		strings.Contains(s, `"type":"response.error"`) || strings.Contains(s, `"type": "response.error"`) ||
+		strings.Contains(s, `"type":"response.canceled"`) || strings.Contains(s, `"type": "response.canceled"`) ||
+		strings.Contains(s, `"type":"response.cancelled"`) || strings.Contains(s, `"type": "response.cancelled"`) ||
+		strings.Contains(s, `"type":"error"`) || strings.Contains(s, `"type": "error"`) {
 		return true
 	}
 	return false

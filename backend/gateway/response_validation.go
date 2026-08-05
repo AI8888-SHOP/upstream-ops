@@ -19,6 +19,12 @@ const (
 	defaultValidationPrefixTimeout = 2 * time.Second
 	maxValidationPrefixBytes       = 1 << 20
 	postCommitValidationBytes      = 64 << 10
+	// Responses may emit lifecycle-only SSE frames for a long time before the
+	// first client-visible event. Bound both the aggregate gate buffer and an
+	// incomplete classifier frame so a malformed or metadata-heavy stream
+	// cannot grow attempt-local memory without limit.
+	maxResponsesPreCommitBytes = maxValidationPrefixBytes + postCommitValidationBytes
+	maxResponsesClassifyBytes  = 64 << 10
 )
 
 type validationDecision uint8
@@ -280,16 +286,23 @@ type streamResponseValidator struct {
 	needsAssistant bool
 	needsError     bool
 	firstContentAt time.Time
+	commitEligible bool
+	timeoutElapsed bool
+	terminalSeen   bool
 	bytesSeen      int
 	prefixReady    bool
 	committed      bool
 	prefixRaw      []byte
 	postRaw        []byte
+	postStart      int
 	prefixDirty    bool
+	preCommitDirty bool
 	prefixResult   validationResult
 	postAuditDone  bool
 	result         validationResult
 	postResult     validationResult
+	responsesSSE   responsesSSEClassifier
+	responsesPrefixOverflow bool
 }
 
 func (v *responseValidator) NewStreamValidator(protocolName, model string) *streamResponseValidator {
@@ -330,15 +343,27 @@ func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
 	if s.postResult.IsRejected() {
 		return s.postResult
 	}
-	if s.firstContentAt.IsZero() && streamChunkHasPayload(chunk) {
-		s.firstContentAt = time.Now()
-	}
-
 	if s.prefixReady || s.committed {
 		s.appendPost(chunk)
 		return s.currentResult()
 	}
-	remaining := s.validator.PrefixBytes() - s.bytesSeen
+	observation := s.observeResponsesSSE(chunk)
+	if observation.overflow {
+		s.responsesPrefixOverflow = true
+		return pendingValidation()
+	}
+	if observation.commitEligible {
+		s.commitEligible = true
+	}
+	if observation.commitEligible && s.firstContentAt.IsZero() {
+		// Lifecycle metadata is not client-visible output. Start the configured
+		// validation window only when a content or terminal frame arrives.
+		s.firstContentAt = time.Now()
+	}
+	if observation.terminal {
+		s.terminalSeen = true
+	}
+	remaining := s.validator.PrefixBytes() - len(s.prefixRaw)
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -348,23 +373,36 @@ func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
 	}
 	if prefixLen > 0 {
 		s.prefixRaw = append(s.prefixRaw, chunk[:prefixLen]...)
-		s.bytesSeen += prefixLen
 		s.prefixDirty = true
+		s.preCommitDirty = true
 		if result := s.matchPrefix(); result.IsRejected() {
 			s.result = result
 			return result
 		}
-	}
-	if s.bytesSeen >= s.validator.PrefixBytes() {
-		if result := s.matchPrefix(); result.IsRejected() {
-			s.result = result
-			return result
-		}
-		s.prefixReady = true
-		s.result = acceptedValidation()
 	}
 	if prefixLen < len(chunk) {
 		s.appendPost(chunk[prefixLen:])
+	}
+	s.bytesSeen += observation.contentBytes
+	// Check every complete Responses content or terminal frame while all bytes
+	// are still held. Waiting for the release threshold can miss a retryable
+	// frame when an earlier lifecycle event consumed the raw prefix.
+	if len(observation.candidateRaw) > 0 {
+		if result := s.matchPreCommitBuffered(); result.IsRejected() {
+			s.result = result
+			return result
+		}
+		if result := s.matchPreCommitCandidate(observation.candidateRaw); result.IsRejected() {
+			s.result = result
+			return result
+		}
+	}
+	if (s.bytesSeen >= s.validator.PrefixBytes() || s.timeoutElapsed || s.terminalSeen) && s.canCommitPrefix() {
+		if result := s.matchPreCommitBuffered(); result.IsRejected() {
+			s.result = result
+			return result
+		}
+		s.acceptPrefix()
 	}
 	return s.currentResult()
 }
@@ -372,6 +410,9 @@ func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
 func (s *streamResponseValidator) Ready(now time.Time) validationResult {
 	if s == nil || s.validator == nil || !s.validator.StreamEnabled() {
 		return acceptedValidation()
+	}
+	if s.responsesPrefixOverflow {
+		return pendingValidation()
 	}
 	if s.result.IsRejected() {
 		return s.result
@@ -381,13 +422,15 @@ func (s *streamResponseValidator) Ready(now time.Time) validationResult {
 	}
 	if s.bytesSeen >= s.validator.PrefixBytes() ||
 		(!s.firstContentAt.IsZero() && !now.Before(s.firstContentAt.Add(s.validator.PrefixTimeout()))) {
-		if result := s.matchPrefix(); result.IsRejected() {
+		s.timeoutElapsed = true
+		if !s.canCommitPrefix() {
+			return pendingValidation()
+		}
+		if result := s.matchPreCommitBuffered(); result.IsRejected() {
 			s.result = result
 			return result
 		}
-		s.prefixReady = true
-		s.result = acceptedValidation()
-		return s.result
+		return s.acceptPrefix()
 	}
 	return pendingValidation()
 }
@@ -396,16 +439,17 @@ func (s *streamResponseValidator) Finalize() validationResult {
 	if s == nil || s.validator == nil || !s.validator.StreamEnabled() {
 		return acceptedValidation()
 	}
+	if s.responsesPrefixOverflow {
+		return pendingValidation()
+	}
 	if s.result.IsRejected() {
 		return s.result
 	}
-	if result := s.matchPrefix(); result.IsRejected() {
+	if result := s.matchPreCommitBuffered(); result.IsRejected() {
 		s.result = result
 		return result
 	}
-	s.prefixReady = true
-	s.result = acceptedValidation()
-	return s.result
+	return s.acceptPrefix()
 }
 
 // AuditPostCommit performs the informational post-commit check at most once.
@@ -427,7 +471,7 @@ func (s *streamResponseValidator) AuditPostCommit() validationResult {
 	}
 	combined := make([]byte, 0, len(s.prefixRaw)+len(s.postRaw))
 	combined = append(combined, s.prefixRaw...)
-	combined = append(combined, s.postRaw...)
+	combined = s.appendPostRawTo(combined)
 	var assistant, errorMessage []byte
 	if s.needsAssistant {
 		assistant = []byte(extractAssistantText(combined, http.Header{"Content-Type": []string{"text/event-stream"}}))
@@ -448,6 +492,7 @@ func (s *streamResponseValidator) Commit() {
 	}
 	s.prefixReady = true
 	s.committed = true
+	s.responsesSSE.reset()
 	if !s.result.IsRejected() {
 		s.result = acceptedValidation()
 	}
@@ -480,6 +525,29 @@ func (s *streamResponseValidator) currentResult() validationResult {
 	return pendingValidation()
 }
 
+func (s *streamResponseValidator) acceptPrefix() validationResult {
+	s.prefixReady = true
+	s.result = acceptedValidation()
+	s.responsesSSE.reset()
+	return s.result
+}
+
+func (s *streamResponseValidator) requiresCommitEligiblePayload() bool {
+	return s != nil && strings.EqualFold(strings.TrimSpace(s.protocolName), "openai_responses")
+}
+
+func (s *streamResponseValidator) canCommitPrefix() bool {
+	return !s.requiresCommitEligiblePayload() || s.commitEligible
+}
+
+func (s *streamResponseValidator) holdsResponsesPrefix() bool {
+	return s != nil && s.requiresCommitEligiblePayload() && !s.prefixReady && !s.committed && !s.result.IsRejected()
+}
+
+func (s *streamResponseValidator) responsesPreCommitOverflow() bool {
+	return s != nil && s.responsesPrefixOverflow
+}
+
 func (s *streamResponseValidator) matchPrefix() validationResult {
 	if !s.prefixDirty {
 		return s.prefixResult
@@ -493,13 +561,54 @@ func (s *streamResponseValidator) matchPrefix() validationResult {
 	}
 	s.prefixResult = s.validator.matchCompiled(s.rules, s.prefixRaw, assistant, errorMessage, false)
 	s.prefixDirty = false
+	if len(s.postRaw) == 0 {
+		s.preCommitDirty = false
+	}
 	return s.prefixResult
+}
+
+func (s *streamResponseValidator) matchPreCommitBuffered() validationResult {
+	if len(s.postRaw) == 0 {
+		return s.matchPrefix()
+	}
+	if !s.preCommitDirty {
+		return s.prefixResult
+	}
+	combined := make([]byte, 0, len(s.prefixRaw)+len(s.postRaw))
+	combined = append(combined, s.prefixRaw...)
+	combined = s.appendPostRawTo(combined)
+	var assistant, errorMessage []byte
+	if s.needsAssistant {
+		assistant = []byte(extractAssistantText(combined, http.Header{"Content-Type": []string{"text/event-stream"}}))
+	}
+	if s.needsError {
+		errorMessage = []byte(extractResponseErrorMessage(combined, nil))
+	}
+	s.prefixResult = s.validator.matchCompiled(s.rules, combined, assistant, errorMessage, false)
+	s.prefixDirty = false
+	s.preCommitDirty = false
+	return s.prefixResult
+}
+
+func (s *streamResponseValidator) matchPreCommitCandidate(raw []byte) validationResult {
+	if len(raw) == 0 {
+		return acceptedValidation()
+	}
+	var assistant, errorMessage []byte
+	if s.needsAssistant {
+		assistant = []byte(extractAssistantText(raw, http.Header{"Content-Type": []string{"text/event-stream"}}))
+	}
+	if s.needsError {
+		errorMessage = []byte(extractResponseErrorMessage(raw, nil))
+	}
+	return s.validator.matchCompiled(s.rules, raw, assistant, errorMessage, false)
 }
 
 func (s *streamResponseValidator) appendPost(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
+	s.preCommitDirty = true
 	if len(chunk) >= postCommitValidationBytes {
 		if cap(s.postRaw) < postCommitValidationBytes {
 			s.postRaw = make([]byte, postCommitValidationBytes)
@@ -507,18 +616,31 @@ func (s *streamResponseValidator) appendPost(chunk []byte) {
 			s.postRaw = s.postRaw[:postCommitValidationBytes]
 		}
 		copy(s.postRaw, chunk[len(chunk)-postCommitValidationBytes:])
+		s.postStart = 0
 		return
 	}
-	if cap(s.postRaw) < postCommitValidationBytes {
-		buffer := make([]byte, 0, postCommitValidationBytes)
-		buffer = append(buffer, s.postRaw...)
-		s.postRaw = buffer
+	if len(s.postRaw) < postCommitValidationBytes {
+		available := postCommitValidationBytes - len(s.postRaw)
+		if available > len(chunk) {
+			available = len(chunk)
+		}
+		s.postRaw = append(s.postRaw, chunk[:available]...)
+		chunk = chunk[available:]
+		if len(chunk) == 0 {
+			return
+		}
 	}
-	if overflow := len(s.postRaw) + len(chunk) - postCommitValidationBytes; overflow > 0 {
-		copy(s.postRaw, s.postRaw[overflow:])
-		s.postRaw = s.postRaw[:len(s.postRaw)-overflow]
+	first := copy(s.postRaw[s.postStart:], chunk)
+	copy(s.postRaw, chunk[first:])
+	s.postStart = (s.postStart + len(chunk)) % postCommitValidationBytes
+}
+
+func (s *streamResponseValidator) appendPostRawTo(destination []byte) []byte {
+	if len(s.postRaw) < postCommitValidationBytes || s.postStart == 0 {
+		return append(destination, s.postRaw...)
 	}
-	s.postRaw = append(s.postRaw, chunk...)
+	destination = append(destination, s.postRaw[s.postStart:]...)
+	return append(destination, s.postRaw[:s.postStart]...)
 }
 
 const maxPartialJSONDepth = 64
@@ -537,6 +659,13 @@ func extractPartialJSONAssistantText(data []byte) string {
 }
 
 func extractPartialJSONErrorMessage(data []byte) string {
+	return extractPartialJSONErrorMessageDepth(data, 0)
+}
+
+func extractPartialJSONErrorMessageDepth(data []byte, depth int) string {
+	if depth > 4 {
+		return ""
+	}
 	for _, key := range []string{"error", "message", "detail", "error_description"} {
 		value, ok := partialJSONRootMember(data, key)
 		if !ok {
@@ -544,6 +673,21 @@ func extractPartialJSONErrorMessage(data []byte) string {
 		}
 		p := partialJSONParser{data: value}
 		if text := p.parseValue(true, 0); text != "" {
+			return text
+		}
+	}
+	for _, key := range []string{"response", "incomplete_details"} {
+		value, ok := partialJSONRootMember(data, key)
+		if !ok {
+			continue
+		}
+		if text := extractPartialJSONErrorMessageDepth(value, depth+1); text != "" {
+			return text
+		}
+	}
+	if value, ok := partialJSONRootMember(data, "reason"); ok {
+		parser := partialJSONParser{data: value}
+		if text := parser.parseValue(true, 0); text != "" {
 			return text
 		}
 	}
@@ -834,6 +978,270 @@ func streamChunkHasPayload(chunk []byte) bool {
 	return true
 }
 
+type responsesSSEObservation struct {
+	commitEligible bool
+	contentBytes   int
+	terminal       bool
+	candidateRaw   []byte
+	overflow       bool
+}
+
+type responsesSSEFrameClass uint8
+
+const (
+	responsesSSEFrameEmpty responsesSSEFrameClass = iota
+	responsesSSEFrameLifecycle
+	responsesSSEFrameContent
+	responsesSSEFrameTerminal
+)
+
+// responsesSSEClassifier owns the incomplete frame across Write calls. SSE
+// frame boundaries are transport-independent, so one Write may contain a
+// partial frame, one frame, or several frames.
+type responsesSSEClassifier struct {
+	pending  []byte
+	scanFrom int
+}
+
+func (p *responsesSSEClassifier) reset() {
+	if p == nil {
+		return
+	}
+	p.pending = nil
+	p.scanFrom = 0
+}
+
+func (s *streamResponseValidator) observeResponsesSSE(chunk []byte) responsesSSEObservation {
+	if !s.requiresCommitEligiblePayload() {
+		if streamChunkHasPayload(chunk) {
+			return responsesSSEObservation{commitEligible: true, contentBytes: len(chunk)}
+		}
+		return responsesSSEObservation{}
+	}
+	return s.responsesSSE.consume(chunk)
+}
+
+func (p *responsesSSEClassifier) consume(chunk []byte) (observation responsesSSEObservation) {
+	for len(chunk) > 0 {
+		available := maxResponsesPreCommitBytes - len(p.pending)
+		if available <= 0 {
+			observation.overflow = true
+			p.reset()
+			return observation
+		}
+		take := len(chunk)
+		if take > available {
+			take = available
+		}
+		p.pending = append(p.pending, chunk[:take]...)
+		chunk = chunk[take:]
+		p.classifyAvailable(&observation)
+		if len(p.pending) >= maxResponsesPreCommitBytes {
+			observation.overflow = true
+			p.reset()
+			return observation
+		}
+	}
+	return observation
+}
+
+func (p *responsesSSEClassifier) classifyAvailable(observation *responsesSSEObservation) {
+	if p == nil || observation == nil || len(p.pending) == 0 {
+		return
+	}
+	consumed := 0
+	searchFrom := p.scanFrom
+	if searchFrom < 0 || searchFrom > len(p.pending) {
+		searchFrom = 0
+	}
+	for {
+		frameEnd, separatorBytes := nextSSEFrameBoundary(p.pending, searchFrom)
+		if frameEnd < 0 {
+			break
+		}
+		frame := p.pending[consumed:frameEnd]
+		class := classifyResponsesSSEFrame(frame)
+		frameBytes := frameEnd + separatorBytes - consumed
+		switch class {
+		case responsesSSEFrameTerminal:
+			observation.terminal = true
+			observation.commitEligible = true
+			observation.contentBytes += frameBytes
+			observation.candidateRaw = appendResponsesCandidateRaw(observation.candidateRaw, frame)
+		case responsesSSEFrameContent:
+			observation.commitEligible = true
+			observation.contentBytes += frameBytes
+			observation.candidateRaw = appendResponsesCandidateRaw(observation.candidateRaw, frame)
+		}
+		consumed = frameEnd + separatorBytes
+		searchFrom = consumed
+	}
+	if consumed > 0 {
+		copy(p.pending, p.pending[consumed:])
+		p.pending = p.pending[:len(p.pending)-consumed]
+	}
+	// A separator is at most four bytes, so only this suffix can combine
+	// with the next chunk to form a new frame boundary.
+	p.scanFrom = len(p.pending) - 3
+	if p.scanFrom < 0 {
+		p.scanFrom = 0
+	}
+}
+
+func appendResponsesCandidateRaw(destination, frame []byte) []byte {
+	if len(destination) >= maxResponsesPreCommitBytes || len(frame) == 0 {
+		return destination
+	}
+	if len(destination) > 0 {
+		remaining := maxResponsesPreCommitBytes - len(destination)
+		if remaining < 2 {
+			return destination
+		}
+		destination = append(destination, '\n', '\n')
+	}
+	remaining := maxResponsesPreCommitBytes - len(destination)
+	if remaining > len(frame) {
+		remaining = len(frame)
+	}
+	return append(destination, frame[:remaining]...)
+}
+
+func nextSSEFrameBoundary(data []byte, from int) (int, int) {
+	if from < 0 {
+		from = 0
+	}
+	if from >= len(data) {
+		return -1, 0
+	}
+	bestIndex, bestSize := -1, 0
+	for _, separator := range [][]byte{[]byte("\r\n\r\n"), []byte("\n\r\n"), []byte("\n\n"), []byte("\r\r")} {
+		if offset := bytes.Index(data[from:], separator); offset >= 0 {
+			index := from + offset
+			if bestIndex < 0 || index < bestIndex {
+				bestIndex = index
+				bestSize = len(separator)
+			}
+		}
+	}
+	return bestIndex, bestSize
+}
+
+func classifyResponsesSSEFrame(frame []byte) responsesSSEFrameClass {
+	var eventName string
+	data := make([]byte, 0, minResponseInt(len(frame), maxResponsesClassifyBytes))
+	sawData := false
+	malformed := false
+	lines := bytes.Split(frame, []byte{'\n'})
+	if len(lines) == 1 && bytes.Contains(frame, []byte{'\r'}) {
+		lines = bytes.Split(frame, []byte{'\r'})
+	}
+	for _, rawLine := range lines {
+		line := bytes.TrimSuffix(rawLine, []byte{'\r'})
+		if len(line) == 0 || line[0] == ':' {
+			continue
+		}
+		field, value, found := bytes.Cut(line, []byte{':'})
+		if !found {
+			malformed = true
+			continue
+		}
+		if len(value) > 0 && value[0] == ' ' {
+			value = value[1:]
+		}
+		switch string(field) {
+		case "event":
+			eventName = strings.TrimSpace(string(value))
+		case "data":
+			if sawData && len(data) < maxResponsesClassifyBytes {
+				data = append(data, '\n')
+			}
+			sawData = true
+			remaining := maxResponsesClassifyBytes - len(data)
+			if remaining > len(value) {
+				remaining = len(value)
+			}
+			if remaining > 0 {
+				data = append(data, value[:remaining]...)
+			}
+		case "id", "retry":
+			// SSE control fields do not make a Responses frame visible.
+		default:
+			malformed = true
+		}
+	}
+
+	payload := bytes.TrimSpace(data)
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return responsesSSEFrameTerminal
+	}
+	dataType := responsesPayloadType(payload)
+	if isResponsesTerminalEvent(eventName) || isResponsesTerminalEvent(dataType) {
+		return responsesSSEFrameTerminal
+	}
+	if eventName != "" && !isResponsesLifecycleEvent(eventName) {
+		return responsesSSEFrameContent
+	}
+	if dataType != "" && !isResponsesLifecycleEvent(dataType) {
+		return responsesSSEFrameContent
+	}
+	if eventName != "" || dataType != "" {
+		return responsesSSEFrameLifecycle
+	}
+	if sawData || malformed {
+		// A complete but unknown/malformed frame must not deadlock the gate.
+		return responsesSSEFrameContent
+	}
+	return responsesSSEFrameEmpty
+}
+
+func responsesPayloadType(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	if value, ok := partialJSONRootMember(payload, "type"); ok {
+		parser := partialJSONParser{data: value}
+		parser.skipSpace()
+		if eventType, complete := parser.parseString(); complete {
+			return strings.TrimSpace(eventType)
+		}
+	}
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(payload, &envelope) == nil {
+		return strings.TrimSpace(envelope.Type)
+	}
+	return ""
+}
+
+func isResponsesLifecycleEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "response.created", "response.in_progress", "response.queued",
+		"response.output_item.added", "response.content_part.added",
+		"response.reasoning_summary_part.added":
+		return true
+	default:
+		return false
+	}
+}
+
+func isResponsesTerminalEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "error", "response.error", "response.failed", "response.incomplete",
+		"response.completed", "response.done", "response.canceled", "response.cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func minResponseInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
 func extractAssistantText(body []byte, headers http.Header) string {
 	if len(body) == 0 {
 		return ""
@@ -975,12 +1383,31 @@ func extractResponseErrorMessage(body []byte, headers http.Header) string {
 	if json.Unmarshal(body, &object) != nil {
 		return ""
 	}
+	return extractErrorMessageObject(object)
+}
+
+func extractErrorMessageObject(object map[string]any) string {
+	if object == nil {
+		return ""
+	}
 	if errObj, ok := object["error"].(map[string]any); ok {
 		if message, _ := errObj["message"].(string); message != "" {
 			return message
 		}
 		if detail, _ := errObj["detail"].(string); detail != "" {
 			return detail
+		}
+	}
+	// OpenAI Responses terminal events keep the API error under
+	// response.error rather than at the event root.
+	if response, ok := object["response"].(map[string]any); ok {
+		if message := extractErrorMessageObject(response); message != "" {
+			return message
+		}
+	}
+	if details, ok := object["incomplete_details"].(map[string]any); ok {
+		if reason, _ := details["reason"].(string); reason != "" {
+			return reason
 		}
 	}
 	if message, _ := object["message"].(string); message != "" {

@@ -11,7 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var errStreamGateLost = errors.New("stream attempt lost before downstream commit")
+var (
+	errStreamGateLost        = errors.New("stream attempt lost before downstream commit")
+	errStreamGateBufferLimit = errors.New("stream pre-commit buffer limit exceeded")
+)
 
 func streamWriterActuallyCommitted(c *gin.Context) bool {
 	if c == nil || c.Writer == nil {
@@ -110,8 +113,19 @@ func (g *streamPrefixGateWriter) Write(payload []byte) (int, error) {
 		g.size = 0
 	}
 	g.size += len(payload)
-	g.buffer = append(g.buffer, payload...)
+	responsesPrefixHeld := g.validator.holdsResponsesPrefix()
+	bufferWouldOverflow := responsesPrefixHeld && len(g.buffer)+len(payload) > maxResponsesPreCommitBytes
+	if bufferWouldOverflow {
+		g.stopTimerLocked()
+		g.mu.Unlock()
+		return 0, errStreamGateBufferLimit
+	}
 	result := g.validator.Consume(payload)
+	if g.validator.responsesPreCommitOverflow() {
+		g.stopTimerLocked()
+		g.mu.Unlock()
+		return 0, errStreamGateBufferLimit
+	}
 	if result.IsRejected() && !result.PostCommit {
 		g.rejection = result
 		g.stopTimerLocked()
@@ -122,6 +136,7 @@ func (g *streamPrefixGateWriter) Write(payload []byte) (int, error) {
 	if result.IsRejected() && result.PostCommit && !g.lateMatch.IsRejected() {
 		g.lateMatch = result
 	}
+	g.buffer = append(g.buffer, payload...)
 	if result.IsAccepted() || g.validator.prefixReady {
 		g.stopTimerLocked()
 		g.signalReadyLocked(acceptedValidation())

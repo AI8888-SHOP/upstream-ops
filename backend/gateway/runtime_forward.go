@@ -455,7 +455,12 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					if strings.TrimSpace(errInfo.Detail) != "" {
 						pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 					}
-					_ = rt.Routes.SetModelTempUnschedulable(route.ID, upstreamModel, until, pauseReason, time.Now(), reqID)
+					cooldownErr := rt.Routes.SetModelTempUnschedulable(
+						route.ID, upstreamModel, until, pauseReason, time.Now(), reqID,
+					)
+					if cooldownErr == nil && storage.NormalizeGatewayModel(upstreamModel) != "" {
+						affinity.preservePreferredOnCooldown(route.ID)
+					}
 				}
 				if recoveryRoute && lastTryOnRoute {
 					blockUntil := affinity.recoveryBlockedUntil(cooldownUntil, time.Now())

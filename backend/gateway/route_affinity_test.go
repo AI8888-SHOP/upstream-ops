@@ -84,6 +84,51 @@ func TestRouteAffinityProbeFailureBlocksUntilCooldown(t *testing.T) {
 	}
 }
 
+func TestRouteAffinityKeepsNewlyCooledPreferredRoute(t *testing.T) {
+	svc := &Service{}
+	rt := svc.runtime()
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"one"}]}`)
+	keys := rt.routeAffinityForRequest(nil, 3, 1, "openai_chat", "m", body).Keys
+	rt.rememberRouteAffinity(keys, 1, time.Now())
+
+	affinity := rt.routeAffinityForRequest(nil, 3, 1, "openai_chat", "m", body)
+	if !affinity.shouldRememberRoute(2) {
+		t.Fatal("fallback route should be rememberable before the preferred route cools")
+	}
+	affinity.preservePreferredOnCooldown(1)
+	if affinity.shouldRememberRoute(2) {
+		t.Fatal("fallback route must not overwrite a newly cooled preferred route")
+	}
+	if affinity.shouldRememberRoute(0) {
+		t.Fatal("an empty route must not replace the preserved preferred route")
+	}
+	if !affinity.shouldRememberRoute(1) {
+		t.Fatal("the original preferred route must remain rememberable")
+	}
+
+	// Mirror fallback settlement: route 2 succeeds, but its winner state must
+	// not replace route 1 in the shared affinity map.
+	if affinity.shouldRememberRoute(2) {
+		rt.rememberRouteAffinity(affinity.Keys, 2, time.Now())
+	}
+	next := rt.routeAffinityForRequest(nil, 3, 1, "openai_chat", "m", body)
+	if next.PreferredRouteID != 1 {
+		t.Fatalf("preferred route=%d, want 1 after fallback success", next.PreferredRouteID)
+	}
+
+	until := time.Now().Add(time.Minute)
+	routes := []storage.GatewayRoute{
+		{ID: 1, GatewayGroupID: 1, Position: 0, Enabled: true, SourceAPIKeyCipher: "a", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 1, Model: "m", TempUnschedulableUntil: &until},
+		}},
+		{ID: 2, GatewayGroupID: 1, Position: 1, Enabled: true, SourceAPIKeyCipher: "b"},
+	}
+	candidates := rt.sortRoutesWithAffinity(routes, nil, "asc", time.Now(), nil, &next, "m")
+	if len(candidates) != 2 || candidates[0].Route.ID != 1 || !next.Recovery {
+		t.Fatalf("next request did not probe cooled preferred route first: candidates=%+v affinity=%+v", candidates, next)
+	}
+}
+
 func TestRemoveRecoveryRouteRetries(t *testing.T) {
 	plan := []coordinatedRoutePlan{
 		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 1}}, TryOnRoute: 0},
