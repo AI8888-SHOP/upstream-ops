@@ -339,8 +339,13 @@ func (s *Service) finishRouteAffinityProbe(ctx *routeAffinityContext, routeID ui
 		entry.ProbeUntil = time.Time{}
 		if success {
 			entry.RecoveryBlockedUntil = time.Time{}
-		} else if blockedUntil != nil && blockedUntil.After(now) {
-			entry.RecoveryBlockedUntil = *blockedUntil
+		} else {
+			if blockedUntil == nil && ctx.RecoveryCooldownUntil.After(now) {
+				blockedUntil = &ctx.RecoveryCooldownUntil
+			}
+			if blockedUntil != nil && blockedUntil.After(now) {
+				entry.RecoveryBlockedUntil = *blockedUntil
+			}
 		}
 		entry.ExpiresAt = now.Add(routeAffinityTTL)
 		s.routeAffinities[key] = entry
