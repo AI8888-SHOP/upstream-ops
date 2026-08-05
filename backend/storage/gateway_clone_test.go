@@ -151,7 +151,8 @@ func TestGatewayGroupsCloneCopiesConfigurationAndResetsRuntimeState(t *testing.T
 	}
 	clonedRoute := clonedRoutes[0]
 	if clonedRoute.ID == sourceRoutes[0].ID || clonedRoute.GatewayGroupID != cloned.Group.ID ||
-		clonedRoute.ModelMappingJSON != route.ModelMappingJSON || clonedRoute.SourceAPIKeyCipher != route.SourceAPIKeyCipher {
+		clonedRoute.ModelMappingJSON != sourceRoutes[0].ModelMappingJSON ||
+		clonedRoute.SourceAPIKeyCipher != sourceRoutes[0].SourceAPIKeyCipher {
 		t.Fatalf("clone route configuration = %#v", clonedRoute)
 	}
 	if clonedRoute.RateLimitAutoDisabled || clonedRoute.RateLimitAutoDisabledReason != "" ||
