@@ -97,7 +97,7 @@ func TestOrderLoadBalancedCandidatesRoundRobinAndFailoverOrder(t *testing.T) {
 				got := rt.orderLoadBalancedCandidates(candidates, group, nil)
 				assertLoadBalanceTestRouteIDs(t, got, want...)
 			}
-		}
+		})
 	}
 }
 
