@@ -39,6 +39,7 @@ export type GroupFormState = {
   hedge_delay_seconds: string
   hedge_max_parallel: string
   hedge_max_attempts: string
+  hedge_virtual_cache_enabled: boolean
   response_validation_enabled: boolean
   response_validation_prefix_bytes: string
   response_validation_prefix_timeout_ms: string
@@ -518,6 +519,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   hedge_delay_seconds: "10",
   hedge_max_parallel: "2",
   hedge_max_attempts: "4",
+  hedge_virtual_cache_enabled: false,
   response_validation_enabled: false,
   response_validation_prefix_bytes: "8192",
   response_validation_prefix_timeout_ms: "2000",

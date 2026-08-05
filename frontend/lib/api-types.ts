@@ -668,6 +668,7 @@ export interface GatewayGroup {
   hedge_max_parallel?: number
   /** 单个客户端请求允许启动的上游 attempt 总数 */
   hedge_max_attempts?: number
+  hedge_virtual_cache_enabled?: boolean
   /** 是否启用响应内容正则校验 */
   response_validation_enabled?: boolean
   /** 流式校验模式；当前为 prefix */
@@ -683,6 +684,16 @@ export interface GatewayGroup {
   user_agent?: string
   created_at: string
   updated_at: string
+}
+
+export interface GatewayGroupCloneKeyResult {
+  key: GatewayKey
+  secret: string
+}
+
+export interface GatewayGroupCloneResult {
+  group: GatewayGroup
+  keys: GatewayGroupCloneKeyResult[]
 }
 
 export interface GatewayKey {
@@ -934,6 +945,8 @@ export interface GatewayUsageLog {
   output_tokens: number
   cache_creation_tokens: number
   cache_read_tokens: number
+  /** 网关为实际并发 hedge 提供的用户侧虚拟缓存读取 token */
+  virtual_cache_read_tokens?: number
   cache_creation_5m_tokens?: number
   cache_creation_1h_tokens?: number
   image_output_tokens?: number
@@ -943,9 +956,12 @@ export interface GatewayUsageLog {
   output_cost: number
   cache_creation_cost: number
   cache_read_cost: number
+  virtual_cache_read_cost?: number
   image_output_cost?: number
   total_cost: number
   actual_cost: number
+  /** winner 终态向网关密钥实际扣除的金额；旧记录为空时回退 actual_cost */
+  billed_cost?: number
   account_stats_cost?: number
   rate_multiplier: number
   billing_rate_multiplier: number
@@ -1018,6 +1034,7 @@ export interface GatewayUsageStats {
   total_input_tokens: number
   total_output_tokens: number
   total_cache_creation_tokens: number
+  /** Actual upstream cache reads plus gateway virtual hedge credits. */
   total_cache_read_tokens: number
   total_tokens: number
   total_cost: number

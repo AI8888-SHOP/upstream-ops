@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -224,8 +225,279 @@ func (r *GatewayGroups) Delete(id uint) error {
 	})
 }
 
+// GatewayGroupCloneKey contains the newly generated credential material for a
+// source gateway key. The source key's user-editable configuration is loaded
+// inside the clone transaction; only the encrypted replacement credential is
+// supplied by the gateway service.
+//
+// KeyHash and KeyCipher are deliberately accepted only in their persisted
+// forms. A plaintext client key must never cross the storage boundary.
+type GatewayGroupCloneKey struct {
+	SourceID  uint
+	KeyHash   string
+	KeyPrefix string
+	KeyCipher string
+}
+
+// GatewayGroupCloneResult is returned after a complete group clone commits.
+// Keys contain persisted metadata only; plaintext secrets are attached by the
+// admin service in its one-time API response.
+type GatewayGroupCloneResult struct {
+	Group        GatewayGroup
+	Keys         []GatewayKey
+	KeySourceIDs []uint
+}
+
+// Clone creates a complete, independent gateway group in one transaction.
+// Group policy, routes, model mappings, response rules and gateway-key
+// configuration are copied. Usage counters and all automatic route cooldown /
+// temporary-unschedulable state are intentionally reset.
+//
+// The clone key templates must contain exactly one replacement credential for
+// every source key. This keeps the source configuration authoritative while
+// allowing the gateway service to generate new client secrets without exposing
+// plaintext to storage.
+func (r *GatewayGroups) Clone(id uint, requestedName string, keyTemplates []GatewayGroupCloneKey) (*GatewayGroupCloneResult, error) {
+	if id == 0 {
+		return nil, fmt.Errorf("gateway group id is required")
+	}
+	result := &GatewayGroupCloneResult{
+		Keys:        make([]GatewayKey, 0, len(keyTemplates)),
+		KeySourceIDs: make([]uint, 0, len(keyTemplates)),
+	}
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var source GatewayGroup
+		if err := tx.First(&source, id).Error; err != nil {
+			return err
+		}
+
+		name := strings.TrimSpace(requestedName)
+		if name == "" {
+			name = source.Name + " (copy)"
+		}
+		var err error
+		name, err = uniqueGatewayCloneName(tx, "gateway_groups", name, 128)
+		if err != nil {
+			return err
+		}
+		var maxPosition *int
+		if err := tx.Model(&GatewayGroup{}).Select("MAX(position)").Scan(&maxPosition).Error; err != nil {
+			return err
+		}
+		position := 0
+		if maxPosition != nil {
+			position = *maxPosition + 1
+		}
+		clone := source
+		clone.ID = 0
+		clone.Name = name
+		clone.Position = position
+		clone.CreatedAt = time.Time{}
+		clone.UpdatedAt = time.Time{}
+		if err := tx.Create(&clone).Error; err != nil {
+			return err
+		}
+		result.Group = clone
+
+		var sourceRoutes []GatewayRoute
+		if err := tx.Where("gateway_group_id = ?", id).Order("position ASC, id ASC").Find(&sourceRoutes).Error; err != nil {
+			return err
+		}
+		for _, sourceRoute := range sourceRoutes {
+			route := sourceRoute
+			route.ID = 0
+			route.GatewayGroupID = clone.ID
+			route.RateLimitAutoDisabled = false
+			route.RateLimitAutoDisabledReason = ""
+			route.TempUnschedulableUntil = nil
+			route.TempUnschedulableReason = ""
+			route.TempUnschedulableAt = nil
+			route.TempUnschedulableRequestID = ""
+			route.RecoverSuccessStreak = 0
+			route.ModelCooldowns = nil
+			route.CreatedAt = time.Time{}
+			route.UpdatedAt = time.Time{}
+			if err := tx.Create(&route).Error; err != nil {
+				return err
+			}
+		}
+
+		var sourceRules []GatewayResponseRule
+		if err := tx.Where("gateway_group_id = ?", id).Order("priority ASC, id ASC").Find(&sourceRules).Error; err != nil {
+			return err
+		}
+		for _, sourceRule := range sourceRules {
+			rule := sourceRule
+			rule.ID = 0
+			rule.GatewayGroupID = clone.ID
+			rule.CreatedAt = time.Time{}
+			rule.UpdatedAt = time.Time{}
+			if err := tx.Create(&rule).Error; err != nil {
+				return err
+			}
+		}
+
+		var sourceKeys []GatewayKey
+		if err := tx.Where("group_id = ?", id).Order("id ASC").Find(&sourceKeys).Error; err != nil {
+			return err
+		}
+		if len(sourceKeys) != len(keyTemplates) {
+			return fmt.Errorf("clone key templates do not match source keys")
+		}
+		templatesBySourceID := make(map[uint]GatewayGroupCloneKey, len(keyTemplates))
+		for _, template := range keyTemplates {
+			if template.SourceID == 0 || template.KeyHash == "" || template.KeyPrefix == "" || template.KeyCipher == "" {
+				return fmt.Errorf("clone key template is incomplete")
+			}
+			if _, exists := templatesBySourceID[template.SourceID]; exists {
+				return fmt.Errorf("duplicate clone key template for source key %d", template.SourceID)
+			}
+			templatesBySourceID[template.SourceID] = template
+		}
+		for _, sourceKey := range sourceKeys {
+			template, ok := templatesBySourceID[sourceKey.ID]
+			if !ok {
+				return fmt.Errorf("missing clone key template for source key %d", sourceKey.ID)
+			}
+			var hashCount int64
+			if err := tx.Model(&GatewayKey{}).Where("key_hash = ?", template.KeyHash).Count(&hashCount).Error; err != nil {
+				return err
+			}
+			if hashCount > 0 {
+				return fmt.Errorf("clone key hash already exists")
+			}
+			keyName, err := uniqueGatewayCloneName(tx, "gateway_keys", sourceKey.Name+" (copy)", 128)
+			if err != nil {
+				return err
+			}
+			key := GatewayKey{
+				GroupID:         clone.ID,
+				Name:            keyName,
+				KeyHash:         template.KeyHash,
+				KeyPrefix:       template.KeyPrefix,
+				KeyCipher:       template.KeyCipher,
+				Status:          sourceKey.Status,
+				Quota:           sourceKey.Quota,
+				QuotaUsed:       0,
+				IPWhitelistJSON: sourceKey.IPWhitelistJSON,
+				IPBlacklistJSON: sourceKey.IPBlacklistJSON,
+				LastUsedAt:      nil,
+			}
+			if err := tx.Create(&key).Error; err != nil {
+				return err
+			}
+			result.Keys = append(result.Keys, key)
+			result.KeySourceIDs = append(result.KeySourceIDs, sourceKey.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// uniqueGatewayCloneName returns a case-insensitively unique name in one of
+// the two gateway tables. The suffix is trimmed to the model's byte limit so
+// names containing multibyte characters remain valid UTF-8.
+func uniqueGatewayCloneName(tx *gorm.DB, table, requested string, maxBytes int) (string, error) {
+	base := strings.TrimSpace(requested)
+	if base == "" {
+		base = "copy"
+	}
+	base = truncateGatewayCloneName(base, maxBytes)
+	if available, err := gatewayCloneNameAvailable(tx, table, base); err != nil {
+		return "", err
+	} else if available {
+		return base, nil
+	}
+	for suffix := 2; ; suffix++ {
+		tail := fmt.Sprintf(" (%d)", suffix)
+		prefix := truncateGatewayCloneName(base, maxBytes-len(tail))
+		candidate := prefix + tail
+		available, err := gatewayCloneNameAvailable(tx, table, candidate)
+		if err != nil {
+			return "", err
+		}
+		if available {
+			return candidate, nil
+		}
+	}
+}
+
+func gatewayCloneNameAvailable(tx *gorm.DB, table, name string) (bool, error) {
+	var count int64
+	if err := tx.Table(table).Where("LOWER(name) = LOWER(?)", name).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count == 0, nil
+}
+
+func truncateGatewayCloneName(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
 // GatewayResponseRules 组级响应正则规则仓储。
 type GatewayResponseRules struct{ db *gorm.DB }
+
+// GatewayResponseRuleBundleKind identifies the portable response-rule export
+// format. The bundle intentionally contains no gateway group IDs, so it can
+// be imported into any group.
+const GatewayResponseRuleBundleKind = "upstream_ops.gateway_response_rules"
+
+// GatewayResponseRuleBundleVersion is incremented when the portable schema
+// changes incompatibly.
+const GatewayResponseRuleBundleVersion = 1
+
+// GatewayResponseRuleBundle is the portable response-rule export format.
+// Rules contain only user-editable fields; database IDs and timestamps are
+// deliberately omitted.
+type GatewayResponseRuleBundle struct {
+	Kind       string                          `json:"kind"`
+	Version    int                             `json:"version"`
+	ExportedAt time.Time                       `json:"exported_at"`
+	Rules      []GatewayResponseRuleBundleRule `json:"rules"`
+}
+
+// GatewayResponseRuleBundleRule is a group-independent response rule.
+// Enabled is a pointer so imports of hand-written bundles can retain the
+// existing create API default (enabled=true) when the field is omitted.
+type GatewayResponseRuleBundleRule struct {
+	Name      string   `json:"name"`
+	Enabled   *bool    `json:"enabled,omitempty"`
+	Priority  int      `json:"priority"`
+	Pattern   string   `json:"pattern"`
+	Target    string   `json:"target"`
+	Models    []string `json:"models"`
+	Protocols []string `json:"protocols"`
+}
+
+// GatewayResponseRuleImportStrategy controls what happens when a rule with
+// the same (case-insensitive) name already exists in the target group.
+type GatewayResponseRuleImportStrategy string
+
+const (
+	GatewayResponseRuleImportSkip    GatewayResponseRuleImportStrategy = "skip"
+	GatewayResponseRuleImportReplace GatewayResponseRuleImportStrategy = "replace"
+	GatewayResponseRuleImportRename  GatewayResponseRuleImportStrategy = "rename"
+)
+
+// GatewayResponseRuleImportResult summarizes a successful import.
+type GatewayResponseRuleImportResult struct {
+	Strategy  GatewayResponseRuleImportStrategy `json:"strategy"`
+	Created   int                               `json:"created"`
+	Replaced  int                               `json:"replaced"`
+	Renamed   int                               `json:"renamed"`
+	Skipped   int                               `json:"skipped"`
+	Items     []GatewayResponseRule             `json:"items"`
+}
 
 // NewGatewayResponseRules 构造响应规则仓储。
 func NewGatewayResponseRules(db *gorm.DB) *GatewayResponseRules {
@@ -303,6 +575,197 @@ func (r *GatewayResponseRules) Update(item *GatewayResponseRule) error {
 // Delete 按主键删除。
 func (r *GatewayResponseRules) Delete(id uint) error {
 	return r.db.Delete(&GatewayResponseRule{}, id).Error
+}
+
+// Export returns a group-independent rule bundle. IDs, group IDs and
+// timestamps are intentionally excluded from the returned schema.
+func (r *GatewayResponseRules) Export(groupID uint) (GatewayResponseRuleBundle, error) {
+	if err := r.ensureGroupExists(groupID); err != nil {
+		return GatewayResponseRuleBundle{}, err
+	}
+	items, err := r.ListByGroupID(groupID)
+	if err != nil {
+		return GatewayResponseRuleBundle{}, err
+	}
+	bundle := GatewayResponseRuleBundle{
+		Kind:       GatewayResponseRuleBundleKind,
+		Version:    GatewayResponseRuleBundleVersion,
+		ExportedAt: time.Now().UTC(),
+		Rules:      make([]GatewayResponseRuleBundleRule, 0, len(items)),
+	}
+	for _, item := range items {
+		models, err := decodeGatewayResponseRuleList(item.ModelsJSON, false, 256)
+		if err != nil {
+			return GatewayResponseRuleBundle{}, fmt.Errorf("rule %q models_json: %w", item.Name, err)
+		}
+		protocols, err := decodeGatewayResponseRuleList(item.ProtocolsJSON, true, 64)
+		if err != nil {
+			return GatewayResponseRuleBundle{}, fmt.Errorf("rule %q protocols_json: %w", item.Name, err)
+		}
+		enabled := item.Enabled
+		bundle.Rules = append(bundle.Rules, GatewayResponseRuleBundleRule{
+			Name: item.Name, Enabled: &enabled, Priority: item.Priority,
+			Pattern: item.Pattern, Target: item.Target,
+			Models: models, Protocols: protocols,
+		})
+	}
+	return bundle, nil
+}
+
+// Import applies a validated rule bundle to one target group in a single
+// transaction. It performs all regex and field validation before writing any
+// row, so malformed input cannot leave a partially imported set behind.
+func (r *GatewayResponseRules) Import(groupID uint, bundle GatewayResponseRuleBundle, strategy GatewayResponseRuleImportStrategy) (*GatewayResponseRuleImportResult, error) {
+	if err := r.ensureGroupExists(groupID); err != nil {
+		return nil, err
+	}
+	if bundle.Kind == "" {
+		// Allow a plain {rules:[...]} payload for hand-written imports while
+		// still normalizing it to the current portable format.
+		bundle.Kind = GatewayResponseRuleBundleKind
+	}
+	if bundle.Kind != GatewayResponseRuleBundleKind {
+		return nil, fmt.Errorf("unsupported response rule bundle kind %q", bundle.Kind)
+	}
+	if bundle.Version == 0 {
+		bundle.Version = GatewayResponseRuleBundleVersion
+	}
+	if bundle.Version != GatewayResponseRuleBundleVersion {
+		return nil, fmt.Errorf("unsupported response rule bundle version %d", bundle.Version)
+	}
+	strategy = normalizeGatewayResponseRuleImportStrategy(strategy)
+	switch strategy {
+	case GatewayResponseRuleImportSkip, GatewayResponseRuleImportReplace, GatewayResponseRuleImportRename:
+	default:
+		return nil, fmt.Errorf("strategy must be skip, replace, or rename")
+	}
+	if len(bundle.Rules) > 512 {
+		return nil, fmt.Errorf("bundle contains too many rules (maximum 512)")
+	}
+
+	// Normalize and validate every rule before opening the write transaction.
+	// This also catches duplicate names within the uploaded file rather than
+	// allowing their result to depend on input order.
+	validated := make([]GatewayResponseRule, 0, len(bundle.Rules))
+	seen := make(map[string]struct{}, len(bundle.Rules))
+	for index, spec := range bundle.Rules {
+		enabled := true
+		if spec.Enabled != nil {
+			enabled = *spec.Enabled
+		}
+		modelsJSON, err := json.Marshal(spec.Models)
+		if err != nil {
+			return nil, fmt.Errorf("rule %d models: %w", index+1, err)
+		}
+		protocolsJSON, err := json.Marshal(spec.Protocols)
+		if err != nil {
+			return nil, fmt.Errorf("rule %d protocols: %w", index+1, err)
+		}
+		item := GatewayResponseRule{
+			GatewayGroupID: groupID,
+			Name:           spec.Name,
+			Enabled:        enabled,
+			Priority:       spec.Priority,
+			Pattern:        spec.Pattern,
+			Target:         spec.Target,
+			ModelsJSON:     string(modelsJSON),
+			ProtocolsJSON:  string(protocolsJSON),
+		}
+		if err := normalizeGatewayResponseRule(&item); err != nil {
+			return nil, fmt.Errorf("rule %d: %w", index+1, err)
+		}
+		nameKey := strings.ToLower(item.Name)
+		if _, exists := seen[nameKey]; exists {
+			return nil, fmt.Errorf("bundle contains duplicate rule name %q", item.Name)
+		}
+		seen[nameKey] = struct{}{}
+		validated = append(validated, item)
+	}
+
+	result := &GatewayResponseRuleImportResult{
+		Strategy: strategy,
+		Items:    make([]GatewayResponseRule, 0, len(validated)),
+	}
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var existing []GatewayResponseRule
+		if err := tx.Where("gateway_group_id = ?", groupID).
+			Order("priority ASC, id ASC").Find(&existing).Error; err != nil {
+			return err
+		}
+		existingByName := make(map[string]GatewayResponseRule, len(existing))
+		for _, item := range existing {
+			existingByName[strings.ToLower(item.Name)] = item
+		}
+
+		for _, item := range validated {
+			nameKey := strings.ToLower(item.Name)
+			if old, exists := existingByName[nameKey]; exists {
+				switch strategy {
+				case GatewayResponseRuleImportSkip:
+					result.Skipped++
+					continue
+				case GatewayResponseRuleImportReplace:
+					item.ID = old.ID
+					item.CreatedAt = old.CreatedAt
+					if err := tx.Save(&item).Error; err != nil {
+						return err
+					}
+					result.Replaced++
+					result.Items = append(result.Items, item)
+					continue
+				case GatewayResponseRuleImportRename:
+					item.Name = uniqueGatewayResponseRuleName(item.Name, existingByName)
+					nameKey = strings.ToLower(item.Name)
+					result.Renamed++
+				}
+			}
+			if err := tx.Create(&item).Error; err != nil {
+				return err
+			}
+			existingByName[nameKey] = item
+			result.Created++
+			result.Items = append(result.Items, item)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func normalizeGatewayResponseRuleImportStrategy(strategy GatewayResponseRuleImportStrategy) GatewayResponseRuleImportStrategy {
+	return GatewayResponseRuleImportStrategy(strings.ToLower(strings.TrimSpace(string(strategy))))
+}
+
+func uniqueGatewayResponseRuleName(base string, existing map[string]GatewayResponseRule) string {
+	for suffix := 2; ; suffix++ {
+		candidateSuffix := fmt.Sprintf(" (%d)", suffix)
+		prefix := base
+		for len(prefix)+len(candidateSuffix) > 128 {
+			_, size := utf8.DecodeLastRuneInString(prefix)
+			if size <= 0 || size > len(prefix) {
+				break
+			}
+			prefix = prefix[:len(prefix)-size]
+		}
+		candidate := prefix + candidateSuffix
+		if _, exists := existing[strings.ToLower(candidate)]; !exists {
+			return candidate
+		}
+	}
+}
+
+func decodeGatewayResponseRuleList(raw string, lower bool, maxItemBytes int) ([]string, error) {
+	normalized, err := normalizeResponseRuleListJSON(raw, lower, maxItemBytes)
+	if err != nil {
+		return nil, err
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(normalized), &values); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func (r *GatewayResponseRules) ensureGroupExists(groupID uint) error {
@@ -947,6 +1410,18 @@ type GatewayFinalizeRequestInput struct {
 	Delivered        bool
 	WinnerAttempt    int
 	WinnerUsageLogID uint
+	// BilledCost is optional for backwards compatibility. When BilledCostSet
+	// is true it is the amount charged to the gateway key; ActualCost on the
+	// usage row remains the raw upstream cost.
+	BilledCost    float64
+	BilledCostSet bool
+	// HedgeTriggered must be set by the runtime only after an auxiliary hedge
+	// attempt was actually launched. It allows a primary winner to receive the
+	// credit when the hedge ran but lost the race.
+	HedgeTriggered          bool
+	VirtualCacheReadEnabled bool
+	VirtualCacheReadTokens  int
+	VirtualCacheReadCost    float64
 }
 
 // FinalizeRequest 原子完成 winner-only 结算。返回值表示本次调用是否首次
@@ -1001,14 +1476,71 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 		if math.IsNaN(usage.ActualCost) || math.IsInf(usage.ActualCost, 0) || usage.ActualCost < 0 {
 			return fmt.Errorf("winner actual cost must be a finite non-negative number")
 		}
+		billedCost := usage.ActualCost
+		if input.BilledCostSet {
+			billedCost = input.BilledCost
+		}
+		if math.IsNaN(billedCost) || math.IsInf(billedCost, 0) || billedCost < 0 {
+			return fmt.Errorf("winner billed cost must be a finite non-negative number")
+		}
+		virtualRequested := input.VirtualCacheReadEnabled ||
+			input.VirtualCacheReadTokens > 0 || input.VirtualCacheReadCost > 0
+		if input.BilledCostSet && !virtualRequested {
+			return fmt.Errorf("billed cost override requires virtual cache settlement")
+		}
+		if virtualRequested {
+			if !input.BilledCostSet {
+				return fmt.Errorf("virtual cache settlement requires billed cost")
+			}
+			if !input.VirtualCacheReadEnabled || input.VirtualCacheReadTokens <= 0 {
+				return fmt.Errorf("virtual cache settlement requires positive virtual cache tokens")
+			}
+			if !input.HedgeTriggered {
+				return fmt.Errorf("virtual cache settlement requires a real hedge")
+			}
+			if usage.AttemptKind != GatewayAttemptKindPrimary && usage.AttemptKind != GatewayAttemptKindHedge {
+				return fmt.Errorf("virtual cache settlement requires a hedge winner")
+			}
+			if !usage.Success {
+				return fmt.Errorf("virtual cache settlement requires a successful winner")
+			}
+			if gatewayUsageHasMediaOutput(usage) {
+				return fmt.Errorf("virtual cache settlement is not available for media output")
+			}
+			hasCompanion, err := gatewayUsageHasHedgeCompanion(tx, input.RequestID, input.GatewayKeyID, usage)
+			if err != nil {
+				return fmt.Errorf("check hedge companion: %w", err)
+			}
+			if !hasCompanion {
+				return fmt.Errorf("virtual cache settlement requires a recorded hedge attempt")
+			}
+			if input.VirtualCacheReadTokens > usage.InputTokens {
+				return fmt.Errorf("virtual cache read tokens exceed fresh input tokens")
+			}
+			if billedCost > usage.ActualCost {
+				return fmt.Errorf("virtual cache settlement cannot increase winner cost")
+			}
+		}
+		if input.VirtualCacheReadTokens < 0 {
+			return fmt.Errorf("virtual cache read tokens must be non-negative")
+		}
+		if math.IsNaN(input.VirtualCacheReadCost) || math.IsInf(input.VirtualCacheReadCost, 0) || input.VirtualCacheReadCost < 0 {
+			return fmt.Errorf("virtual cache read cost must be a finite non-negative number")
+		}
+		if virtualRequested && input.VirtualCacheReadCost > billedCost {
+			return fmt.Errorf("virtual cache read cost cannot exceed billed cost")
+		}
 		settlement := &GatewayWinnerSettlement{
-			RequestID:         input.RequestID,
-			GatewayKeyID:      input.GatewayKeyID,
-			RouteID:           usage.RouteID,
-			WinnerAttempt:     input.WinnerAttempt,
-			GatewayUsageLogID: usage.ID,
-			ActualCost:        usage.ActualCost,
-			CreatedAt:         time.Now().UTC(),
+			RequestID:              input.RequestID,
+			GatewayKeyID:           input.GatewayKeyID,
+			RouteID:                usage.RouteID,
+			WinnerAttempt:          input.WinnerAttempt,
+			GatewayUsageLogID:      usage.ID,
+			ActualCost:             usage.ActualCost,
+			BilledCost:             billedCost,
+			VirtualCacheReadTokens: input.VirtualCacheReadTokens,
+			VirtualCacheReadCost:   input.VirtualCacheReadCost,
+			CreatedAt:              time.Now().UTC(),
 		}
 		if err := tx.Create(settlement).Error; err != nil {
 			return fmt.Errorf("create winner settlement: %w", err)
@@ -1020,28 +1552,90 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 			return err
 		}
 		if err := tx.Model(&GatewayUsageLog{}).Where("id = ?", usage.ID).Updates(map[string]any{
-			"winner":                true,
-			"attempt_status":        GatewayAttemptStatusAccepted,
-			"estimated_extra_cost": 0,
+			"winner":                    true,
+			"attempt_status":            GatewayAttemptStatusAccepted,
+			"estimated_extra_cost":      0,
+			"billed_cost":               billedCost,
+			"virtual_cache_read_tokens": input.VirtualCacheReadTokens,
+			"virtual_cache_read_cost":   input.VirtualCacheReadCost,
 		}).Error; err != nil {
 			return err
 		}
-		if usage.ActualCost > 0 {
+		if billedCost > 0 {
 			if err := tx.Model(&GatewayKey{}).Where("id = ?", input.GatewayKeyID).
-				UpdateColumn("quota_used", gorm.Expr("quota_used + ?", usage.ActualCost)).Error; err != nil {
+				UpdateColumn("quota_used", gorm.Expr("quota_used + ?", billedCost)).Error; err != nil {
 				return err
 			}
 		}
 		return tx.Model(&GatewayRequestFinalization{}).Where("request_id = ?", input.RequestID).
 			Updates(map[string]any{
-				"winner_usage_log_id": usage.ID,
-				"actual_cost":        usage.ActualCost,
+				"winner_usage_log_id":       usage.ID,
+				"actual_cost":               usage.ActualCost,
+				"billed_cost":               billedCost,
+				"virtual_cache_read_tokens": input.VirtualCacheReadTokens,
+				"virtual_cache_read_cost":   input.VirtualCacheReadCost,
 			}).Error
 	})
 	if err != nil {
 		return false, err
 	}
 	return inserted, nil
+}
+
+// gatewayUsageHasHedgeCompanion verifies that the request log contains the
+// other side of the concurrent race. AttemptKind=hedge is only written after
+// an auxiliary upstream has actually started, so this keeps the storage layer
+// from trusting a caller-provided HedgeTriggered flag on its own.
+func gatewayUsageHasHedgeCompanion(tx *gorm.DB, requestID string, gatewayKeyID uint, winner GatewayUsageLog) (bool, error) {
+	if tx == nil || strings.TrimSpace(requestID) == "" || gatewayKeyID == 0 {
+		return false, nil
+	}
+	query := tx.Model(&GatewayUsageLog{}).
+		Where("request_id = ? AND gateway_key_id = ? AND id <> ?", requestID, gatewayKeyID, winner.ID)
+	if winner.AttemptKind == GatewayAttemptKindPrimary {
+		// A hedge loser that is rejected by a pre-commit response rule is
+		// recorded as regex_reject for operator visibility, even though it was
+		// launched by the concurrent hedge scheduler. The runtime's
+		// HedgeTriggered flag still proves that this was a real concurrent run;
+		// keep both log shapes eligible here.
+		query = query.Where("attempt_kind IN ?", []string{GatewayAttemptKindHedge, GatewayAttemptKindRegexReject})
+	} else {
+		// The primary side can likewise be a regex_reject when it lost a
+		// concurrent race before the client prefix was committed.
+		query = query.Where("attempt_kind IN ?", []string{GatewayAttemptKindPrimary, GatewayAttemptKindRecovery, GatewayAttemptKindRegexReject})
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// gatewayUsageHasMediaOutput covers both the normal runtime billing fields and
+// endpoint/mode snapshots from older or provider-specific usage records where
+// image/video output tokens were not parsed.
+func gatewayUsageHasMediaOutput(usage GatewayUsageLog) bool {
+	if usage.ImageOutputTokens != 0 || usage.ImageOutputCost != 0 {
+		return true
+	}
+	mode := strings.ToLower(strings.TrimSpace(usage.BillingMode))
+	mode = strings.ReplaceAll(mode, "-", "_")
+	switch mode {
+	case "image", "video", "image_generation", "video_generation":
+		return true
+	}
+	for _, endpoint := range []string{usage.InboundEndpoint, usage.UpstreamEndpoint} {
+		path := strings.ToLower(strings.TrimSpace(endpoint))
+		for _, marker := range []string{
+			"/images/generations", "/images/edits", "/images/batches",
+			"/videos/generations", "/videos/edits", "/videos/extensions",
+		} {
+			if strings.Contains(path, marker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FinalizeFailedRequest 写入没有 winner 的终端失败标记。
@@ -1176,22 +1770,24 @@ type GatewayUsagePage struct {
 }
 
 type GatewayUsageStats struct {
-	TotalRequests            int64   `json:"total_requests"`
-	AttemptCount             int64   `json:"attempt_count"`
-	WinnerCount              int64   `json:"winner_count"`
-	SuccessCount             int64   `json:"success_count"`
-	ErrorCount               int64   `json:"error_count"`
-	TotalInputTokens         int64   `json:"total_input_tokens"`
-	TotalOutputTokens        int64   `json:"total_output_tokens"`
-	TotalCacheCreationTokens int64   `json:"total_cache_creation_tokens"`
-	TotalCacheReadTokens     int64   `json:"total_cache_read_tokens"`
-	TotalTokens              int64   `json:"total_tokens"`
-	TotalCost                float64 `json:"total_cost"`
-	TotalActualCost          float64 `json:"total_actual_cost"`
-	TotalUpstreamCost        float64 `json:"total_upstream_cost"`
-	WinnerCost               float64 `json:"winner_cost"`
-	ExtraAttemptCost         float64 `json:"extra_attempt_cost"`
-	AverageDurationMS        float64 `json:"average_duration_ms"`
+	TotalRequests            int64 `json:"total_requests"`
+	AttemptCount             int64 `json:"attempt_count"`
+	WinnerCount              int64 `json:"winner_count"`
+	SuccessCount             int64 `json:"success_count"`
+	ErrorCount               int64 `json:"error_count"`
+	TotalInputTokens         int64 `json:"total_input_tokens"`
+	TotalOutputTokens        int64 `json:"total_output_tokens"`
+	TotalCacheCreationTokens int64 `json:"total_cache_creation_tokens"`
+	// TotalCacheReadTokens includes actual upstream reads and winner virtual
+	// cache credits; total token count remains unchanged by the reclassification.
+	TotalCacheReadTokens int64   `json:"total_cache_read_tokens"`
+	TotalTokens          int64   `json:"total_tokens"`
+	TotalCost            float64 `json:"total_cost"`
+	TotalActualCost      float64 `json:"total_actual_cost"`
+	TotalUpstreamCost    float64 `json:"total_upstream_cost"`
+	WinnerCost           float64 `json:"winner_cost"`
+	ExtraAttemptCost     float64 `json:"extra_attempt_cost"`
+	AverageDurationMS    float64 `json:"average_duration_ms"`
 	// RPM/TPM：近 5 分钟均值（对齐 sub2api），与筛选时间范围无关；TPM 仅 input+output
 	RPM       int64                 `json:"rpm"`
 	TPM       int64                 `json:"tpm"`
@@ -1595,14 +2191,17 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 		COUNT(DISTINCT CASE WHEN winner THEN request_id END) as winner_count,
 		COUNT(DISTINCT CASE WHEN winner THEN request_id END) as success_count,
 		COUNT(DISTINCT request_id) - COUNT(DISTINCT CASE WHEN winner THEN request_id END) as error_count,
-		COALESCE(SUM(input_tokens),0) as total_input_tokens,
+		COALESCE(SUM(input_tokens - virtual_cache_read_tokens),0) as total_input_tokens,
 		COALESCE(SUM(output_tokens),0) as total_output_tokens,
 		COALESCE(SUM(cache_creation_tokens),0) as total_cache_creation_tokens,
-		COALESCE(SUM(cache_read_tokens),0) as total_cache_read_tokens,
+		COALESCE(SUM(cache_read_tokens + virtual_cache_read_tokens),0) as total_cache_read_tokens,
 		COALESCE(SUM(total_cost),0) as total_cost,
 		COALESCE(SUM(actual_cost),0) as total_actual_cost,
 		COALESCE(SUM(actual_cost),0) as total_upstream_cost,
-		COALESCE(SUM(CASE WHEN winner THEN actual_cost ELSE 0 END),0) as winner_cost,
+		COALESCE(SUM(CASE WHEN winner THEN
+			CASE WHEN billed_cost > 0 OR virtual_cache_read_tokens > 0 OR actual_cost = 0
+				THEN billed_cost ELSE actual_cost END
+			ELSE 0 END),0) as winner_cost,
 		COALESCE(SUM(estimated_extra_cost),0) as extra_attempt_cost,
 		COALESCE(AVG(duration_ms),0) as avg_duration_ms
 	`).Scan(&row).Error; err != nil {

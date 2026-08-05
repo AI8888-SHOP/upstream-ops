@@ -77,6 +77,9 @@ func TestRunHedgeDelayedFallbackWinsAndCancelsPrimary(t *testing.T) {
 	if result.Winner == nil || result.Winner.Info.Number != 2 || result.Value != 2 {
 		t.Fatalf("winner=%+v value=%d, want attempt 2", result.Winner, result.Value)
 	}
+	if len(result.Attempts) != 2 || !result.Attempts[1].Info.Concurrent {
+		t.Fatalf("attempts=%+v, want an overlapping auxiliary hedge", result.Attempts)
+	}
 	select {
 	case <-primaryCanceled:
 	case <-time.After(time.Second):
@@ -84,6 +87,28 @@ func TestRunHedgeDelayedFallbackWinsAndCancelsPrimary(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("calls=%d, want 2", calls.Load())
+	}
+}
+
+func TestRunHedgeDoesNotMarkFastSequentialFallbackAsConcurrent(t *testing.T) {
+	result, err := runHedge(
+		context.Background(),
+		true,
+		hedgePolicy{Enabled: true, Delay: time.Hour, MaxParallel: 2, MaxAttempts: 2},
+		func(context.Context, hedgeAttemptInfo) (int, error) {
+			return 0, errors.New("fast failure")
+		},
+		nil,
+		hedgeHooks[int]{},
+	)
+	if !errors.Is(err, errHedgeExhausted) {
+		t.Fatalf("err=%v, want exhausted", err)
+	}
+	if len(result.Attempts) != 2 {
+		t.Fatalf("attempts=%d, want 2", len(result.Attempts))
+	}
+	if result.Attempts[1].Info.Kind != attemptKindHedge || result.Attempts[1].Info.Concurrent {
+		t.Fatalf("fallback info=%+v, want hedge kind without overlap", result.Attempts[1].Info)
 	}
 }
 

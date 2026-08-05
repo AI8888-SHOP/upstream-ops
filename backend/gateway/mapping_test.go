@@ -1,6 +1,10 @@
 package gateway
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/bejix/upstream-ops/backend/gateway/protocol"
+)
 
 func TestRewriteModelInBody(t *testing.T) {
 	in := []byte(`{"model":"a","stream":true}`)
@@ -363,5 +367,17 @@ func TestParseAnthropicUsage(t *testing.T) {
 	u := ParseAnthropicUsage(body)
 	if u.InputTokens != 1 || u.OutputTokens != 2 || u.CacheReadTokens != 5 {
 		t.Fatalf("%+v", u)
+	}
+}
+
+func TestNormalizeUsageBucketsPreservesAnthropicFreshInput(t *testing.T) {
+	raw := UsageTokens{InputTokens: 100, CacheReadTokens: 40, CacheCreationTokens: 10}
+	anthropic := NormalizeUsageBuckets(raw, protocol.KindAnthropic)
+	if anthropic.InputTokens != 100 || anthropic.CacheReadTokens != 40 || anthropic.CacheCreationTokens != 10 {
+		t.Fatalf("anthropic buckets=%+v, want fresh input preserved", anthropic)
+	}
+	openAI := NormalizeUsageBuckets(raw, protocol.KindOpenAIChat)
+	if openAI.InputTokens != 50 || openAI.CacheReadTokens != 40 || openAI.CacheCreationTokens != 10 {
+		t.Fatalf("openai buckets=%+v, want cache fields subtracted", openAI)
 	}
 }

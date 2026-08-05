@@ -224,6 +224,10 @@ type hedgeAttemptInfo struct {
 	Number    int
 	Kind      string
 	StartedAt time.Time
+	// Concurrent is true only when this auxiliary attempt was launched while
+	// another attempt was still active. A sequential retry can still use the
+	// hedge scheduler's attempt kind, but it must not receive hedge-only credit.
+	Concurrent bool
 }
 
 type hedgeAttemptOutcome string
@@ -302,7 +306,10 @@ func runHedge[T any](ctx context.Context, eligible bool, policy hedgePolicy, run
 
 	launch := func() {
 		started++
-		info := hedgeAttemptInfo{Number: started, Kind: attemptKindHedge, StartedAt: time.Now()}
+		info := hedgeAttemptInfo{
+			Number: started, Kind: attemptKindHedge, StartedAt: time.Now(),
+			Concurrent: len(active) > 0,
+		}
 		if started == 1 {
 			info.Kind = attemptKindPrimary
 		}

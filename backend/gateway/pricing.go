@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/bejix/upstream-ops/backend/storage"
 )
 
@@ -385,6 +386,18 @@ func SplitOpenAIUsageBuckets(raw UsageTokens) UsageTokens {
 	}
 	out.InputTokens = actual
 	return out
+}
+
+// NormalizeUsageBuckets converts parser output into the mutually exclusive
+// accounting buckets used by pricing and storage. OpenAI-compatible usage
+// reports total input and therefore needs cache fields subtracted; Anthropic
+// reports input_tokens as fresh input already, so subtracting again would
+// undercount both billing and virtual hedge credits.
+func NormalizeUsageBuckets(raw UsageTokens, kind protocol.Kind) UsageTokens {
+	if protocol.NormalizeKind(kind) == protocol.KindAnthropic {
+		return raw
+	}
+	return SplitOpenAIUsageBuckets(raw)
 }
 
 // CostBreakdown 费用拆分。

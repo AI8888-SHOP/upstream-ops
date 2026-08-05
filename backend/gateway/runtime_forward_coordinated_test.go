@@ -16,6 +16,65 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestBuildVirtualCacheSettlementPreservesAnthropicFreshInput(t *testing.T) {
+	const model = "claude-3-7-sonnet-20250219"
+	rt := &Runtime{Service: &Service{Pricing: NewPricingCatalog(nil)}}
+	req := &coordinatedForwardRequest{
+		group:          &storage.GatewayGroup{HedgeVirtualCacheEnabled: true},
+		hedgeTriggered: true,
+		requestedModel: model,
+	}
+	winner := &coordinatedForwardAttempt{
+		UpstreamModel: model,
+		UsageMeta:     usageRecordMeta{UpstreamProtocol: string(protocol.KindAnthropic)},
+		Tokens:        UsageTokens{InputTokens: 100, CacheReadTokens: 40, OutputTokens: 1},
+		Plan: coordinatedRoutePlan{Candidate: ScoredRoute{
+			EffectiveRate: 1, BillingRate: 1,
+		}},
+	}
+	settlement := rt.buildVirtualCacheSettlement(req, winner)
+	if !settlement.VirtualCacheReadEnabled || settlement.VirtualCacheReadTokens != 100 {
+		t.Fatalf("settlement=%+v, want all 100 fresh Anthropic input tokens virtualized", settlement)
+	}
+	if settlement.BilledCost <= 0 || settlement.BilledCost >= 100*3e-6+40*3e-7+1*15e-6 {
+		t.Fatalf("billed_cost=%v, want discounted but positive", settlement.BilledCost)
+	}
+}
+
+func TestCoordinatedHedgeCreditRequiresActualUpstreamStart(t *testing.T) {
+	attempt := &coordinatedForwardAttempt{Info: hedgeAttemptInfo{
+		Number: 2, Kind: attemptKindHedge, Concurrent: true,
+	}}
+	result := hedgeRunResult[*coordinatedForwardAttempt]{Attempts: []hedgeAttemptResult[*coordinatedForwardAttempt]{
+		{Info: attempt.Info, Value: attempt},
+	}}
+	if coordinatedHedgeTriggered(result, nil) {
+		t.Fatal("scheduled hedge without an upstream request should not trigger virtual cache")
+	}
+	attempt.markUpstreamStarted()
+	if !coordinatedHedgeTriggered(result, nil) {
+		t.Fatal("hedge that reached upstream should trigger virtual cache")
+	}
+	var states sync.Map
+	states.Store(attempt.Info.Number, attempt)
+	synthetic := hedgeRunResult[*coordinatedForwardAttempt]{Attempts: []hedgeAttemptResult[*coordinatedForwardAttempt]{
+		{Info: attempt.Info, Outcome: hedgeOutcomeLost},
+	}}
+	if !coordinatedHedgeTriggered(synthetic, &states) {
+		t.Fatal("cleanup-timeout hedge state should trigger virtual cache")
+	}
+	if got := coordinatedAttemptKind(attempt, true, 2); got != storage.GatewayAttemptKindHedge {
+		t.Fatalf("attempt kind=%q, want hedge", got)
+	}
+	sequential := &coordinatedForwardAttempt{Info: hedgeAttemptInfo{
+		Number: 2, Kind: attemptKindHedge, Concurrent: false,
+	}}
+	sequential.markUpstreamStarted()
+	if got := coordinatedAttemptKind(sequential, true, 2); got == storage.GatewayAttemptKindHedge {
+		t.Fatalf("sequential fallback was classified as hedge: %q", got)
+	}
+}
+
 func TestCoordinatedResponsesRegexRejectSwitchesBeforeClientCommit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	failedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +123,7 @@ func TestCoordinatedResponsesRegexRejectSwitchesBeforeClientCommit(t *testing.T)
 			validator := mustResponseValidator(t, 64, time.Second, responseRuleSpec{
 				ID: 91, Name: "capacity", Enabled: true,
 				Pattern: `(?i)(Selected model is at capacity\.|Our servers are currently overloaded\.)`,
-				Target: "error_message",
+				Target:  "error_message",
 			})
 			request := &coordinatedForwardRequest{
 				c: context, kind: tc.clientKind, group: &storage.GatewayGroup{},
@@ -73,10 +132,10 @@ func TestCoordinatedResponsesRegexRejectSwitchesBeforeClientCommit(t *testing.T)
 			newAttempt := func(number int, baseURL string) *coordinatedForwardAttempt {
 				return &coordinatedForwardAttempt{
 					Info: hedgeAttemptInfo{Number: number}, StartedAt: time.Now(),
-					Target: &upstreamTarget{BaseURL: baseURL, APIKey: "k"},
+					Target:       &upstreamTarget{BaseURL: baseURL, APIKey: "k"},
 					UpstreamKind: protocol.KindOpenAIResponses, UpstreamModel: "m",
 					UpstreamPath: "/v1/responses", UpstreamURL: baseURL + "/v1/responses",
-					Converted: tc.clientKind != protocol.KindOpenAIResponses,
+					Converted:   tc.clientKind != protocol.KindOpenAIResponses,
 					ForwardBody: []byte(tc.body),
 				}
 			}
@@ -201,9 +260,9 @@ func TestWriteCoordinatedFailureDoesNotReplayPostCommitMatch(t *testing.T) {
 
 func TestBuildCoordinatedRoutePlanValidationSwitchesWithoutFailoverToggle(t *testing.T) {
 	group := &storage.GatewayGroup{
-		RetryEnabled:     false,
-		FailoverEnabled:  false,
-		FailoverMax:      0,
+		RetryEnabled:    false,
+		FailoverEnabled: false,
+		FailoverMax:     0,
 	}
 	candidates := []ScoredRoute{
 		{Route: storage.GatewayRoute{ID: 1}},

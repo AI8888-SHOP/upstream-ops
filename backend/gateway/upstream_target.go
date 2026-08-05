@@ -10,6 +10,10 @@ type upstreamTarget struct {
 	Provider *storage.GatewayProvider
 	// UserAgentOverride 非空时覆盖发往上游的 User-Agent（组+路由策略解析结果）。
 	UserAgentOverride string
+	// onUpstreamStart is used by coordinated hedge accounting. It runs only
+	// after concurrency admission and request construction, immediately before
+	// the HTTP client is invoked.
+	onUpstreamStart func()
 }
 
 func (t *upstreamTarget) upstreamConcurrency() (upstreamConcurrencyKey, int, bool) {

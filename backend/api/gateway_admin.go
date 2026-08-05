@@ -4,6 +4,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/bejix/upstream-ops/backend/gateway"
 	"github.com/bejix/upstream-ops/backend/storage"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // registerGatewayAdmin 在管理 API 下注册 /gateway/* 路由。
@@ -24,6 +27,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		// groups（reorder 须在 :id 之前注册，避免被当成 id）
 		gp.GET("/groups", func(c *gin.Context) { listGatewayGroups(c, d) })
 		gp.POST("/groups", func(c *gin.Context) { createGatewayGroup(c, d) })
+		gp.POST("/groups/:id/clone", func(c *gin.Context) { cloneGatewayGroup(c, d) })
 		gp.PUT("/groups/reorder", func(c *gin.Context) { reorderGatewayGroups(c, d) })
 		gp.GET("/groups/:id", func(c *gin.Context) { getGatewayGroup(c, d) })
 		gp.PUT("/groups/:id", func(c *gin.Context) { updateGatewayGroup(c, d) })
@@ -46,6 +50,8 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		// response validation rules
 		gp.GET("/groups/:id/response-rules", func(c *gin.Context) { listGatewayGroupResponseRules(c, d) })
 		gp.POST("/groups/:id/response-rules", func(c *gin.Context) { createGatewayGroupResponseRule(c, d) })
+		gp.GET("/groups/:id/response-rules/export", func(c *gin.Context) { exportGatewayGroupResponseRules(c, d) })
+		gp.POST("/groups/:id/response-rules/import", func(c *gin.Context) { importGatewayGroupResponseRules(c, d) })
 		gp.GET("/response-rules/:id", func(c *gin.Context) { getGatewayResponseRule(c, d) })
 		gp.PUT("/response-rules/:id", func(c *gin.Context) { updateGatewayResponseRule(c, d) })
 		gp.DELETE("/response-rules/:id", func(c *gin.Context) { deleteGatewayResponseRule(c, d) })
@@ -103,6 +109,16 @@ type gatewayResponseRuleUpdateInput struct {
 	ProtocolsJSON *string `json:"protocols_json"`
 	Models        *[]string `json:"models"`
 	Protocols     *[]string `json:"protocols"`
+}
+
+type gatewayResponseRuleImportInput struct {
+	Kind              string                                  `json:"kind"`
+	Version           int                                     `json:"version"`
+	ExportedAt        time.Time                               `json:"exported_at"`
+	Rules             []storage.GatewayResponseRuleBundleRule `json:"rules"`
+	Strategy          string                                  `json:"strategy"`
+	DuplicateStrategy string                                  `json:"duplicate_strategy"`
+	Bundle            *storage.GatewayResponseRuleBundle      `json:"bundle"`
 }
 
 type gatewayResponseRuleView struct {
@@ -168,6 +184,92 @@ func listGatewayGroupResponseRules(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": responseRuleViews(items)})
+}
+
+func exportGatewayGroupResponseRules(c *gin.Context, d *Deps) {
+	groupID, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group id"})
+		return
+	}
+	if _, err := d.Gateway.GetGroup(groupID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "gateway group not found"})
+		return
+	}
+	repo := gatewayResponseRuleRepo(d)
+	if repo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "response rule repository unavailable"})
+		return
+	}
+	bundle, err := repo.Export(groupID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Keep the response usable both as a browser download and as an apiFetch
+	// JSON response. The filename contains only the numeric group ID.
+	c.Header("Content-Disposition", "attachment; filename=\"upstream-ops-response-rules-"+strconv.FormatUint(uint64(groupID), 10)+".json\"")
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, bundle)
+}
+
+func importGatewayGroupResponseRules(c *gin.Context, d *Deps) {
+	groupID, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group id"})
+		return
+	}
+	if _, err := d.Gateway.GetGroup(groupID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "gateway group not found"})
+		return
+	}
+	repo := gatewayResponseRuleRepo(d)
+	if repo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "response rule repository unavailable"})
+		return
+	}
+	// A rule pattern is capped at 16 KiB and each bundle at 512 rules. Keep a
+	// request-level cap as an additional guard against oversized JSON uploads.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<20)
+	var in gatewayResponseRuleImportInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	bundle := storage.GatewayResponseRuleBundle{
+		Kind: in.Kind, Version: in.Version, ExportedAt: in.ExportedAt, Rules: in.Rules,
+	}
+	if in.Bundle != nil {
+		// A wrapper payload ({"bundle": {...}, "strategy": "replace"}) is
+		// accepted in addition to posting the exported bundle directly.
+		bundle = *in.Bundle
+	}
+	strategy := strings.TrimSpace(in.Strategy)
+	if strategy == "" {
+		strategy = strings.TrimSpace(in.DuplicateStrategy)
+	}
+	if strategy == "" {
+		strategy = strings.TrimSpace(c.Query("strategy"))
+	}
+	if strategy == "" {
+		strategy = string(storage.GatewayResponseRuleImportSkip)
+	}
+	result, err := repo.Import(groupID, bundle, storage.GatewayResponseRuleImportStrategy(strategy))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if result.Created > 0 || result.Replaced > 0 {
+		d.Gateway.InvalidateResponseValidator(groupID)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"strategy": result.Strategy,
+		"created":  result.Created,
+		"replaced": result.Replaced,
+		"renamed":  result.Renamed,
+		"skipped":  result.Skipped,
+		"items":    responseRuleViews(result.Items),
+	})
 }
 
 func createGatewayGroupResponseRule(c *gin.Context, d *Deps) {
@@ -493,6 +595,29 @@ func createGatewayGroup(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusCreated, item)
+}
+
+func cloneGatewayGroup(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group id"})
+		return
+	}
+	var in gateway.CloneGroupInput
+	if err := c.ShouldBindJSON(&in); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	result, err := d.Gateway.CloneGroup(id, in)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "gateway group not found"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, result)
 }
 
 func getGatewayGroup(c *gin.Context, d *Deps) {

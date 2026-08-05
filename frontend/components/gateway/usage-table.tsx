@@ -1143,34 +1143,44 @@ function ErrorDetailPanel({ u }: { u: GatewayUsageLog }) {
 }
 
 function totalTokens(u: GatewayUsageLog) {
+  const virtualCacheRead = u.virtual_cache_read_tokens ?? 0
+  const inputTokens = Math.max(0, (u.input_tokens || 0) - virtualCacheRead)
   return (
-    (u.input_tokens || 0) +
+    inputTokens +
     (u.output_tokens || 0) +
     (u.cache_creation_tokens || 0) +
-    (u.cache_read_tokens || 0)
+    (u.cache_read_tokens || 0) +
+    virtualCacheRead
   )
 }
 
 function TokenCell({ u }: { u: GatewayUsageLog }) {
   const reasoning = u.reasoning_tokens ?? 0
+  const virtualCacheRead = u.virtual_cache_read_tokens ?? 0
+  const inputTokens = Math.max(0, (u.input_tokens || 0) - virtualCacheRead)
   return (
     <div className="flex items-start gap-1.5">
       <div className="space-y-1 text-sm">
         <div className="flex items-center gap-2">
           <div className="inline-flex items-center gap-1" title="输入（不含缓存）">
             <ArrowDown className="size-3.5 text-emerald-500" />
-            <span className="font-medium tabular-nums">{formatTokens(u.input_tokens)}</span>
+            <span className="font-medium tabular-nums">{formatTokens(inputTokens)}</span>
           </div>
           <div className="inline-flex items-center gap-1" title="输出">
             <ArrowUp className="size-3.5 text-violet-500" />
             <span className="font-medium tabular-nums">{formatTokens(u.output_tokens)}</span>
           </div>
         </div>
-        {(u.cache_read_tokens > 0 || u.cache_creation_tokens > 0) && (
+        {(u.cache_read_tokens > 0 || u.cache_creation_tokens > 0 || virtualCacheRead > 0) && (
           <div className="flex flex-wrap items-center gap-2 text-xs">
             {u.cache_read_tokens > 0 && (
               <span className="font-medium text-sky-600 dark:text-sky-400 tabular-nums">
                 读 {formatTokens(u.cache_read_tokens)}
+              </span>
+            )}
+            {virtualCacheRead > 0 && (
+              <span className="font-medium text-cyan-600 dark:text-cyan-400 tabular-nums" title="Gateway virtual cache credit">
+                virtual read {formatTokens(virtualCacheRead)}
               </span>
             )}
             {u.cache_creation_tokens > 0 && (
@@ -1204,12 +1214,18 @@ function TokenCell({ u }: { u: GatewayUsageLog }) {
           <div className="mb-1 font-semibold">Token 明细</div>
           <div className="flex justify-between gap-6">
             <span className="text-muted-foreground">输入（不含缓存）</span>
-            <span>{formatTokens(u.input_tokens)}</span>
+            <span>{formatTokens(inputTokens)}</span>
           </div>
           {u.cache_read_tokens > 0 && (
             <div className="flex justify-between gap-6">
               <span className="text-muted-foreground">缓存读取</span>
               <span>{formatTokens(u.cache_read_tokens)}</span>
+            </div>
+          )}
+          {virtualCacheRead > 0 && (
+            <div className="flex justify-between gap-6">
+              <span className="text-muted-foreground">virtual cache read</span>
+              <span>{formatTokens(virtualCacheRead)}</span>
             </div>
           )}
           {u.cache_creation_tokens > 0 && (
@@ -1241,15 +1257,18 @@ function TokenCell({ u }: { u: GatewayUsageLog }) {
 function CostCell({ u }: { u: GatewayUsageLog }) {
   const standard = u.total_cost || 0
   const actual = u.actual_cost || 0
+  const virtualCacheRead = u.virtual_cache_read_tokens ?? 0
+  const billed = u.billed_cost ?? 0
+  const displayed = u.winner && (billed > 0 || virtualCacheRead > 0) ? billed : actual
   const extra = u.estimated_extra_cost || 0
   return (
     <div className="text-sm">
       <div className="flex items-center gap-1.5">
         <span
           className="font-medium tabular-nums text-green-600 dark:text-green-400"
-          title="实收 = 标准费用 × 账号计费倍率"
+          title={virtualCacheRead > 0 ? "User billed cost after virtual cache credit" : "实收 = 标准费用 × 账号计费倍率"}
         >
-          {money6(actual)}
+          {money6(displayed)}
         </span>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -1286,6 +1305,12 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
                 <span>{money6(u.cache_read_cost)}</span>
               </div>
             )}
+            {virtualCacheRead > 0 && (
+              <div className="flex justify-between gap-6">
+                <span className="text-muted-foreground">virtual cache read</span>
+                <span>{money6(u.virtual_cache_read_cost ?? 0)}</span>
+              </div>
+            )}
             <div className="flex justify-between gap-6">
               <span className="text-muted-foreground">倍率</span>
               <span className="text-blue-400">{(u.rate_multiplier || 1).toFixed(4)}x</span>
@@ -1302,8 +1327,14 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
             </div>
             <div className="flex justify-between gap-6 font-semibold">
               <span className="text-muted-foreground">实收</span>
-              <span className="text-green-400">{money6(actual)}</span>
+              <span className="text-green-400">{money6(displayed)}</span>
             </div>
+            {virtualCacheRead > 0 && (
+              <div className="flex justify-between gap-6">
+                <span className="text-muted-foreground">upstream actual</span>
+                <span>{money6(actual)}</span>
+              </div>
+            )}
             {extra > 0 ? (
               <div className="flex justify-between gap-6 text-amber-700 dark:text-amber-300">
                 <span>额外上游成本</span>

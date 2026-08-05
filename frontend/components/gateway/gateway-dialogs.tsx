@@ -985,6 +985,22 @@ export function GroupFormDialog({
                   />
                 </div>
               </div>
+              <div className="flex items-center justify-between gap-2 border-t border-border/60 pt-3">
+                <div className="min-w-0 flex-1">
+                  <Label>并发兜底虚拟缓存</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    并发兜底获胜时，将用户侧输入按缓存读取计费；所有上游 attempt 与真实成本仍保留。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  disabled={!groupForm.hedge_enabled}
+                  checked={groupForm.hedge_virtual_cache_enabled}
+                  onCheckedChange={(v) =>
+                    setGroupForm({ ...groupForm, hedge_virtual_cache_enabled: v })
+                  }
+                />
+              </div>
               <p className="rounded-md border border-amber-200/80 bg-amber-50/80 px-2 py-1.5 text-[11px] leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
                 网关配额仅结算获胜请求，但所有 attempt 及可能产生的额外上游成本都会保留在使用记录中。
               </p>

@@ -170,6 +170,9 @@ func (rt *Runtime) forwardStream(
 		return streamAttemptResult{Err: err}
 	}
 
+	if target.onUpstreamStart != nil {
+		target.onUpstreamStart()
+	}
 	client := rt.httpClientForTarget(target.Channel, target.Provider)
 	start := time.Now()
 	resp, err := rt.doHTTPWithFirstTokenDeadline(reqCtx, abortReq, client, req, start, firstTokenTimeout)

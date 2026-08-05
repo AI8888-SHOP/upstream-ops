@@ -13,6 +13,13 @@ func (s *Service) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, error
 }
 
 // UpdateGroup 更新网关分组。
+// CloneGroup creates a complete independent gateway group and returns newly
+// generated client secrets once for the management response.
+func (s *Service) CloneGroup(id uint, in CloneGroupInput) (*CloneGroupResult, error) {
+	return s.admin().CloneGroup(id, in)
+}
+
+// UpdateGroup updates a gateway group.
 func (s *Service) UpdateGroup(id uint, in UpdateGroupInput) (*storage.GatewayGroup, error) {
 	return s.admin().UpdateGroup(id, in)
 }
