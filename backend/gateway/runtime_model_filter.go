@@ -63,3 +63,32 @@ func (rt *Runtime) filterRoutesForRequestedModel(
 	return filtered, nil
 }
 
+// bindModelCooldownAliases exposes a route's resolved upstream-model cooldown
+// under the requested model as well. Cooldown records use the final upstream
+// model so aliases that map to the same upstream model share one failure state;
+// the alias map is request-local and is never persisted.
+func bindModelCooldownAliases(routes []storage.GatewayRoute, requestedModel string, groupMapping map[string]string) []storage.GatewayRoute {
+	requestedKey := storage.NormalizeGatewayModel(requestedModel)
+	if requestedKey == "" || len(routes) == 0 {
+		return routes
+	}
+	for i := range routes {
+		routeMapping := ParseModelMapping(routes[i].ModelMappingJSON)
+		upstreamModel, _ := ResolveModel(requestedModel, routeMapping, groupMapping)
+		upstreamKey := storage.NormalizeGatewayModel(upstreamModel)
+		if upstreamKey == "" || upstreamKey == requestedKey || len(routes[i].ModelCooldowns) == 0 {
+			continue
+		}
+		cooldown, ok := routes[i].ModelCooldowns[upstreamKey]
+		if !ok {
+			continue
+		}
+		aliases := make(map[string]storage.GatewayRouteModelCooldown, len(routes[i].ModelCooldowns)+1)
+		for key, value := range routes[i].ModelCooldowns {
+			aliases[key] = value
+		}
+		aliases[requestedKey] = cooldown
+		routes[i].ModelCooldowns = aliases
+	}
+	return routes
+}

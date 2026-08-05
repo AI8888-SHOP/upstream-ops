@@ -79,6 +79,49 @@ func TestRateForRoute_GroupRatio(t *testing.T) {
 	}
 }
 
+func TestSortRoutesForModel_CooldownIsolated(t *testing.T) {
+	now := time.Now()
+	until := now.Add(time.Minute)
+	routes := []storage.GatewayRoute{
+		{
+			ID: 1, SourceChannelID: 1, Position: 0, Weight: 1, Enabled: true,
+			RateConvertMode: "custom", RateConvertValue: 0.1, SourceAPIKeyCipher: "x",
+			ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+				"model-a": {RouteID: 1, Model: "model-a", TempUnschedulableUntil: &until},
+			},
+		},
+		{ID: 2, SourceChannelID: 2, Position: 1, Weight: 1, Enabled: true, RateConvertMode: "custom", RateConvertValue: 0.2, SourceAPIKeyCipher: "x"},
+	}
+
+	got := SortRoutesForModel(routes, nil, "asc", now, nil, "model-a")
+	if len(got) != 1 || got[0].Route.ID != 2 {
+		t.Fatalf("model-a should skip only cooled route, got=%+v", got)
+	}
+	got = SortRoutesForModel(routes, nil, "asc", now, nil, "model-b")
+	if len(got) != 2 || got[0].Route.ID != 1 {
+		t.Fatalf("model-b should keep route 1 schedulable, got=%+v", got)
+	}
+}
+
+func TestBindModelCooldownAliases(t *testing.T) {
+	now := time.Now()
+	until := now.Add(time.Minute)
+	routes := []storage.GatewayRoute{{
+		ID: 1, Enabled: true, SourceAPIKeyCipher: "x",
+		ModelMappingJSON: `{"alias":"upstream-model"}`,
+		ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"upstream-model": {RouteID: 1, Model: "upstream-model", TempUnschedulableUntil: &until},
+		},
+	}}
+	routes = bindModelCooldownAliases(routes, "alias", nil)
+	if _, ok := routes[0].ModelCooldowns["alias"]; !ok {
+		t.Fatal("resolved upstream cooldown was not aliased to requested model")
+	}
+	if got := SortRoutesForModel(routes, nil, "asc", now, nil, "alias"); len(got) != 0 {
+		t.Fatalf("aliased cooldown should filter route, got=%+v", got)
+	}
+}
+
 func TestRateForRoute_GroupNameFallbackTrimsWhitespace(t *testing.T) {
 	route := &storage.GatewayRoute{
 		SourceGroupName:  "Team/plus典韦 🪓",

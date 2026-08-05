@@ -89,11 +89,27 @@ func RateForRoute(route *storage.GatewayRoute, groups []connector.APIKeyGroup) f
 // IsRouteSchedulable 是否可参与调度。
 // 直连 provider 密钥在 GatewayProvider 上，路由本身可不存 SourceAPIKeyCipher。
 func IsRouteSchedulable(route *storage.GatewayRoute, now time.Time) bool {
+	return IsRouteSchedulableForModel(route, "", now)
+}
+
+// IsRouteSchedulableForModel applies both the legacy route-wide pause and the
+// automatic cooldown for the requested model. An empty model intentionally
+// ignores model-specific cooldowns (for example, while listing /v1/models).
+func IsRouteSchedulableForModel(route *storage.GatewayRoute, model string, now time.Time) bool {
 	if route == nil || !route.Enabled {
 		return false
 	}
-	if route.TempUnschedulableUntil != nil && route.TempUnschedulableUntil.After(now) {
+	key := storage.NormalizeGatewayModel(model)
+	// Legacy route-wide cooldowns have no model identity. Keep them for
+	// model-less management/list requests, but never let them block a
+	// model-specific request after the per-model table is available.
+	if key == "" && route.TempUnschedulableUntil != nil && route.TempUnschedulableUntil.After(now) {
 		return false
+	}
+	if key != "" {
+		if cooldown, ok := route.ModelCooldowns[key]; ok && cooldown.TempUnschedulableUntil != nil && cooldown.TempUnschedulableUntil.After(now) {
+			return false
+		}
 	}
 	if route.NormalizeSourceKind() == storage.GatewayRouteSourceProvider {
 		return route.GatewayProviderID > 0
@@ -178,6 +194,16 @@ func OrderRoutesByRate(routes []storage.GatewayRoute, groupsByChannel map[uint][
 // BillingRate 与上游同步「账号计费倍率」一致：即 RateForRoute 换算结果
 // （原值 / ×100 / ÷100 / 自定义），不再使用独立字段默认 1，避免计费失真。
 func SortRoutes(routes []storage.GatewayRoute, groupsByChannel map[uint][]connector.APIKeyGroup, direction string, now time.Time, exclude map[uint]struct{}) []ScoredRoute {
+	return sortRoutesForModel(routes, groupsByChannel, direction, now, exclude, "")
+}
+
+// SortRoutesForModel sorts routes while filtering only the requested model's
+// cooldown. This keeps other models on the same channel schedulable.
+func SortRoutesForModel(routes []storage.GatewayRoute, groupsByChannel map[uint][]connector.APIKeyGroup, direction string, now time.Time, exclude map[uint]struct{}, model string) []ScoredRoute {
+	return sortRoutesForModel(routes, groupsByChannel, direction, now, exclude, model)
+}
+
+func sortRoutesForModel(routes []storage.GatewayRoute, groupsByChannel map[uint][]connector.APIKeyGroup, direction string, now time.Time, exclude map[uint]struct{}, model string) []ScoredRoute {
 	out := make([]ScoredRoute, 0, len(routes))
 	for _, r := range routes {
 		if exclude != nil {
@@ -186,7 +212,7 @@ func SortRoutes(routes []storage.GatewayRoute, groupsByChannel map[uint][]connec
 			}
 		}
 		cp := r
-		if !IsRouteSchedulable(&cp, now) {
+		if !IsRouteSchedulableForModel(&cp, model, now) {
 			continue
 		}
 		groups := groupsByChannel[r.SourceChannelID]
@@ -211,8 +237,13 @@ func (rt *Runtime) sortRoutesWithAffinity(
 	now time.Time,
 	exclude map[uint]struct{},
 	affinity *routeAffinityContext,
+	models ...string,
 ) []ScoredRoute {
-	normal := SortRoutes(routes, groupsByChannel, direction, now, exclude)
+	model := ""
+	if len(models) > 0 {
+		model = models[0]
+	}
+	normal := SortRoutesForModel(routes, groupsByChannel, direction, now, exclude, model)
 	if rt == nil || affinity == nil || affinity.PreferredRouteID == 0 || affinity.LookupKey.Fingerprint == "" {
 		return normal
 	}
@@ -225,19 +256,23 @@ func (rt *Runtime) sortRoutesWithAffinity(
 		if route.ID != affinity.PreferredRouteID {
 			continue
 		}
-		if route.TempUnschedulableUntil == nil || !route.TempUnschedulableUntil.After(now) {
+		cooldownUntil := routeModelCooldownUntil(&route, model, now)
+		if cooldownUntil == nil {
 			return normal
 		}
 		candidate := route
 		candidate.TempUnschedulableUntil = nil
-		if !IsRouteSchedulable(&candidate, now) {
+		if key := storage.NormalizeGatewayModel(model); key != "" && len(candidate.ModelCooldowns) > 0 {
+			candidate.ModelCooldowns = cloneModelCooldownsWithout(candidate.ModelCooldowns, key)
+		}
+		if !IsRouteSchedulableForModel(&candidate, model, now) {
 			return normal
 		}
 		affinity.PreservePreferred = true
 		if !rt.claimRouteAffinityProbe(affinity.LookupKey, route.ID, now) {
 			return normal
 		}
-		affinity.RecoveryCooldownUntil = *route.TempUnschedulableUntil
+		affinity.RecoveryCooldownUntil = *cooldownUntil
 		affinity.RecoveryRouteID = route.ID
 		affinity.Recovery = true
 		groups := groupsByChannel[route.SourceChannelID]
@@ -245,4 +280,36 @@ func (rt *Runtime) sortRoutesWithAffinity(
 		return append([]ScoredRoute{{Route: candidate, EffectiveRate: rate, BillingRate: rate}}, normal...)
 	}
 	return normal
+}
+
+func routeModelCooldownUntil(route *storage.GatewayRoute, model string, now time.Time) *time.Time {
+	if route == nil {
+		return nil
+	}
+	key := storage.NormalizeGatewayModel(model)
+	if key == "" {
+		if route.TempUnschedulableUntil != nil && route.TempUnschedulableUntil.After(now) {
+			until := *route.TempUnschedulableUntil
+			return &until
+		}
+		return nil
+	}
+	if cooldown, ok := route.ModelCooldowns[key]; ok && cooldown.TempUnschedulableUntil != nil && cooldown.TempUnschedulableUntil.After(now) {
+		until := *cooldown.TempUnschedulableUntil
+		return &until
+	}
+	return nil
+}
+
+func cloneModelCooldownsWithout(source map[string]storage.GatewayRouteModelCooldown, excluded string) map[string]storage.GatewayRouteModelCooldown {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]storage.GatewayRouteModelCooldown, len(source))
+	for key, value := range source {
+		if key != excluded {
+			out[key] = value
+		}
+	}
+	return out
 }

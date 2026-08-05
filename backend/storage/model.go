@@ -622,6 +622,9 @@ type GatewayRoute struct {
 	TempUnschedulableRequestID string     `gorm:"size:64;not null;default:''" json:"temp_unschedulable_request_id,omitempty"`
 	// RecoverSuccessStreak：失败残留信息存在期间的连续成功次数；达到阈值后自动清空错误展示
 	RecoverSuccessStreak int `gorm:"not null;default:0" json:"recover_success_streak,omitempty"`
+	// ModelCooldowns contains automatic cooldowns keyed by normalized model.
+	// It is loaded with routes and is not persisted as part of gateway_routes.
+	ModelCooldowns map[string]GatewayRouteModelCooldown `gorm:"-" json:"model_cooldowns,omitempty"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
 }
@@ -646,6 +649,30 @@ func (r *GatewayRoute) NormalizeSourceKind() string {
 }
 
 func (GatewayRoute) TableName() string { return "gateway_routes" }
+
+// GatewayRouteModelCooldown pauses one model on one route while allowing the
+// same route to continue serving other models.
+type GatewayRouteModelCooldown struct {
+	ID                         uint       `gorm:"primaryKey" json:"id"`
+	RouteID                    uint       `gorm:"not null;index;uniqueIndex:idx_gateway_route_model_cooldown" json:"route_id"`
+	Model                      string     `gorm:"size:256;not null;uniqueIndex:idx_gateway_route_model_cooldown" json:"model"`
+	TempUnschedulableUntil     *time.Time `json:"temp_unschedulable_until,omitempty"`
+	TempUnschedulableReason    string     `gorm:"type:text" json:"temp_unschedulable_reason,omitempty"`
+	TempUnschedulableAt        *time.Time `json:"temp_unschedulable_at,omitempty"`
+	TempUnschedulableRequestID string     `gorm:"size:64;not null;default:''" json:"temp_unschedulable_request_id,omitempty"`
+	RecoverSuccessStreak       int        `gorm:"not null;default:0" json:"recover_success_streak,omitempty"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
+}
+
+func (GatewayRouteModelCooldown) TableName() string { return "gateway_route_model_cooldowns" }
+
+// NormalizeGatewayModel returns the canonical scheduler key for a model. Model
+// identifiers are trimmed but remain case-sensitive, matching model mapping
+// and provider allowlist semantics.
+func NormalizeGatewayModel(model string) string {
+	return strings.TrimSpace(model)
+}
 
 // GatewayResponseRule 是组级响应内容拒绝规则。ModelsJSON / ProtocolsJSON
 // 保存 JSON 字符串数组；空数组表示不限制。

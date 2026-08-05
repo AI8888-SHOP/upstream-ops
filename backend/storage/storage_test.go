@@ -1485,6 +1485,95 @@ func TestNoteSuccessForPauseErrorClearsAfterStreak(t *testing.T) {
 	}
 }
 
+func TestGatewayRouteModelCooldownIsolated(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	if err := routes.SaveForGroup(12, []GatewayRoute{{SourceChannelID: 21, Weight: 1, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(12)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	routeID := list[0].ID
+	until := time.Now().Add(5 * time.Minute)
+	if err := routes.SetModelTempUnschedulable(routeID, "model-a", until, "a failed", time.Now(), "req-a"); err != nil {
+		t.Fatalf("set model-a cooldown: %v", err)
+	}
+	if err := routes.SetModelTempUnschedulable(routeID, "model-b", until, "b failed", time.Now(), "req-b"); err != nil {
+		t.Fatalf("set model-b cooldown: %v", err)
+	}
+	if err := routes.SetModelTempUnschedulable(routeID, "model-a", until.Add(time.Minute), "a failed again", time.Now(), "req-a2"); err != nil {
+		t.Fatalf("upsert model-a cooldown: %v", err)
+	}
+
+	got, err := routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("find route: %v", err)
+	}
+	if len(got.ModelCooldowns) != 2 {
+		t.Fatalf("model cooldown count=%d, want 2: %+v", len(got.ModelCooldowns), got.ModelCooldowns)
+	}
+	if got.ModelCooldowns["model-a"].TempUnschedulableReason != "a failed again" {
+		t.Fatalf("model-a was not upserted: %+v", got.ModelCooldowns["model-a"])
+	}
+
+	if err := routes.NoteSuccessForModelPauseError(routeID, "model-a"); err != nil {
+		t.Fatalf("model-a success: %v", err)
+	}
+	got, err = routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("find after model-a success: %v", err)
+	}
+	if got.ModelCooldowns["model-a"].TempUnschedulableUntil != nil {
+		t.Fatal("model-a cooldown should clear immediately after success")
+	}
+	if got.ModelCooldowns["model-b"].TempUnschedulableUntil == nil {
+		t.Fatal("model-b cooldown must remain after model-a success")
+	}
+
+	if err := routes.ClearTempUnschedulable(routeID); err != nil {
+		t.Fatalf("clear route cooldowns: %v", err)
+	}
+	var count int64
+	if err := db.Model(&GatewayRouteModelCooldown{}).Where("route_id = ?", routeID).Count(&count).Error; err != nil {
+		t.Fatalf("count model cooldowns: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("route clear left %d model cooldown rows", count)
+	}
+}
+
+func TestGatewayGroupDeleteRemovesModelCooldowns(t *testing.T) {
+	db := openTestDB(t)
+	groups := NewGatewayGroups(db)
+	routes := NewGatewayRoutes(db)
+	group := &GatewayGroup{Name: "model-cooldown-delete"}
+	if err := groups.Create(group); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := routes.SaveForGroup(group.ID, []GatewayRoute{{SourceChannelID: 31, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(group.ID)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", time.Now().Add(time.Minute), "failed", time.Now(), "req"); err != nil {
+		t.Fatalf("set cooldown: %v", err)
+	}
+	if err := groups.Delete(group.ID); err != nil {
+		t.Fatalf("delete group: %v", err)
+	}
+	var count int64
+	if err := db.Model(&GatewayRouteModelCooldown{}).Where("route_id = ?", list[0].ID).Count(&count).Error; err != nil {
+		t.Fatalf("count orphan cooldowns: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("group delete left %d model cooldown rows", count)
+	}
+}
+
 
 func TestGatewayUsageListModels(t *testing.T) {
 	db := openTestDB(t)

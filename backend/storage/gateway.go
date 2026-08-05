@@ -205,6 +205,15 @@ func (r *GatewayGroups) Delete(id uint) error {
 		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayResponseRule{}).Error; err != nil {
 			return err
 		}
+		var routeIDs []uint
+		if err := tx.Model(&GatewayRoute{}).Where("gateway_group_id = ?", id).Pluck("id", &routeIDs).Error; err != nil {
+			return err
+		}
+		if len(routeIDs) > 0 {
+			if err := tx.Where("route_id IN ?", routeIDs).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
+				return err
+			}
+		}
 		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayRoute{}).Error; err != nil {
 			return err
 		}
@@ -499,6 +508,9 @@ func (r *GatewayRoutes) ListByGroupID(groupID uint) ([]GatewayRoute, error) {
 	if err := r.db.Where("gateway_group_id = ?", groupID).Order("position ASC, id ASC").Find(&list).Error; err != nil {
 		return nil, err
 	}
+	if err := r.loadModelCooldowns(list); err != nil {
+		return nil, err
+	}
 	// 不过期即清 reason：调度层用 until 判断是否仍暂停；reason 作为「上次错误」保留供管理端查看
 	return list, nil
 }
@@ -509,7 +521,49 @@ func (r *GatewayRoutes) FindByID(id uint) (*GatewayRoute, error) {
 	if err := r.db.First(&item, id).Error; err != nil {
 		return nil, err
 	}
+	list := []GatewayRoute{item}
+	if err := r.loadModelCooldowns(list); err != nil {
+		return nil, err
+	}
+	item = list[0]
 	return &item, nil
+}
+
+func (r *GatewayRoutes) loadModelCooldowns(routes []GatewayRoute) error {
+	if len(routes) == 0 {
+		return nil
+	}
+	ids := make([]uint, 0, len(routes))
+	for _, route := range routes {
+		if route.ID > 0 {
+			ids = append(ids, route.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var cooldowns []GatewayRouteModelCooldown
+	if err := r.db.Where("route_id IN ?", ids).Find(&cooldowns).Error; err != nil {
+		return err
+	}
+	byRoute := make(map[uint]map[string]GatewayRouteModelCooldown, len(ids))
+	for _, cooldown := range cooldowns {
+		key := NormalizeGatewayModel(cooldown.Model)
+		if key == "" {
+			continue
+		}
+		if byRoute[cooldown.RouteID] == nil {
+			byRoute[cooldown.RouteID] = make(map[string]GatewayRouteModelCooldown)
+		}
+		cooldown.Model = key
+		byRoute[cooldown.RouteID][key] = cooldown
+	}
+	for i := range routes {
+		if models := byRoute[routes[i].ID]; len(models) > 0 {
+			routes[i].ModelCooldowns = models
+		}
+	}
+	return nil
 }
 
 // SaveForGroup 全量保存某组下的路由列表。
@@ -578,6 +632,11 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 			}
 
 			if hasPrev {
+				if !sameSource {
+					if err := tx.Where("route_id = ?", list[i].ID).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
+						return err
+					}
+				}
 				if err := tx.Save(&list[i]).Error; err != nil {
 					return err
 				}
@@ -592,6 +651,9 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 		for id := range byID {
 			if _, ok := keep[id]; ok {
 				continue
+			}
+			if err := tx.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
+				return err
 			}
 			if err := tx.Delete(&GatewayRoute{}, id).Error; err != nil {
 				return err
@@ -697,19 +759,105 @@ func (r *GatewayRoutes) SetTempUnschedulable(id uint, until time.Time, reason st
 	}).Error
 }
 
+// SetModelTempUnschedulable writes automatic cooldown state for one model on a
+// route. The unique route/model key makes concurrent failures idempotent.
+func (r *GatewayRoutes) SetModelTempUnschedulable(id uint, model string, until time.Time, reason string, failedAt time.Time, requestID string) error {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" {
+		return nil
+	}
+	if failedAt.IsZero() {
+		failedAt = time.Now()
+	}
+	requestID = strings.TrimSpace(requestID)
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "route_id"}, {Name: "model"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"temp_unschedulable_until":      until,
+			"temp_unschedulable_reason":     reason,
+			"temp_unschedulable_at":         failedAt,
+			"temp_unschedulable_request_id": requestID,
+			"recover_success_streak":        0,
+			"updated_at":                    time.Now(),
+		}),
+	}).Create(&GatewayRouteModelCooldown{
+		RouteID: id, Model: model, TempUnschedulableUntil: &until,
+		TempUnschedulableReason: reason, TempUnschedulableAt: &failedAt,
+		TempUnschedulableRequestID: requestID,
+	}).Error
+}
+
+// ClearModelTempUnschedulable clears one model's automatic cooldown state.
+func (r *GatewayRoutes) ClearModelTempUnschedulable(id uint, model string) error {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" {
+		return nil
+	}
+	return r.db.Exec(
+		`UPDATE gateway_route_model_cooldowns
+		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
+		     temp_unschedulable_at = NULL, temp_unschedulable_request_id = '',
+		     recover_success_streak = 0, updated_at = ?
+		 WHERE route_id = ? AND model = ?`,
+		time.Now(), id, model,
+	).Error
+}
+
+// NoteSuccessForModelPauseError mirrors route-level recovery bookkeeping for
+// one model and leaves every other model cooldown untouched.
+func (r *GatewayRoutes) NoteSuccessForModelPauseError(id uint, model string) error {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" {
+		return nil
+	}
+	now := time.Now()
+	if err := r.db.Exec(
+		`UPDATE gateway_route_model_cooldowns
+		 SET recover_success_streak = recover_success_streak + 1,
+		     temp_unschedulable_until = NULL, updated_at = ?
+		 WHERE route_id = ? AND model = ?
+		   AND (
+		     (temp_unschedulable_reason IS NOT NULL AND temp_unschedulable_reason != '')
+		     OR temp_unschedulable_until IS NOT NULL
+		     OR (temp_unschedulable_request_id IS NOT NULL AND temp_unschedulable_request_id != '')
+		     OR temp_unschedulable_at IS NOT NULL
+		   )`,
+		now, id, model,
+	).Error; err != nil {
+		return err
+	}
+	return r.db.Exec(
+		`UPDATE gateway_route_model_cooldowns
+		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
+		     temp_unschedulable_at = NULL, temp_unschedulable_request_id = '',
+		     recover_success_streak = 0, updated_at = ?
+		 WHERE route_id = ? AND model = ? AND recover_success_streak >= ?`,
+		now, id, model, RouteRecoverSuccessClearStreak,
+	).Error
+}
+
 // ClearTempUnschedulable 手动清除暂停时间与错误信息。
 func (r *GatewayRoutes) ClearTempUnschedulable(id uint) error {
 	// 用 Exec 强制写 NULL；GORM Updates(map) 对 nil 在部分版本会跳过
-	return r.db.Exec(
+	if err := r.db.Exec(
 		`UPDATE gateway_routes SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '', temp_unschedulable_at = NULL, temp_unschedulable_request_id = '', recover_success_streak = 0, updated_at = ? WHERE id = ?`,
 		time.Now(), id,
-	).Error
+	).Error; err != nil {
+		return err
+	}
+	return r.db.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{}).Error
 }
 
 // ClearTempUnschedulableUntil 仅结束临时暂停（恢复调度），保留 reason / request_id / at 供排查。
 func (r *GatewayRoutes) ClearTempUnschedulableUntil(id uint) error {
-	return r.db.Exec(
+	if err := r.db.Exec(
 		`UPDATE gateway_routes SET temp_unschedulable_until = NULL, updated_at = ? WHERE id = ?`,
+		time.Now(), id,
+	).Error; err != nil {
+		return err
+	}
+	return r.db.Exec(
+		`UPDATE gateway_route_model_cooldowns SET temp_unschedulable_until = NULL, updated_at = ? WHERE route_id = ?`,
 		time.Now(), id,
 	).Error
 }

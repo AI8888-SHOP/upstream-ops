@@ -142,6 +142,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&GatewayGroup{},
 		&GatewayKey{},
 		&GatewayRoute{},
+		&GatewayRouteModelCooldown{},
 		&GatewayProvider{},
 		&GatewayResponseRule{},
 		&GatewayUsageLog{},

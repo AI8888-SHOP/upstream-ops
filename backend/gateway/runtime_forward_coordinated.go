@@ -151,7 +151,7 @@ func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, vali
 
 func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	groupsByChannel := rt.loadGroupsByChannel(req.c.Request.Context(), req.routes)
-	candidates := rt.sortRoutesWithAffinity(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil, &req.affinity)
+	candidates := rt.sortRoutesWithAffinity(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil, &req.affinity, req.requestedModel)
 	if req.affinity.Recovery && req.hedgeActive {
 		// A cooled route must complete its single recovery probe before any
 		// concurrent hedge is launched; fallback resumes after that probe fails.
@@ -860,7 +860,7 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			if strings.TrimSpace(errInfo.Detail) != "" {
 				pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 			}
-			_ = rt.Routes.SetTempUnschedulable(attempt.Route.ID, until, pauseReason, time.Now(), req.requestID)
+			_ = rt.Routes.SetModelTempUnschedulable(attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID)
 			attempt.UsageMeta.CooldownUntil = &until
 		}
 		success := status >= 200 && status < 300 && attemptErr == nil &&
@@ -872,7 +872,7 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		if attempt.Recovery {
 			if success {
 				if !isWinner {
-					_ = rt.Routes.NoteSuccessForPauseError(attempt.Route.ID)
+					_ = rt.Routes.NoteSuccessForModelPauseError(attempt.Route.ID, attempt.UpstreamModel)
 				}
 				rt.finishRouteAffinityProbe(&req.affinity, attempt.Route.ID, true, nil, time.Now())
 				if req.affinity.shouldRememberRoute(attempt.Route.ID) {
@@ -975,7 +975,7 @@ func (rt *Runtime) finishCoordinatedNonStream(req *coordinatedForwardRequest, wi
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		return
 	}
-	_ = rt.Routes.NoteSuccessForPauseError(winner.Route.ID)
+	_ = rt.Routes.NoteSuccessForModelPauseError(winner.Route.ID, winner.UpstreamModel)
 	rt.finishRouteAffinityProbe(&req.affinity, winner.Route.ID, true, nil, time.Now())
 	if req.affinity.shouldRememberRoute(winner.Route.ID) {
 		rt.rememberRouteAffinity(req.affinity.Keys, winner.Route.ID, time.Now())
@@ -1004,7 +1004,7 @@ func (rt *Runtime) finishCoordinatedStream(req *coordinatedForwardRequest, winne
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		return
 	}
-	_ = rt.Routes.NoteSuccessForPauseError(winner.Route.ID)
+	_ = rt.Routes.NoteSuccessForModelPauseError(winner.Route.ID, winner.UpstreamModel)
 	rt.finishRouteAffinityProbe(&req.affinity, winner.Route.ID, true, nil, time.Now())
 	if req.affinity.shouldRememberRoute(winner.Route.ID) {
 		rt.rememberRouteAffinity(req.affinity.Keys, winner.Route.ID, time.Now())

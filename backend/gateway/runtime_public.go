@@ -230,8 +230,9 @@ func (rt *Runtime) HandleCountTokens(c *gin.Context) {
 		rt.writeGatewayError(c, protocolAnthropic, http.StatusInternalServerError, "api_error", filterErr.Error())
 		return
 	}
+	routes = bindModelCooldownAliases(routes, requestedModel, groupMapping)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
-	cands := SortRoutes(routes, groupsByChannel, auth.Group.RateSortDirection, time.Now(), nil)
+	cands := SortRoutesForModel(routes, groupsByChannel, auth.Group.RateSortDirection, time.Now(), nil, requestedModel)
 	for _, cand := range cands {
 		route := cand.Route
 		target, rerr := rt.resolveUpstreamTarget(&route)

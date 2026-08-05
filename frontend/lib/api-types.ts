@@ -755,6 +755,17 @@ export interface GatewayProviderModelsPreview {
   allowed_models: string[]
 }
 
+export interface GatewayRouteModelCooldown {
+  id: number
+  route_id: number
+  model: string
+  temp_unschedulable_until?: string | null
+  temp_unschedulable_reason?: string
+  temp_unschedulable_at?: string | null
+  temp_unschedulable_request_id?: string
+  recover_success_streak?: number
+}
+
 export interface GatewayRoute {
   id: number
   gateway_group_id: number
@@ -784,6 +795,7 @@ export interface GatewayRoute {
   temp_unschedulable_at?: string | null
   /** 最近一次触发暂停的网关 request_id（与使用记录关联） */
   temp_unschedulable_request_id?: string
+  model_cooldowns?: Record<string, GatewayRouteModelCooldown>
   created_at: string
   updated_at: string
 }

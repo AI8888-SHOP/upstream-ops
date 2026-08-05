@@ -807,6 +807,7 @@ Route field `upstream_protocol`:
 
 - Default failover: no response, 429, 5xx; with group “failover on 4xx”, all 4xx may failover too.
 - Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
+- Automatic cooldown is isolated by route and final upstream model, so a failure for one model does not pause the channel for other models. Model aliases that resolve to the same upstream model share the cooldown; the management "clear pause" action clears all model cooldowns for that route.
 - Group: `retry_count`, `failover_max`, `cooldown_seconds`.
 - **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
 - **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.

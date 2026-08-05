@@ -66,6 +66,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	routes = filteredRoutes
+	routes = bindModelCooldownAliases(routes, requestedModel, groupMapping)
 	affinity := rt.routeAffinityForRequest(c, key.ID, group.ID, string(kind), requestedModel, body)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	validator, validationErr := rt.responseValidatorForGroup(group)
@@ -141,7 +142,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	}
 
 	for {
-		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity)
+		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity, requestedModel)
 		if len(candidates) == 0 {
 			break
 		}
@@ -173,7 +174,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 		// 当前路由已进 exclude：失败后是否还有可顺延的其它路由。
 		// 没有下家时关闭首字超时，最后一枪老实等上游，而不是再掐 30s 直接 502。
-		remainingAfter := SortRoutes(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude)
+		remainingAfter := SortRoutesForModel(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, requestedModel)
 		attemptFTTimeout := rt.effectiveFirstTokenTimeout(
 			firstTokenTimeout,
 			retryEnabled, failoverEnabled,
@@ -375,14 +376,14 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					}
 				}
 				if success {
-					_ = rt.Routes.NoteSuccessForPauseError(route.ID)
+					_ = rt.Routes.NoteSuccessForModelPauseError(route.ID, upstreamModel)
 					rt.finishRouteAffinityProbe(&affinity, route.ID, true, nil, time.Now())
 					if affinity.shouldRememberRoute(route.ID) {
 						rt.rememberRouteAffinity(affinity.Keys, route.ID, time.Now())
 					}
 				} else {
 					if recoveryRoute {
-						blockUntil := affinity.recoveryBlockedUntil(route.TempUnschedulableUntil, time.Now())
+						blockUntil := affinity.recoveryBlockedUntil(nil, time.Now())
 						rt.finishRouteAffinityProbe(&affinity, route.ID, false, blockUntil, time.Now())
 					}
 					if rt.Log != nil {
@@ -454,7 +455,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					if strings.TrimSpace(errInfo.Detail) != "" {
 						pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 					}
-					_ = rt.Routes.SetTempUnschedulable(route.ID, until, pauseReason, time.Now(), reqID)
+					_ = rt.Routes.SetModelTempUnschedulable(route.ID, upstreamModel, until, pauseReason, time.Now(), reqID)
 				}
 				if recoveryRoute && lastTryOnRoute {
 					blockUntil := affinity.recoveryBlockedUntil(cooldownUntil, time.Now())
@@ -533,7 +534,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				return
 			}
 			// 成功：立刻恢复调度；连续成功达到阈值后自动清除错误残留展示
-			_ = rt.Routes.NoteSuccessForPauseError(route.ID)
+			_ = rt.Routes.NoteSuccessForModelPauseError(route.ID, upstreamModel)
 			rt.finishRouteAffinityProbe(&affinity, route.ID, true, nil, time.Now())
 			if affinity.shouldRememberRoute(route.ID) {
 				rt.rememberRouteAffinity(affinity.Keys, route.ID, time.Now())
