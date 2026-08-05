@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bejix/upstream-ops/backend/connector"
 	"github.com/bejix/upstream-ops/backend/storage"
@@ -274,5 +275,105 @@ func TestSaveRoutes_PersistsLiveGroupRateByID(t *testing.T) {
 			persisted[0].BillingRateMultiplier,
 			persisted[1].BillingRateMultiplier,
 			persisted[2].BillingRateMultiplier)
+	}
+}
+
+func TestRateLimitAutoDisablesOverLimitRoutesWithoutChangingManualState(t *testing.T) {
+	db := openGatewayTestDB(t)
+	groupsRepo := storage.NewGatewayGroups(db)
+	routesRepo := storage.NewGatewayRoutes(db)
+	group := &storage.GatewayGroup{
+		Name:                     "rate-limit",
+		Status:                   storage.GatewayGroupStatusActive,
+		RateSortDirection:        "asc",
+		MaxBillingRateMultiplier: 0.5,
+	}
+	if err := groupsRepo.Create(group); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	lowID, highID, manualID := int64(1), int64(2), int64(3)
+	if err := routesRepo.SaveForGroup(group.ID, []storage.GatewayRoute{
+		{SourceChannelID: 1, SourceGroupID: &lowID, SourceGroupName: "low", Position: 0, Enabled: true, RateConvertMode: "raw", SourceAPIKeyCipher: "low"},
+		{SourceChannelID: 1, SourceGroupID: &highID, SourceGroupName: "high", Position: 1, Enabled: true, RateConvertMode: "raw", SourceAPIKeyCipher: "high"},
+		{SourceChannelID: 1, SourceGroupID: &manualID, SourceGroupName: "manual", Position: 2, Enabled: false, RateConvertMode: "raw", SourceAPIKeyCipher: "manual"},
+	}); err != nil {
+		t.Fatalf("save routes: %v", err)
+	}
+	// GORM applies the model's default:true while inserting a zero bool; make
+	// the manual-disabled fixture explicit before the guard is evaluated.
+	seeded, err := routesRepo.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatalf("list seeded routes: %v", err)
+	}
+	for i := range seeded {
+		seeded[i].SourceAPIKeyCipher = "fixture-key"
+		if seeded[i].SourceGroupName == "manual" {
+			seeded[i].Enabled = false
+		}
+		if err := routesRepo.Update(&seeded[i]); err != nil {
+			t.Fatalf("prepare route fixture: %v", err)
+		}
+	}
+	fake := &fakeChannelAPIForResort{groups: map[uint][]connector.APIKeyGroup{
+		1: {
+			{ID: &lowID, Name: "low", Ratio: 0.2},
+			{ID: &highID, Name: "high", Ratio: 0.8},
+			{ID: &manualID, Name: "manual", Ratio: 0.9},
+		},
+	}}
+	svc := NewService(groupsRepo, storage.NewGatewayKeys(db), routesRepo, nil, nil, nil, fake, nil, nil)
+	svc.ResortRoutesOnRateScan(context.Background())
+
+	routes, err := routesRepo.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	byGroup := make(map[string]storage.GatewayRoute, len(routes))
+	for _, route := range routes {
+		byGroup[route.SourceGroupName] = route
+	}
+	if byGroup["high"].Enabled != true || !byGroup["high"].RateLimitAutoDisabled {
+		t.Fatalf("high route should be auto-disabled without changing Enabled: %+v", byGroup["high"])
+	}
+	if byGroup["low"].RateLimitAutoDisabled {
+		t.Fatalf("low route should remain schedulable: %+v", byGroup["low"])
+	}
+	if byGroup["manual"].Enabled || !byGroup["manual"].RateLimitAutoDisabled {
+		t.Fatalf("manual disabled route should preserve manual state and auto marker: %+v", byGroup["manual"])
+	}
+
+	groupsByChannel := map[uint][]connector.APIKeyGroup{1: fake.groups[1]}
+	candidates := SortRoutes(routes, groupsByChannel, "asc", time.Now(), nil)
+	if len(candidates) != 1 || candidates[0].Route.SourceGroupName != "low" {
+		t.Fatalf("only low route should be schedulable, got %+v", candidates)
+	}
+
+	cleared := 1.0
+	if _, err := svc.UpdateGroup(group.ID, UpdateGroupInput{MaxBillingRateMultiplier: &cleared}); err != nil {
+		t.Fatalf("clear rate limit: %v", err)
+	}
+	routes, err = routesRepo.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatalf("list routes after recovery: %v", err)
+	}
+	for _, route := range routes {
+		if route.SourceGroupName == "high" && route.RateLimitAutoDisabled {
+			t.Fatalf("high route should recover below new limit: %+v", route)
+		}
+		if route.SourceGroupName == "manual" && route.Enabled {
+			t.Fatalf("manual disabled route was unexpectedly re-enabled: %+v", route)
+		}
+	}
+}
+
+func TestRateLimitStateUsesStrictGreaterThanAndZeroDisables(t *testing.T) {
+	if disabled, reason := rateLimitState(0.5, 0.5); disabled || reason != "" {
+		t.Fatalf("limit equality should remain schedulable: disabled=%v reason=%q", disabled, reason)
+	}
+	if disabled, reason := rateLimitState(0.5001, 0.5); !disabled || reason == "" {
+		t.Fatalf("rate above limit should be disabled: disabled=%v reason=%q", disabled, reason)
+	}
+	if disabled, reason := rateLimitState(100, 0); disabled || reason != "" {
+		t.Fatalf("zero limit should disable the guard: disabled=%v reason=%q", disabled, reason)
 	}
 }

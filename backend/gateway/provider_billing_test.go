@@ -119,3 +119,59 @@ func TestSaveRoutes_ProviderRawBillingFromProviderDefault(t *testing.T) {
 		t.Fatalf("monitor billing=%v", saved[1].BillingRateMultiplier)
 	}
 }
+
+func TestProviderBillingLimitAutoDisablesAndRecoversRoute(t *testing.T) {
+	db := openGatewayTestDB(t)
+	groupsRepo := storage.NewGatewayGroups(db)
+	routesRepo := storage.NewGatewayRoutes(db)
+	providersRepo := storage.NewGatewayProviders(db)
+
+	group := &storage.GatewayGroup{
+		Name:                     "provider-rate-limit",
+		Status:                   storage.GatewayGroupStatusActive,
+		MaxBillingRateMultiplier: 0.5,
+	}
+	if err := groupsRepo.Create(group); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	provider := &storage.GatewayProvider{
+		Name:               "expensive-provider",
+		BaseURL:            "https://example.test",
+		APIKeyCipher:       "cipher",
+		DefaultBillingRate: 0.8,
+		Enabled:            true,
+	}
+	if err := providersRepo.Create(provider); err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+
+	svc := NewService(groupsRepo, storage.NewGatewayKeys(db), routesRepo, nil, nil, nil, &fakeChannelAPIForResort{}, nil, nil)
+	svc.SetProviders(providersRepo)
+	if _, err := svc.SaveRoutes(group.ID, []RouteInput{{
+		SourceKind:        storage.GatewayRouteSourceProvider,
+		GatewayProviderID: provider.ID,
+		RateConvertMode:   "raw",
+		Enabled:           true,
+	}}); err != nil {
+		t.Fatalf("save provider route: %v", err)
+	}
+	routes, err := routesRepo.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatalf("list provider route: %v", err)
+	}
+	if len(routes) != 1 || !routes[0].RateLimitAutoDisabled || !routes[0].Enabled {
+		t.Fatalf("provider route should be auto-disabled without changing manual state: %+v", routes)
+	}
+
+	recovered := 0.2
+	if _, err := svc.UpdateProvider(provider.ID, UpdateProviderInput{DefaultBillingRate: &recovered}); err != nil {
+		t.Fatalf("update provider rate: %v", err)
+	}
+	routes, err = routesRepo.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatalf("list recovered route: %v", err)
+	}
+	if len(routes) != 1 || routes[0].RateLimitAutoDisabled || routes[0].BillingRateMultiplier != recovered {
+		t.Fatalf("provider route should recover after rate update: %+v", routes)
+	}
+}

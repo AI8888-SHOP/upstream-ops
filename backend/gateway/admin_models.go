@@ -113,9 +113,13 @@ func (a *AdminService) pullRouteModels(ctx context.Context, group *storage.Gatew
 		ChannelID:  route.SourceChannelID,
 		ProviderID: route.GatewayProviderID,
 	}
-	if !route.Enabled {
+	if !route.Enabled || route.RateLimitAutoDisabled {
 		rr.Skipped = true
-		rr.SkipReason = "路由已禁用"
+		if route.RateLimitAutoDisabled {
+			rr.SkipReason = "route exceeds gateway group multiplier limit"
+		} else {
+			rr.SkipReason = "路由已禁用"
+		}
 		rr.Label = fmt.Sprintf("route#%d", route.ID)
 		return routeModelPull{rr: rr}
 	}
@@ -303,7 +307,7 @@ func (a *AdminService) TestGroupModel(ctx context.Context, groupID uint, in Test
 				continue
 			}
 			// 单测时允许已暂停路由，便于手动验证
-			if !r.Enabled {
+			if !r.Enabled || r.RateLimitAutoDisabled {
 				return nil, errors.New("route is disabled")
 			}
 			if r.NormalizeSourceKind() == storage.GatewayRouteSourceMonitor &&

@@ -96,11 +96,16 @@ func (a *AdminService) ResortRoutesOnRateScan(ctx context.Context) {
 		return
 	}
 	for _, g := range groups {
-		if !g.RateResortEnabled {
+		if !g.RateResortEnabled && normalizeMaxBillingRateMultiplier(g.MaxBillingRateMultiplier) <= 0 {
 			continue
 		}
-		if err := a.reorderRoutesPersisted(g.ID); err != nil && a.Log != nil {
-			a.Log.Warn("resort gateway routes after rate scan", "group_id", g.ID, "name", g.Name, "err", err)
+		if g.RateResortEnabled {
+			if err := a.reorderRoutesPersisted(g.ID); err != nil && a.Log != nil {
+				a.Log.Warn("resort gateway routes after rate scan", "group_id", g.ID, "name", g.Name, "err", err)
+			}
+		}
+		if err := a.applyRateLimitForGroup(g.ID); err != nil && a.Log != nil {
+			a.Log.Warn("apply gateway group multiplier limit after rate scan", "group_id", g.ID, "name", g.Name, "err", err)
 		}
 	}
 }
@@ -195,6 +200,9 @@ func (a *AdminService) SaveRoutes(groupID uint, inputs []RouteInput) ([]storage.
 		}
 	}
 	if err := a.Routes.SaveForGroup(groupID, list); err != nil {
+		return nil, err
+	}
+	if err := a.applyRateLimitForGroup(groupID); err != nil {
 		return nil, err
 	}
 	a.invalidateModelsCache(groupID)

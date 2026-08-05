@@ -88,6 +88,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.RateResortEnabled != nil {
 		rateResort = *in.RateResortEnabled
 	}
+	maxBillingRate := 0.0
+	if in.MaxBillingRateMultiplier != nil {
+		maxBillingRate = normalizeMaxBillingRateMultiplier(*in.MaxBillingRateMultiplier)
+	}
 	pos, err := a.Groups.NextPosition()
 	if err != nil {
 		return nil, err
@@ -99,6 +103,7 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		Status:               storage.GatewayGroupStatusActive,
 		RateSortDirection:    dir,
 		RateResortEnabled:    rateResort,
+		MaxBillingRateMultiplier: maxBillingRate,
 		ModelMappingJSON:     strings.TrimSpace(in.ModelMappingJSON),
 		ModelsJSON:           strings.TrimSpace(in.ModelsJSON),
 		ModelsMode:           mode,
@@ -162,6 +167,12 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	if in.RateResortEnabled != nil {
 		rateResortTurnedOn = *in.RateResortEnabled && !item.RateResortEnabled
 		item.RateResortEnabled = *in.RateResortEnabled
+	}
+	rateLimitChanged := false
+	if in.MaxBillingRateMultiplier != nil {
+		next := normalizeMaxBillingRateMultiplier(*in.MaxBillingRateMultiplier)
+		rateLimitChanged = next != normalizeMaxBillingRateMultiplier(item.MaxBillingRateMultiplier)
+		item.MaxBillingRateMultiplier = next
 	}
 	if in.ModelMappingJSON != nil {
 		item.ModelMappingJSON = strings.TrimSpace(*in.ModelMappingJSON)
@@ -240,6 +251,11 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	if rateSortChanged || rateResortTurnedOn {
 		if err := a.reorderRoutesPersisted(id); err != nil && a.Log != nil {
 			a.Log.Warn("reorder routes after group update", "group_id", id, "err", err)
+		}
+	}
+	if rateLimitChanged {
+		if err := a.applyRateLimitForGroup(id); err != nil && a.Log != nil {
+			a.Log.Warn("apply gateway group multiplier limit", "group_id", id, "err", err)
 		}
 	}
 	a.invalidateModelsCache(id)

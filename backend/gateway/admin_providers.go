@@ -151,6 +151,7 @@ func (a *AdminService) UpdateProvider(id uint, in UpdateProviderInput) (*storage
 	if in.ConcurrencyLimit != nil {
 		item.ConcurrencyLimit = normalizeProviderConcurrencyLimit(*in.ConcurrencyLimit)
 	}
+	rateChanged := in.DefaultBillingRate != nil
 	if in.DefaultBillingRate != nil {
 		rate := *in.DefaultBillingRate
 		if rate <= 0 {
@@ -175,6 +176,11 @@ func (a *AdminService) UpdateProvider(id uint, in UpdateProviderInput) (*storage
 	}
 	if err := a.Providers.Update(item); err != nil {
 		return nil, err
+	}
+	if rateChanged {
+		if err := a.applyRateLimitForProvider(id); err != nil && a.Log != nil {
+			a.Log.Warn("apply gateway group multiplier limit after provider rate update", "provider_id", id, "err", err)
+		}
 	}
 	a.invalidateAllModelsCache()
 	return item, nil

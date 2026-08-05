@@ -15,6 +15,7 @@ type CreateGroupInput struct {
 	Description          string `json:"description"`
 	RateSortDirection    string `json:"rate_sort_direction"`
 	RateResortEnabled    *bool  `json:"rate_resort_enabled"`
+	MaxBillingRateMultiplier *float64 `json:"max_billing_rate_multiplier"`
 	ModelMappingJSON     string `json:"model_mapping"`
 	ModelsJSON           string `json:"models_json"`
 	ModelsMode           string `json:"models_mode"`
@@ -44,6 +45,7 @@ type UpdateGroupInput struct {
 	Status               *string `json:"status"`
 	RateSortDirection    *string `json:"rate_sort_direction"`
 	RateResortEnabled    *bool   `json:"rate_resort_enabled"`
+	MaxBillingRateMultiplier *float64 `json:"max_billing_rate_multiplier"`
 	ModelMappingJSON     *string `json:"model_mapping"`
 	ModelsJSON           *string `json:"models_json"`
 	ModelsMode           *string `json:"models_mode"`
@@ -149,6 +151,8 @@ type RouteInput struct {
 	RateConvertValue      float64 `json:"rate_convert_value"`
 	BillingRateMultiplier float64 `json:"billing_rate_multiplier"`
 	Enabled               bool    `json:"enabled"`
+	RateLimitAutoDisabled       bool   `json:"rate_limit_auto_disabled"`
+	RateLimitAutoDisabledReason string `json:"rate_limit_auto_disabled_reason"`
 	ModelMappingJSON      string  `json:"model_mapping"`
 	UpstreamProtocol      string  `json:"upstream_protocol"`
 	Concurrency           int     `json:"concurrency"`

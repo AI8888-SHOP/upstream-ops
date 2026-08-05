@@ -700,7 +700,7 @@ The request gateway aggregates multiple upstreams (monitored NewAPI/Sub2API chan
 
 | Concept | Description |
 |---------|-------------|
-| **Group** | Configuration unit: route table, group-level model map, model list, retry / failover / cooldown / first-token timeout, hedging, response validation, group UA |
+| **Group** | Configuration unit: route table, group-level model map, model list, retry / failover / cooldown / first-token timeout, hedging, response validation, group UA, and an optional maximum billing multiplier |
 | **Key** | Client auth credential bound to a group; supports quota and IP allow/deny lists; plaintext is shown only on create/reveal |
 | **Route** | A schedulable upstream target: monitor channel + source group, or a direct Provider; weight, ratio conversion, protocol, UA policy |
 | **Provider** | Gateway-managed base URL + API key + default billing ratio; no need to create a monitor channel first |
@@ -713,7 +713,7 @@ The request gateway aggregates multiple upstreams (monitored NewAPI/Sub2API chan
    - Option A: an existing monitored NewAPI/Sub2API channel and the source group to use.
    - Option B: create a **Provider** on the gateway page (base URL, key, protocol, default billing ratio).
 2. **Create a gateway group**
-   Sort direction (ratio asc/desc), reorder-after-scan, retry/failover, and optional first-token timeout, hedging, regex response validation, and group UA.
+   Sort direction (ratio asc/desc), reorder-after-scan, retry/failover, and optional first-token timeout, hedging, regex response validation, group UA, and a maximum billing multiplier. Set the maximum to `0` to disable the guard; routes whose effective billing multiplier is higher are excluded from scheduling automatically.
 3. **Add routes**
    Choose monitor or provider; set weight, ratio conversion, `upstream_protocol`, UA mode; optionally **Ensure upstream keys** (monitor routes only).
 4. **Models**
@@ -800,6 +800,7 @@ Route field `upstream_protocol`:
   2. if source group matches → live ratio with raw / ×100 / ÷100 conversion
   3. else stored “account billing ratio” on the route
   4. else conversion default
+- A group's optional `max_billing_rate_multiplier` guard uses the same effective ratio. `0` disables it; a route above the limit is automatically excluded from scheduling and model discovery. The derived auto-disabled marker is separate from the route's manual `enabled` setting, and is cleared when the ratio returns within the limit.
 - When the group enables reorder-after-ratio-scan, ratio scan rewrites route order and billing-ratio snapshots for related groups.
 - Cost: `base_cost` from model unit price × token buckets; `actual_cost = base_cost × account billing ratio` (multiplied once).
 

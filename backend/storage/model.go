@@ -528,6 +528,7 @@ type GatewayGroup struct {
 	// 重写路由 position 与 billing_rate_multiplier（对齐上游同步账号 Apply 逻辑）。
 	// 关闭时仅在保存路由 / 改排序方向时落库顺序；运行时仍按实时倍率 SortRoutes。
 	RateResortEnabled bool `gorm:"not null;default:false" json:"rate_resort_enabled"`
+	MaxBillingRateMultiplier float64 `gorm:"not null;default:0" json:"max_billing_rate_multiplier"`
 	ModelMappingJSON  string    `gorm:"type:text" json:"model_mapping,omitempty"`
 	ModelsJSON        string    `gorm:"type:text" json:"models_json,omitempty"`
 	ModelsMode        string    `gorm:"size:16;not null;default:'auto'" json:"models_mode"`
@@ -603,6 +604,8 @@ type GatewayRoute struct {
 	RateConvertValue        float64    `gorm:"default:1" json:"rate_convert_value"`
 	BillingRateMultiplier   float64    `gorm:"not null;default:1" json:"billing_rate_multiplier"`
 	Enabled                 bool       `gorm:"default:true" json:"enabled"`
+	RateLimitAutoDisabled       bool   `gorm:"not null;default:false" json:"rate_limit_auto_disabled"`
+	RateLimitAutoDisabledReason string `gorm:"size:512;not null;default:''" json:"rate_limit_auto_disabled_reason,omitempty"`
 	ModelMappingJSON        string     `gorm:"type:text" json:"model_mapping,omitempty"`
 	UpstreamProtocol        string     `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
 	Concurrency             int        `gorm:"default:10" json:"concurrency"`

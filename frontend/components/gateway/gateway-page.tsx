@@ -724,6 +724,7 @@ export function GatewayPage() {
       description: g.description ?? "",
       status: g.status === "disabled" ? "disabled" : "active",
       rate_resort_enabled: !!g.rate_resort_enabled,
+      max_billing_rate_multiplier: String(g.max_billing_rate_multiplier ?? 0),
       retry_enabled: g.retry_enabled !== false,
       retry_count: String(g.retry_count ?? 0),
       failover_enabled: g.failover_enabled !== false,
@@ -783,8 +784,14 @@ export function GatewayPage() {
       100,
       Math.min(30000, Math.floor(Number(groupForm.response_validation_prefix_timeout_ms) || 2000)),
     )
+    const maxBillingRateInput = Number(groupForm.max_billing_rate_multiplier)
+    const maxBillingRateMultiplier =
+      Number.isFinite(maxBillingRateInput) && maxBillingRateInput > 0
+        ? Math.min(1_000_000, maxBillingRateInput)
+        : 0
     const policy = {
       rate_resort_enabled: groupForm.rate_resort_enabled,
+      max_billing_rate_multiplier: maxBillingRateMultiplier,
       retry_enabled: groupForm.retry_enabled,
       retry_count: retryCount,
       failover_enabled: groupForm.failover_enabled,

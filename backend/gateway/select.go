@@ -96,7 +96,7 @@ func IsRouteSchedulable(route *storage.GatewayRoute, now time.Time) bool {
 // automatic cooldown for the requested model. An empty model intentionally
 // ignores model-specific cooldowns (for example, while listing /v1/models).
 func IsRouteSchedulableForModel(route *storage.GatewayRoute, model string, now time.Time) bool {
-	if route == nil || !route.Enabled {
+	if route == nil || !route.Enabled || route.RateLimitAutoDisabled {
 		return false
 	}
 	key := storage.NormalizeGatewayModel(model)

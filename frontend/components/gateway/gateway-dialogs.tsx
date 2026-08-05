@@ -727,6 +727,26 @@ export function GroupFormDialog({
           </div>
 
           <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
+            <Label>最大计费倍率</Label>
+            <Input
+              type="number"
+              min={0}
+              step="0.0001"
+              value={groupForm.max_billing_rate_multiplier}
+              onChange={(e) =>
+                setGroupForm({
+                  ...groupForm,
+                  max_billing_rate_multiplier: e.target.value,
+                })
+              }
+              placeholder="0"
+            />
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              0 表示关闭。路由有效倍率超过此值时自动停用调度；倍率恢复后自动恢复，用户手动禁用状态不变。
+            </p>
+          </div>
+
+          <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
             <Label>User-Agent</Label>
             <Input
               value={groupForm.user_agent}

@@ -633,6 +633,8 @@ export interface GatewayGroup {
    * 重写路由顺序与账号计费倍率（对齐上游同步账号）。
    */
   rate_resort_enabled?: boolean
+  /** 0 disables the guard; over-limit routes are excluded from scheduling. */
+  max_billing_rate_multiplier?: number
   model_mapping?: string
   models_json?: string
   models_mode: GatewayModelsMode
@@ -780,6 +782,8 @@ export interface GatewayRoute {
   rate_convert_value: number
   billing_rate_multiplier: number
   enabled: boolean
+  rate_limit_auto_disabled?: boolean
+  rate_limit_auto_disabled_reason?: string
   model_mapping?: string
   upstream_protocol: GatewayUpstreamProtocol
   concurrency: number

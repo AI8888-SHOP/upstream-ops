@@ -25,6 +25,7 @@ export type GroupFormState = {
   description: string
   status: "active" | "disabled"
   rate_resort_enabled: boolean
+  max_billing_rate_multiplier: string
   retry_enabled: boolean
   retry_count: string
   failover_enabled: boolean
@@ -287,7 +288,7 @@ export function resolveModelSources(
       continue
     }
     for (const r of matched) {
-      if (r.enabled === false) continue
+      if (r.enabled === false || r.rate_limit_auto_disabled) continue
       push({
         route_id: r.id,
         channel_id: cid,
@@ -503,6 +504,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   description: "",
   status: "active",
   rate_resort_enabled: false,
+  max_billing_rate_multiplier: "0",
   retry_enabled: true,
   retry_count: "0",
   failover_enabled: true,

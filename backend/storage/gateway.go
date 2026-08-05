@@ -614,6 +614,8 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 				list[i].SourceAPIKeyID = prev.SourceAPIKeyID
 				list[i].SourceAPIKeyName = prev.SourceAPIKeyName
 				list[i].SourceAPIKeyCipher = prev.SourceAPIKeyCipher
+				list[i].RateLimitAutoDisabled = prev.RateLimitAutoDisabled
+				list[i].RateLimitAutoDisabledReason = prev.RateLimitAutoDisabledReason
 				list[i].TempUnschedulableUntil = prev.TempUnschedulableUntil
 				list[i].TempUnschedulableReason = prev.TempUnschedulableReason
 				list[i].TempUnschedulableAt = prev.TempUnschedulableAt
@@ -624,6 +626,8 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 				list[i].SourceAPIKeyID = 0
 				list[i].SourceAPIKeyName = ""
 				list[i].SourceAPIKeyCipher = ""
+				list[i].RateLimitAutoDisabled = false
+				list[i].RateLimitAutoDisabledReason = ""
 				list[i].TempUnschedulableUntil = nil
 				list[i].TempUnschedulableReason = ""
 				list[i].TempUnschedulableAt = nil
@@ -724,6 +728,26 @@ func normalizeGatewayRoute(item *GatewayRoute) {
 
 // Update 全量保存。
 func (r *GatewayRoutes) Update(item *GatewayRoute) error { return r.db.Save(item).Error }
+
+// SetRateLimitAutoDisabled updates only the derived multiplier guard state.
+// Keeping this as a targeted update avoids overwriting concurrent cooldown or
+// upstream-key changes with a stale route snapshot.
+func (r *GatewayRoutes) SetRateLimitAutoDisabled(id uint, disabled bool, reason string) error {
+	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
+		"rate_limit_auto_disabled":        disabled,
+		"rate_limit_auto_disabled_reason": strings.TrimSpace(reason),
+	}).Error
+}
+
+// SetProviderBillingSnapshot updates the persisted provider billing fields
+// without overwriting concurrent cooldown, key, or route-policy fields.
+func (r *GatewayRoutes) SetProviderBillingSnapshot(id uint, rate, convertValue float64) error {
+	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).
+		Updates(map[string]any{
+			"billing_rate_multiplier": rate,
+			"rate_convert_value":      convertValue,
+		}).Error
+}
 
 // UpdateSourceKey 更新路由绑定的上游密钥密文。
 func (r *GatewayRoutes) UpdateSourceKey(id uint, keyID int64, keyName, keyCipher string) error {
