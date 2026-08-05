@@ -586,6 +586,11 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 		attempt.streamMu.Unlock()
 		if rejected {
 			cancel()
+			// Finish signals the validation decision before the forwarding
+			// goroutine publishes its final stream result. Wait for that result
+			// before the caller inspects attempt state or starts another route.
+			streamResult := attempt.awaitStreamResult()
+			attempt.applyStreamResult(streamResult)
 			return attempt, nil
 		}
 		if attemptErr != nil || rt.isFailoverStatus(status, req.group.FailoverOn4xx) {
