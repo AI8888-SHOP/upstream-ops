@@ -66,6 +66,33 @@ func TestNormalizeMigrationValuePostgresBoolean(t *testing.T) {
 	}
 }
 
+func TestAutoMigrateAddsVirtualCacheFlagWithSafeDefault(t *testing.T) {
+	db := openTestDB(t)
+	group := &GatewayGroup{Name: "legacy-virtual-cache", Status: GatewayGroupStatusActive}
+	if err := db.Create(group).Error; err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := db.Migrator().DropColumn(&GatewayGroup{}, "hedge_virtual_cache_enabled"); err != nil {
+		t.Fatalf("drop virtual cache column: %v", err)
+	}
+	if db.Migrator().HasColumn(&GatewayGroup{}, "hedge_virtual_cache_enabled") {
+		t.Fatal("virtual cache column was not removed from legacy schema")
+	}
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("auto migrate legacy schema: %v", err)
+	}
+	if !db.Migrator().HasColumn(&GatewayGroup{}, "hedge_virtual_cache_enabled") {
+		t.Fatal("auto migrate did not restore virtual cache column")
+	}
+	var restored GatewayGroup
+	if err := db.First(&restored, group.ID).Error; err != nil {
+		t.Fatalf("load migrated group: %v", err)
+	}
+	if restored.HedgeVirtualCacheEnabled {
+		t.Fatalf("legacy group virtual cache flag = true, want safe default false")
+	}
+}
+
 func TestMigrateDatabaseDoesNotRestoreSoftDeletedRows(t *testing.T) {
 	source := openTestDB(t)
 	if err := source.Exec("ALTER TABLE channels ADD COLUMN deleted_at datetime").Error; err != nil {
