@@ -2051,6 +2051,89 @@ func TestGatewayRouteModelCooldownIsolated(t *testing.T) {
 	}
 }
 
+func TestClearModelTempUnschedulableUntilRetainsDiagnostics(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	if err := routes.SaveForGroup(13, []GatewayRoute{{SourceChannelID: 22, Weight: 1, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(13)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	failedAt := time.Now().Add(-time.Minute)
+	until := time.Now().Add(time.Minute)
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", until, "capacity", failedAt, "request-a"); err != nil {
+		t.Fatalf("set cooldown: %v", err)
+	}
+	if err := routes.ClearModelTempUnschedulableUntil(list[0].ID, "model-a"); err != nil {
+		t.Fatalf("clear cooldown until: %v", err)
+	}
+	got, err := routes.FindByID(list[0].ID)
+	if err != nil {
+		t.Fatalf("find route: %v", err)
+	}
+	cooldown := got.ModelCooldowns["model-a"]
+	if cooldown.TempUnschedulableUntil != nil {
+		t.Fatalf("cooldown until=%v, want nil", cooldown.TempUnschedulableUntil)
+	}
+	if cooldown.TempUnschedulableReason != "capacity" || cooldown.TempUnschedulableRequestID != "request-a" || cooldown.TempUnschedulableAt == nil {
+		t.Fatalf("diagnostics were not retained: %+v", cooldown)
+	}
+}
+
+func TestClearModelTempUnschedulableUntilIfMatchDoesNotClearNewerCooldown(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	if err := routes.SaveForGroup(14, []GatewayRoute{{SourceChannelID: 23, Weight: 1, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(14)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	oldAt := time.Now().Add(-2 * time.Minute)
+	oldUntil := time.Now().Add(time.Minute)
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", oldUntil, "old", oldAt, "old-request"); err != nil {
+		t.Fatalf("set old cooldown: %v", err)
+	}
+	oldSnapshot, err := routes.FindByID(list[0].ID)
+	if err != nil {
+		t.Fatalf("load old cooldown: %v", err)
+	}
+	oldCooldown := oldSnapshot.ModelCooldowns["model-a"]
+	newAt := time.Now().Add(-time.Second)
+	newUntil := time.Now().Add(5 * time.Minute)
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", newUntil, "new", newAt, "new-request"); err != nil {
+		t.Fatalf("set new cooldown: %v", err)
+	}
+	cleared, err := routes.ClearModelTempUnschedulableUntilIfMatch(
+		list[0].ID, "model-a", *oldCooldown.TempUnschedulableUntil,
+		oldCooldown.TempUnschedulableAt, oldCooldown.TempUnschedulableRequestID,
+	)
+	if err != nil {
+		t.Fatalf("stale clear: %v", err)
+	}
+	if cleared {
+		t.Fatal("stale recovery probe cleared a newer cooldown")
+	}
+	got, err := routes.FindByID(list[0].ID)
+	if err != nil {
+		t.Fatalf("find after stale clear: %v", err)
+	}
+	cooldown := got.ModelCooldowns["model-a"]
+	if cooldown.TempUnschedulableUntil == nil || cooldown.TempUnschedulableRequestID != "new-request" {
+		t.Fatalf("new cooldown was lost: %+v", cooldown)
+	}
+	cleared, err = routes.ClearModelTempUnschedulableUntilIfMatch(
+		list[0].ID, "model-a", *cooldown.TempUnschedulableUntil,
+		cooldown.TempUnschedulableAt, cooldown.TempUnschedulableRequestID,
+	)
+	if err != nil || !cleared {
+		t.Fatalf("current clear: cleared=%v err=%v", cleared, err)
+	}
+}
+
 func TestGatewayGroupDeleteRemovesModelCooldowns(t *testing.T) {
 	db := openTestDB(t)
 	groups := NewGatewayGroups(db)

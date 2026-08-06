@@ -226,6 +226,178 @@ func sortRoutesForModel(routes []storage.GatewayRoute, groupsByChannel map[uint]
 	return out
 }
 
+const emergencyCooldownRecoveryRouteCount = 2
+
+type emergencyCooldownRecoveryCandidate struct {
+	index         int
+	model         string
+	failedAt      time.Time
+	cooldownAt    *time.Time
+	cooldownUntil time.Time
+	requestID     string
+	position      int
+	routeID       uint
+	identity      upstreamConcurrencyKey
+	identityOK    bool
+}
+
+// recoverWhenAllRoutesCooling clears the oldest model cooldowns when a group
+// would otherwise have no schedulable route. It is intentionally limited to
+// routes that are otherwise valid and enabled, and wakes at most one route per
+// physical upstream so duplicate route rows cannot amplify a recovery probe.
+// The persisted cooldown is cleared before the request-local copy is made
+// schedulable, so a restart does not immediately put the route back into the
+// same dead-end state.
+func (rt *Runtime) recoverWhenAllRoutesCooling(
+	routes []storage.GatewayRoute,
+	requestedModel string,
+	groupMapping map[string]string,
+	now time.Time,
+) []storage.GatewayRoute {
+	if rt == nil || len(routes) == 0 || strings.TrimSpace(requestedModel) == "" {
+		return routes
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	candidates := make([]emergencyCooldownRecoveryCandidate, 0, len(routes))
+	eligible := 0
+	for index := range routes {
+		route := routes[index]
+		upstreamModel, _ := ResolveModel(
+			requestedModel,
+			ParseModelMapping(route.ModelMappingJSON),
+			groupMapping,
+		)
+		if strings.TrimSpace(upstreamModel) == "" {
+			upstreamModel = requestedModel
+		}
+		withoutCooldown := route
+		withoutCooldown.TempUnschedulableUntil = nil
+		withoutCooldown.ModelCooldowns = nil
+		if !IsRouteSchedulableForModel(&withoutCooldown, requestedModel, now) {
+			continue
+		}
+		eligible++
+
+		modelKey := storage.NormalizeGatewayModel(upstreamModel)
+		if modelKey == "" {
+			continue
+		}
+		cooldown, ok := route.ModelCooldowns[modelKey]
+		if !ok || cooldown.TempUnschedulableUntil == nil || !cooldown.TempUnschedulableUntil.After(now) {
+			// A healthy route means this is not an all-cooling outage. Return
+			// immediately so the recovery check stays off the normal hot path.
+			return routes
+		}
+		failedAt := cooldown.TempUnschedulableAt
+		if failedAt == nil || failedAt.IsZero() {
+			fallback := *cooldown.TempUnschedulableUntil
+			failedAt = &fallback
+		}
+		var cooldownAt *time.Time
+		if cooldown.TempUnschedulableAt != nil {
+			at := *cooldown.TempUnschedulableAt
+			cooldownAt = &at
+		}
+		identity, identityOK := routeUpstreamConcurrencyKey(&route)
+		candidates = append(candidates, emergencyCooldownRecoveryCandidate{
+			index: index, model: modelKey, failedAt: *failedAt,
+			cooldownAt: cooldownAt, cooldownUntil: *cooldown.TempUnschedulableUntil,
+			requestID: cooldown.TempUnschedulableRequestID,
+			position: route.Position, routeID: route.ID,
+			identity: identity, identityOK: identityOK,
+		})
+	}
+
+	// If even one otherwise-valid route is not cooling, there is no outage to
+	// recover from. This also avoids waking a single model while another route
+	// can still serve it normally.
+	if eligible == 0 || len(candidates) != eligible {
+		return routes
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if !candidates[i].failedAt.Equal(candidates[j].failedAt) {
+			return candidates[i].failedAt.Before(candidates[j].failedAt)
+		}
+		if candidates[i].position != candidates[j].position {
+			return candidates[i].position < candidates[j].position
+		}
+		return candidates[i].routeID < candidates[j].routeID
+	})
+
+	selected := make([]emergencyCooldownRecoveryCandidate, 0, emergencyCooldownRecoveryRouteCount)
+	seen := make(map[upstreamConcurrencyKey]struct{}, emergencyCooldownRecoveryRouteCount)
+	for _, candidate := range candidates {
+		if len(selected) >= emergencyCooldownRecoveryRouteCount {
+			break
+		}
+		if candidate.identityOK {
+			if _, exists := seen[candidate.identity]; exists {
+				continue
+			}
+			seen[candidate.identity] = struct{}{}
+		}
+		selected = append(selected, candidate)
+	}
+	if len(selected) == 0 {
+		return routes
+	}
+
+	recovered := make([]storage.GatewayRoute, len(routes))
+	copy(recovered, routes)
+	for _, candidate := range selected {
+		if rt.Routes != nil {
+			cleared, err := rt.Routes.ClearModelTempUnschedulableUntilIfMatch(
+				candidate.routeID, candidate.model, candidate.cooldownUntil,
+				candidate.cooldownAt, candidate.requestID,
+			)
+			if err != nil {
+				if rt.Log != nil {
+					rt.Log.Warn("failed to recover cooled gateway route", "route_id", candidate.routeID, "model", candidate.model, "err", err)
+				}
+				continue
+			}
+			if !cleared {
+				if rt.Log != nil {
+					rt.Log.Debug("cooled gateway route changed before recovery", "route_id", candidate.routeID, "model", candidate.model)
+				}
+				continue
+			}
+		}
+		cooldowns := cloneModelCooldowns(recovered[candidate.index].ModelCooldowns)
+		for key, cooldown := range cooldowns {
+			// bindModelCooldownAliases adds request-local aliases that point to
+			// the same persisted upstream cooldown. Clear those views as well,
+			// otherwise the scheduler would immediately filter the recovered
+			// route again for the requested model.
+			if key != candidate.model &&
+				(cooldown.RouteID != candidate.routeID || storage.NormalizeGatewayModel(cooldown.Model) != candidate.model) {
+				continue
+			}
+			cooldown.TempUnschedulableUntil = nil
+			cooldowns[key] = cooldown
+		}
+		recovered[candidate.index].ModelCooldowns = cooldowns
+		if rt.Log != nil {
+			rt.Log.Info("emergency gateway cooldown recovery", "route_id", candidate.routeID, "model", candidate.model)
+		}
+	}
+	return recovered
+}
+
+func cloneModelCooldowns(source map[string]storage.GatewayRouteModelCooldown) map[string]storage.GatewayRouteModelCooldown {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]storage.GatewayRouteModelCooldown, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
 // sortRoutesWithAffinity preserves the normal scheduler order for unrelated
 // requests. A matching session may bypass a live cooldown exactly once so the
 // upstream prompt cache can be reactivated; all other requests still see the

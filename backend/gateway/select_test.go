@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -100,6 +101,92 @@ func TestSortRoutesForModel_CooldownIsolated(t *testing.T) {
 	got = SortRoutesForModel(routes, nil, "asc", now, nil, "model-b")
 	if len(got) != 2 || got[0].Route.ID != 1 {
 		t.Fatalf("model-b should keep route 1 schedulable, got=%+v", got)
+	}
+}
+
+func TestRecoverWhenAllRoutesCoolingWakesOldestDistinctUpstreams(t *testing.T) {
+	now := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
+	activeUntil := now.Add(5 * time.Minute)
+	failedAt := func(minutesAgo int) *time.Time {
+		value := now.Add(-time.Duration(minutesAgo) * time.Minute)
+		return &value
+	}
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 10, Enabled: true, SourceAPIKeyCipher: "a", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 1, Model: "m", TempUnschedulableUntil: &activeUntil, TempUnschedulableAt: failedAt(4), TempUnschedulableReason: "first"},
+		}},
+		// A second route for the same physical channel must not consume the
+		// second emergency recovery slot.
+		{ID: 2, Position: 1, SourceChannelID: 10, Enabled: true, SourceAPIKeyCipher: "b", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 2, Model: "m", TempUnschedulableUntil: &activeUntil, TempUnschedulableAt: failedAt(3), TempUnschedulableReason: "second"},
+		}},
+		{ID: 3, Position: 2, SourceChannelID: 20, Enabled: true, SourceAPIKeyCipher: "c", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 3, Model: "m", TempUnschedulableUntil: &activeUntil, TempUnschedulableAt: failedAt(2), TempUnschedulableReason: "third"},
+		}},
+		{ID: 4, Position: 3, SourceChannelID: 30, Enabled: true, SourceAPIKeyCipher: "d", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 4, Model: "m", TempUnschedulableUntil: &activeUntil, TempUnschedulableAt: failedAt(1), TempUnschedulableReason: "fourth"},
+		}},
+	}
+
+	original := append([]storage.GatewayRoute(nil), routes...)
+	rt := (&Service{}).runtime()
+	got := rt.recoverWhenAllRoutesCooling(routes, "m", nil, now)
+	if len(got) != len(routes) {
+		t.Fatalf("route count=%d, want %d", len(got), len(routes))
+	}
+	if got[0].ModelCooldowns["m"].TempUnschedulableUntil != nil || got[2].ModelCooldowns["m"].TempUnschedulableUntil != nil {
+		t.Fatalf("oldest routes were not woken: route1=%+v route3=%+v", got[0].ModelCooldowns["m"], got[2].ModelCooldowns["m"])
+	}
+	if got[1].ModelCooldowns["m"].TempUnschedulableUntil == nil || got[3].ModelCooldowns["m"].TempUnschedulableUntil == nil {
+		t.Fatal("a second route on the first channel or a newer route was woken")
+	}
+	if got[0].ModelCooldowns["m"].TempUnschedulableReason != "first" || got[2].ModelCooldowns["m"].TempUnschedulableReason != "third" {
+		t.Fatal("emergency recovery should retain failure diagnostics")
+	}
+	if !reflect.DeepEqual(original[0].ModelCooldowns["m"].TempUnschedulableUntil, routes[0].ModelCooldowns["m"].TempUnschedulableUntil) {
+		t.Fatal("request-local recovery must not mutate the input route slice")
+	}
+	if candidates := SortRoutesForModel(got, nil, "asc", now, nil, "m"); len(candidates) != 2 || candidates[0].Route.ID != 1 || candidates[1].Route.ID != 3 {
+		t.Fatalf("woken routes were not schedulable: %+v", candidates)
+	}
+}
+
+func TestRecoverWhenAllRoutesCoolingLeavesHealthyRouteUntouched(t *testing.T) {
+	now := time.Now()
+	until := now.Add(time.Minute)
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 1, Enabled: true, SourceAPIKeyCipher: "a", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 1, Model: "m", TempUnschedulableUntil: &until},
+		}},
+		{ID: 2, Position: 1, SourceChannelID: 2, Enabled: true, SourceAPIKeyCipher: "b"},
+	}
+	rt := (&Service{}).runtime()
+	got := rt.recoverWhenAllRoutesCooling(routes, "m", nil, now)
+	if !reflect.DeepEqual(got, routes) {
+		t.Fatalf("healthy route means no emergency reset; got=%+v want=%+v", got, routes)
+	}
+}
+
+func TestRecoverWhenAllRoutesCoolingClearsResolvedUpstreamModel(t *testing.T) {
+	now := time.Now()
+	until := now.Add(time.Minute)
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 1, Enabled: true, SourceAPIKeyCipher: "a", ModelMappingJSON: `{"alias":"upstream"}`, ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"upstream": {RouteID: 1, Model: "upstream", TempUnschedulableUntil: &until},
+		}},
+		{ID: 2, Position: 1, SourceChannelID: 2, Enabled: true, SourceAPIKeyCipher: "b", ModelMappingJSON: `{"alias":"upstream"}`, ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"upstream": {RouteID: 2, Model: "upstream", TempUnschedulableUntil: &until},
+		}},
+	}
+	rt := (&Service{}).runtime()
+	got := rt.recoverWhenAllRoutesCooling(routes, "alias", nil, now)
+	for _, route := range got {
+		if route.ModelCooldowns["upstream"].TempUnschedulableUntil != nil {
+			t.Fatalf("resolved upstream cooldown was not cleared: %+v", route.ModelCooldowns)
+		}
+		if _, exists := route.ModelCooldowns["alias"]; exists {
+			t.Fatal("request alias should not be persisted as a cooldown key")
+		}
 	}
 }
 

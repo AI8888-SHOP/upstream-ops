@@ -66,6 +66,14 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	routes = filteredRoutes
+	// If every otherwise-valid route is cooling for this model, wake the two
+	// oldest physical upstreams so the request can make a bounded recovery
+	// attempt instead of returning "no schedulable routes" immediately.
+	// Keep this behind the existing failover policy: without an allowed route
+	// switch there is no reason to force a cooled route back into service.
+	if group.RetryEnabled && group.FailoverEnabled && group.FailoverMax > 0 {
+		routes = rt.recoverWhenAllRoutesCooling(routes, requestedModel, groupMapping, time.Now())
+	}
 	routes = bindModelCooldownAliases(routes, requestedModel, groupMapping)
 	affinity := rt.routeAffinityForRequest(c, key.ID, group.ID, string(kind), requestedModel, body)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)

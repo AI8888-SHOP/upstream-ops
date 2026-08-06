@@ -1338,6 +1338,54 @@ func (r *GatewayRoutes) ClearModelTempUnschedulable(id uint, model string) error
 	).Error
 }
 
+// ClearModelTempUnschedulableUntil ends one model's automatic pause while
+// retaining the failure reason, timestamp, request id, and recovery streak
+// for management diagnostics. This is used for a bounded emergency recovery
+// probe when every otherwise-valid route is cooling for the requested model.
+func (r *GatewayRoutes) ClearModelTempUnschedulableUntil(id uint, model string) error {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" {
+		return nil
+	}
+	return r.db.Exec(
+		`UPDATE gateway_route_model_cooldowns
+		 SET temp_unschedulable_until = NULL, updated_at = ?
+		 WHERE route_id = ? AND model = ?`,
+		time.Now(), id, model,
+	).Error
+}
+
+// ClearModelTempUnschedulableUntilIfMatch ends one model's automatic pause
+// only when the cooldown still has the values observed by the caller. This
+// prevents an older recovery probe from clearing a newer failure written by a
+// concurrent request.
+func (r *GatewayRoutes) ClearModelTempUnschedulableUntilIfMatch(
+	id uint,
+	model string,
+	until time.Time,
+	failedAt *time.Time,
+	requestID string,
+) (bool, error) {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" || until.IsZero() {
+		return false, nil
+	}
+	query := `UPDATE gateway_route_model_cooldowns
+		SET temp_unschedulable_until = NULL, updated_at = ?
+		WHERE route_id = ? AND model = ? AND temp_unschedulable_until = ?`
+	args := []any{time.Now(), id, model, until}
+	if failedAt == nil || failedAt.IsZero() {
+		query += ` AND temp_unschedulable_at IS NULL`
+	} else {
+		query += ` AND temp_unschedulable_at = ?`
+		args = append(args, *failedAt)
+	}
+	query += ` AND temp_unschedulable_request_id = ?`
+	args = append(args, requestID)
+	result := r.db.Exec(query, args...)
+	return result.RowsAffected > 0, result.Error
+}
+
 // NoteSuccessForModelPauseError mirrors route-level recovery bookkeeping for
 // one model and leaves every other model cooldown untouched.
 func (r *GatewayRoutes) NoteSuccessForModelPauseError(id uint, model string) error {
