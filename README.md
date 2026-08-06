@@ -351,6 +351,107 @@ MYSQL_ROOT_PASSWORD=replace-with-root-password
 MYSQL_PORT=33069
 ```
 
+## High-load deployment and one-click upgrade
+
+When `gateway_usage_logs` grows beyond roughly 50,000 rows or the SQLite file is larger than about 128 MB, use PostgreSQL as the durable primary database. Redis is optional cache/lock infrastructure and is not used as the accounting source of truth.
+
+### Upgrade an older Docker installation
+
+Download the `upstream-ops-upgrade-kit-<version>` asset from the GitHub Release
+and extract it outside the live deployment directory. The kit contains the
+helpers and Compose templates, but never contains `.env`, `data/`, or secrets.
+For the complete path-based guide, see [`docs/UPGRADE.md`](docs/UPGRADE.md).
+
+For a normal image upgrade that keeps the existing database, run the guided
+helper with the live deployment paths:
+
+```bash
+chmod +x scripts/upgrade.sh
+TARGET_TAG=v0.0.18 ./scripts/upgrade.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+.\scripts\upgrade.ps1 -TargetTag v0.0.18
+```
+
+The helper defaults to `ghcr.io/ai8888-shop/upstream-ops` as the image
+repository. Set `IMAGE_REPOSITORY` in the live `.env` when using a fork or
+private mirror. It also writes `docker-compose.upstream-ops-image.yml` beside
+the first Compose file and persists that override in `COMPOSE_FILE`, so a later
+plain `docker compose up` cannot fall back to an old hard-coded image.
+
+The helper backs up `data/` and `.env`, gives the old image an immutable local
+rollback tag, pulls the target image, waits for the container health check,
+and persists the target `IMAGE_TAG` to `.env`. It restores the rollback image
+when startup or health verification fails. Set `HEALTH_URL`,
+`HEALTH_TIMEOUT_SECONDS`, `COMPOSE_FILE`, `COMPOSE_EXTRA_FILES`, or `SERVICE`
+for a non-default installation. For MySQL, include
+`COMPOSE_EXTRA_FILES=docker-compose.mysql.yml` (PowerShell uses
+`-ComposeExtraFile`). Keep the generated `backups/` directory until the new release
+has passed a complete request and billing check.
+
+### Migrate a high-load SQLite installation
+
+Create a new empty PostgreSQL database and set these values in `.env`:
+
+```env
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
+DATABASE_USER=upstreamops
+DATABASE_PASSWORD=replace-with-database-password
+DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
+```
+
+For an old Docker/SQLite deployment that also needs the database migration, run
+the PostgreSQL helper from the kit with explicit live deployment paths:
+
+```bash
+chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.18/scripts/upgrade-to-postgres.sh
+ENV_FILE=/srv/upstream-ops/.env DATA_DIR=/srv/upstream-ops/data \
+COMPOSE_FILE=/srv/upstream-ops/docker-compose.yml \
+POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.18/docker-compose.postgres.yml \
+TARGET_TAG=v0.0.18 MIGRATION_IMAGE_TAG=v0.0.18 \
+/tmp/upstream-ops-upgrade-kit-v0.0.18/scripts/upgrade-to-postgres.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+.\scripts\upgrade-to-postgres.ps1 `
+  -ComposeFile 'D:\upstream-ops\docker-compose.yml' `
+  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.18\docker-compose.postgres.yml' `
+  -EnvFile 'D:\upstream-ops\.env' -DataDir 'D:\upstream-ops\data' `
+  -TargetTag 'v0.0.18' -MigrationImageTag 'v0.0.18'
+```
+
+The helper validates both Compose files and the external network before stopping
+the old service, pulls the same target image used by the migration tool and the
+new app, backs up `data/` and `.env`, refuses a populated target, copies all
+compatible tables (including schemas from older releases), and waits for
+`/healthz` before completing. On success it persists `DATABASE_DRIVER=postgres`,
+`IMAGE_TAG`, and a generated Compose override so a normal restart does not
+switch back to SQLite. A migration or health failure restores the immutable old
+image. Keep the backup until usage, billing, and gateway requests have been
+verified. The helper copies the SQLite database and any WAL/SHM sidecars into a
+writable temporary snapshot before migration and removes that snapshot on every
+exit. Set `MIGRATION_TIMEOUT_SECONDS` (PowerShell:
+`-MigrationTimeoutSeconds`) for a larger database; the default is 30 minutes.
+
+The migration helper uses the repository's `latest` image by default so an old
+deployment does not accidentally run a version without
+`upstream-ops-migrate`. Override it with `IMAGE` (PowerShell `-Image`) or
+`MIGRATION_IMAGE_TAG` (PowerShell `-MigrationImageTag`) when using a private
+registry or a pinned release. `TARGET_TAG` is used for both the migration
+binary and the new app when provided; otherwise `MIGRATION_IMAGE_TAG` supplies
+both.
+
+For a MySQL installation, keep both Compose files in the upgrade command;
+PowerShell accepts repeated `-ComposeExtraFile` values and Bash accepts
+`COMPOSE_EXTRA_FILES=docker-compose.mysql.yml`.
+
 ## Environment Variables
 
 ### Basic
@@ -388,6 +489,24 @@ DATABASE_USER=upstreamops
 DATABASE_PASSWORD=change-me
 DATABASE_NAME=upstreamops
 ```
+
+PostgreSQL:
+
+```env
+DATABASE_DRIVER=postgres
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
+DATABASE_USER=upstreamops
+DATABASE_PASSWORD=change-me
+DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
+DATABASE_MAX_OPEN_CONNS=20
+DATABASE_MAX_IDLE_CONNS=5
+```
+
+PostgreSQL is the durable primary store for configuration, usage, quota, and
+settlement. Redis can be added later for short-lived cache or locks, but must
+not replace these records.
 
 ### Security and Login
 

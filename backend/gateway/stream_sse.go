@@ -206,6 +206,9 @@ func (rt *Runtime) mergeStreamUsage(dst *UsageTokens, data string, kind protocol
 	if dst == nil || data == "" {
 		return
 	}
+	if !mayContainUsageFields(data, kind) {
+		return
+	}
 	var u UsageTokens
 	if protocol.NormalizeKind(kind) == protocol.KindAnthropic {
 		u = ParseAnthropicUsage([]byte(data))
@@ -232,6 +235,53 @@ func (rt *Runtime) mergeStreamUsage(dst *UsageTokens, data string, kind protocol
 		*dst = mergeUsagePreferNewer(*dst, u)
 	}
 }
+
+// mayContainUsageFields is intentionally a cheap substring prefilter. Most
+// SSE chunks are ordinary content deltas and do not contain usage at all;
+// avoiding json.Unmarshal for those chunks removes a large amount of
+// allocation and CPU from the streaming hot path. The actual parsers remain
+// authoritative.
+func mayContainUsageFields(data string, kind protocolKind) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, marker := range usageFieldMarkers {
+		if strings.Contains(data, marker) {
+			return true
+		}
+	}
+	// JSON permits escaped object keys. Falling through to the authoritative
+	// parser preserves accounting for payloads such as us\u0061ge even though
+	// the cheap literal markers cannot recognize the decoded field name.
+	if strings.Contains(data, `\u`) {
+		return true
+	}
+	// Some providers emit bare numeric token fields without JSON quoting in a
+	// pre-parsed adapter. Keep the conservative fallback for non-JSON data.
+	return protocol.NormalizeKind(kind) == protocol.KindAnthropic && strings.Contains(data, anthropicInputTokensMarker)
+}
+
+// Keep these byte slices package-global.  This function runs for every SSE
+// event; constructing a marker slice on each call would turn a cheap filter
+// into an allocation-heavy hot path.
+var usageFieldMarkers = []string{
+	`"usage"`,
+	`"prompt_tokens"`,
+	`"completion_tokens"`,
+	`"input_tokens"`,
+	`"output_tokens"`,
+	`"prompt_cache_hit_tokens"`,
+	`"cache_hit_tokens"`,
+	`"cache_read_input_tokens"`,
+	`"cached_tokens"`,
+	`"cache_read`,
+	`"cache_creation`,
+	`"cache_write`,
+	`"image_tokens"`,
+	`"reasoning_tokens"`,
+}
+
+var anthropicInputTokensMarker = "input_tokens"
 
 func (rt *Runtime) finalizeStreamTokens(live UsageTokens, raw []byte, kind protocolKind) UsageTokens {
 	if usageNonEmpty(live) {

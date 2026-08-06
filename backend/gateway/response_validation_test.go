@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"net/http"
 	"strings"
 	"testing"
@@ -55,6 +56,102 @@ func TestResponseValidatorModelAndProtocolSelectors(t *testing.T) {
 	}
 	if result := v.Validate(body, nil, "openai_chat", "gpt-4o"); !result.IsRejected() {
 		t.Fatalf("selectors did not match: %+v", result)
+	}
+}
+
+func TestResponseValidatorTargetPrefilterPreservesPriority(t *testing.T) {
+	v := mustResponseValidator(t, 8192, time.Second,
+		responseRuleSpec{ID: 11, Name: "higher-priority", Priority: 1, Enabled: true, Pattern: `(?i)quota exhausted`, Target: "error_message"},
+		responseRuleSpec{ID: 12, Name: "lower-priority", Priority: 2, Enabled: true, Pattern: `(?i)exhausted`, Target: "error_message"},
+		responseRuleSpec{ID: 13, Name: "raw", Priority: 3, Enabled: true, Pattern: `request-marker`, Target: "raw_body"},
+	)
+	if v.prefilters["error_message"] == nil {
+		t.Fatal("expected an error-message OR prefilter")
+	}
+	body := []byte(`{"error":{"message":"quota exhausted"},"request":"request-marker"}`)
+	result := v.Validate(body, nil, "openai_chat", "gpt-test")
+	if !result.IsRejected() || result.RuleID != 11 {
+		t.Fatalf("result=%+v, want the higher-priority rule", result)
+	}
+}
+
+func TestResponseValidatorTargetPrefilterKeepsSelectorsExact(t *testing.T) {
+	v := mustResponseValidator(t, 8192, time.Second,
+		responseRuleSpec{ID: 21, Name: "gpt-only", Priority: 1, Enabled: true, Pattern: `blocked`, Target: "assistant_text", Models: []string{"gpt-*"}},
+		responseRuleSpec{ID: 22, Name: "claude-only", Priority: 2, Enabled: true, Pattern: `blocked`, Target: "assistant_text", Models: []string{"claude-*"}},
+	)
+	if v.prefilters["assistant_text"] == nil {
+		t.Fatal("expected an assistant-text OR prefilter")
+	}
+	body := []byte(`{"choices":[{"message":{"content":"blocked"}}]}`)
+	for _, tc := range []struct {
+		model string
+		id    uint
+	}{
+		{model: "gpt-5", id: 21},
+		{model: "claude-3", id: 22},
+	} {
+		result := v.Validate(body, nil, "openai_chat", tc.model)
+		if !result.IsRejected() || result.RuleID != tc.id {
+			t.Fatalf("model=%q result=%+v, want rule %d", tc.model, result, tc.id)
+		}
+	}
+	if result := v.Validate(body, nil, "openai_chat", "gemini-2"); result.IsRejected() {
+		t.Fatalf("non-selected model unexpectedly matched: %+v", result)
+	}
+}
+
+func TestResponseValidatorTargetPrefilterPreservesEmptyMatches(t *testing.T) {
+	v := mustResponseValidator(t, 8192, time.Second,
+		responseRuleSpec{ID: 23, Name: "empty", Priority: 1, Enabled: true, Pattern: `^$`, Target: "raw_body"},
+		responseRuleSpec{ID: 24, Name: "other", Priority: 2, Enabled: true, Pattern: `blocked`, Target: "raw_body"},
+	)
+	if v.prefilters["raw_body"] == nil {
+		t.Fatal("expected a raw-body OR prefilter")
+	}
+	result := v.Validate(nil, nil, "openai_chat", "gpt-test")
+	if !result.IsRejected() || result.RuleID != 23 {
+		t.Fatalf("empty body result=%+v, want rule 23", result)
+	}
+}
+
+func TestStreamResponseValidatorCachesUnchangedPrefixCandidates(t *testing.T) {
+	v := mustResponseValidator(t, 4096, time.Second,
+		responseRuleSpec{ID: 31, Name: "assistant", Enabled: true, Pattern: `blocked`, Target: "assistant_text"},
+		responseRuleSpec{ID: 32, Name: "raw", Enabled: true, Pattern: `request-marker`, Target: "raw_body"},
+	)
+	stream := v.NewStreamValidator("openai_chat", "gpt-test")
+	frame := []byte(`data: {"choices":[{"delta":{"content":"safe"}}]}` + "\n\n")
+	if result := stream.Consume(frame); !result.IsPending() {
+		t.Fatalf("first result=%+v, want pending", result)
+	}
+	if !stream.prefixCandidates.valid || stream.prefixCandidates.rawLen != len(stream.prefixRaw) {
+		t.Fatalf("prefix candidate cache not populated: %+v", stream.prefixCandidates)
+	}
+	assistant := append([]byte(nil), stream.prefixCandidates.assistant...)
+	errorMessage := append([]byte(nil), stream.prefixCandidates.errorMessage...)
+	stream.prefixDirty = true
+	if result := stream.matchPrefix(); result.IsRejected() {
+		t.Fatalf("unchanged prefix unexpectedly rejected: %+v", result)
+	}
+	if !bytes.Equal(stream.prefixCandidates.assistant, assistant) || !bytes.Equal(stream.prefixCandidates.errorMessage, errorMessage) {
+		t.Fatalf("cached candidates changed for an unchanged prefix")
+	}
+	if result := stream.Consume([]byte(`data: {"choices":[{"delta":{"content":" blocked"}}]}` + "\n\n")); !result.IsRejected() {
+		t.Fatalf("cache was not invalidated after prefix growth: %+v", result)
+	}
+}
+
+func TestStreamResponseValidatorDoesNotSkipTransientAnchoredMatch(t *testing.T) {
+	v := mustResponseValidator(t, 4096, time.Second,
+		responseRuleSpec{ID: 33, Name: "anchored", Enabled: true, Pattern: `blocked$`, Target: "raw_body"},
+	)
+	stream := v.NewStreamValidator("openai_chat", "gpt-test")
+	if result := stream.Consume(bytes.Repeat([]byte("x"), 1024)); !result.IsPending() {
+		t.Fatalf("first result=%+v, want pending", result)
+	}
+	if result := stream.Consume([]byte("blocked")); !result.IsRejected() {
+		t.Fatalf("short chunk ending in an anchored match was skipped: %+v", result)
 	}
 }
 
@@ -362,6 +459,25 @@ func TestStreamResponseValidatorResponsesDataOnlyTerminalEvents(t *testing.T) {
 	}
 }
 
+func TestResponsesClassifierDecodesEscapedTypeMembers(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame string
+		want  responsesSSEFrameClass
+	}{
+		{name: "escaped key", frame: "data: {\"ty\\u0070e\":\"response.failed\"}\n\n", want: responsesSSEFrameTerminal},
+		{name: "escaped value", frame: "data: {\"type\":\"response.\\u0066ailed\"}\n\n", want: responsesSSEFrameTerminal},
+		{name: "case-insensitive key", frame: "data: {\"Type\":\"response.created\"}\n\n", want: responsesSSEFrameLifecycle},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyResponsesSSEFrame([]byte(strings.TrimSuffix(tt.frame, "\n\n"))); got != tt.want {
+				t.Fatalf("classifier = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStreamResponseValidatorResponsesUnknownCompleteFrameDoesNotDeadlock(t *testing.T) {
 	v := mustResponseValidator(t, 4096, 10*time.Millisecond, responseRuleSpec{
 		ID: 30, Name: "blocked", Enabled: true, Pattern: `blocked`, Target: "raw_body",
@@ -509,5 +625,51 @@ func BenchmarkStreamResponseValidatorResponsesLifecycleAfterPrefix(b *testing.B)
 		if result := stream.Consume(payload); !result.IsPending() {
 			b.Fatalf("lifecycle result=%+v", result)
 		}
+	}
+}
+
+func BenchmarkResponseValidatorManyRulesNoMatch(b *testing.B) {
+	targets := []string{"raw_body", "assistant_text", "error_message"}
+	rules := make([]responseRuleSpec, 0, len(targets)*9)
+	var id uint = 1
+	for _, target := range targets {
+		for i := 0; i < 9; i++ {
+			rules = append(rules, responseRuleSpec{
+				ID: id, Name: target, Enabled: true, Priority: int(id),
+				Pattern: target + "-retry-" + strings.Repeat("x", i+1), Target: target,
+			})
+			id++
+		}
+	}
+	v, err := newResponseValidator(responseValidationConfig{
+		Enabled: true, StreamMode: "prefix", PrefixBytes: 8192, PrefixTimeout: time.Second,
+	}, rules)
+	if err != nil {
+		b.Fatal(err)
+	}
+	withoutPrefilter := *v
+	withoutPrefilter.prefilters = nil
+	raw := bytes.Repeat([]byte("ordinary stream payload "), 128)
+	assistant := bytes.Repeat([]byte("safe assistant text "), 64)
+	errorMessage := bytes.Repeat([]byte("safe upstream status "), 64)
+	bytesPerOperation := int64(len(raw) + len(assistant) + len(errorMessage))
+
+	for _, benchmark := range []struct {
+		name      string
+		validator *responseValidator
+	}{
+		{name: "target-prefilter", validator: v},
+		{name: "per-rule", validator: &withoutPrefilter},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.SetBytes(bytesPerOperation)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if result := benchmark.validator.matchCompiled(benchmark.validator.rules, raw, assistant, errorMessage, false); result.IsRejected() {
+					b.Fatalf("unexpected rejection: %+v", result)
+				}
+			}
+		})
 	}
 }

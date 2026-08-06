@@ -364,6 +364,76 @@ MYSQL_ROOT_PASSWORD=请替换为 root 密码
 MYSQL_PORT=33069
 ```
 
+## 高负载部署与旧版一键升级
+
+当 `gateway_usage_logs` 持续增长（例如超过 5 万条或数据库文件超过约 128 MB）时，SQLite 的单写入连接会让统计查询和结算互相排队。程序启动时会在日志中提示升级；推荐使用 PostgreSQL 保存主数据，Redis 只作为可选的短期缓存，不承载费用、配额或结算真相。
+
+### 普通旧版本一键升级（Docker）
+
+普通升级默认使用 `ghcr.io/ai8888-shop/upstream-ops`。如果使用 fork 或私有镜像，可在运行目录的 `.env` 中设置 `IMAGE_REPOSITORY` 覆盖。升级成功后会在第一个 Compose 文件旁生成 `docker-compose.upstream-ops-image.yml`，并把它持久化到 `COMPOSE_FILE`，后续直接执行 `docker compose up` 也不会回退到旧的固定镜像。
+
+如果只升级镜像、保留现有数据库，请在包含 `docker-compose.yml`、`.env` 和 `data/` 的目录执行：
+
+```bash
+chmod +x scripts/upgrade.sh
+TARGET_TAG=v0.0.18 ./scripts/upgrade.sh
+```
+
+Windows PowerShell：
+
+```powershell
+.\scripts\upgrade.ps1 -TargetTag v0.0.18
+```
+
+脚本会备份 `data/` 与 `.env`、为旧镜像建立不可变的本地回滚标签、拉取目标版本、等待容器健康检查，并在成功后把目标 `IMAGE_TAG` 持久化到 `.env`；启动或健康检查失败时自动恢复旧镜像。非默认 compose 文件、服务名或端口可通过 `COMPOSE_FILE`、`SERVICE`、`HEALTH_URL`、`HEALTH_TIMEOUT_SECONDS` 覆盖。请在新版本完成请求、重试、计费核对后再清理 `backups/` 和回滚镜像标签。
+
+### SQLite 迁移到 PostgreSQL
+
+升级前先为 PostgreSQL 准备一个新的空数据库和独立账号，并在 `.env` 中设置：
+
+```env
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
+DATABASE_USER=upstreamops
+DATABASE_PASSWORD=请替换为数据库密码
+DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
+# PostgreSQL 与 upstream-ops 不在同一个网络时填写；外部网络必须已存在
+DATABASE_NETWORK_NAME=sub2api-localtest_default
+DATABASE_NETWORK_EXTERNAL=true
+```
+
+Linux/macOS 在项目目录执行：
+
+```bash
+chmod +x scripts/upgrade-to-postgres.sh
+./scripts/upgrade-to-postgres.sh
+```
+
+Windows PowerShell 执行：
+
+```powershell
+.\scripts\upgrade-to-postgres.ps1
+```
+
+脚本会停止应用、完整备份 `data/` 和 `.env`、拒绝写入非空目标库、逐表校验迁移行数，然后用 `docker-compose.postgres.yml` 启动并等待 `/healthz` 变为 healthy；成功后会把 PostgreSQL 连接参数和 `DATABASE_DRIVER=postgres` 持久化到 `.env`，后续普通重启不会切回 SQLite。迁移或新容器健康检查失败会自动恢复旧 SQLite 容器；备份目录保留用于人工回滚。PostgreSQL 位于另一个 Docker 网络时，设置 `DATABASE_NETWORK_NAME` + `DATABASE_NETWORK_EXTERNAL=true`（或临时设置 `MIGRATION_NETWORK`），脚本会同时把应用和迁移容器加入该网络。不要把数据库密码写入命令行或仓库。
+迁移前会把 SQLite 主文件及 `-wal`、`-shm` 等旁车文件复制到可写的临时快照，再交给迁移容器；成功、失败和回滚都会清理快照。迁移默认超时 30 分钟，可通过 `MIGRATION_TIMEOUT_SECONDS`（PowerShell 使用 `-MigrationTimeoutSeconds`）调整。
+
+也可以直接运行镜像内的迁移工具：
+
+```bash
+export DATABASE_PASSWORD="${DATABASE_PASSWORD:?set DATABASE_PASSWORD first}"
+docker run --rm --entrypoint /usr/local/bin/upstream-ops-migrate \
+  -v "$PWD/data:/app/data:ro" \
+  -e DATABASE_PASSWORD \
+  ghcr.io/ai8888-shop/upstream-ops:latest \
+  -source /app/data/upstream-ops.db -target-host "$DATABASE_HOST" \
+  -target-port 5432 -target-user "$DATABASE_USER" -target-name "$DATABASE_NAME"
+```
+
+旧版 SQLite 部署可直接执行上面的脚本完成一键升级；脚本默认使用同仓库 `latest` 镜像内的 `upstream-ops-migrate`，不会误用不含迁移工具的旧版镜像。私有仓库或固定版本可设置 `IMAGE`（PowerShell 使用 `-Image`）或 `MIGRATION_IMAGE_TAG`（PowerShell 使用 `-MigrationImageTag`）。迁移完成后保留原 SQLite 备份至少一个结算周期，确认 `/healthz`、网关请求、usage 统计和配额扣费均正常，再清理旧文件。非 Docker 部署可从 GitHub Release 下载同版本的 `upstream-ops-migrate` 二进制后执行等价迁移。
+指定 `TARGET_TAG` 时，迁移工具和新应用会使用同一个目标镜像；未指定时由 `MIGRATION_IMAGE_TAG`（默认 `latest`）同时决定两者。
+
 ## 环境变量
 
 ### 基础配置

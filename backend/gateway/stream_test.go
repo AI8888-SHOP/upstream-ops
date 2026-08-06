@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -47,6 +48,39 @@ func TestCommitSSEHeaders(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d", rec.Code)
+	}
+}
+
+func TestMayContainUsageFieldsCoversCacheAndDetailVariants(t *testing.T) {
+	for _, payload := range []string{
+		`{"prompt_cache_hit_tokens":12}`,
+		`{"cache_hit_tokens":12}`,
+		`{"cache_creation_5m_input_tokens":12}`,
+		`{"output_tokens_details":{"reasoning_tokens":12}}`,
+		`{"input_tokens_details":{"cached_tokens":12}}`,
+		`{"us\u0061ge":{"prompt_\u0074okens":12}}`,
+	} {
+		if !mayContainUsageFields(payload, protocol.KindOpenAIChat) {
+			t.Fatalf("usage prefilter rejected token payload %q", payload)
+		}
+	}
+	if mayContainUsageFields(`{"choices":[{"delta":{"content":"tokens"}}]}`, protocol.KindOpenAIChat) {
+		t.Fatal("usage prefilter matched ordinary content")
+	}
+}
+
+func TestAppendSSEDataCaptureKeepsBoundedPrefixOfLargeLine(t *testing.T) {
+	const limit = 128
+	var capture bytes.Buffer
+	appendSSEDataCapture(&capture, strings.Repeat("x", 1024), limit)
+	if capture.Len() == 0 || capture.Len() > limit {
+		t.Fatalf("capture length = %d, want 1..%d", capture.Len(), limit)
+	}
+	if !strings.HasPrefix(capture.String(), "data: xxx") {
+		t.Fatalf("large data line was discarded: %q", capture.String())
+	}
+	if !strings.HasSuffix(capture.String(), "\n\n") {
+		t.Fatalf("capture is not a complete SSE frame: %q", capture.String())
 	}
 }
 

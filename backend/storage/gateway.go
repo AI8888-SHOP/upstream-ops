@@ -7,6 +7,8 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -262,7 +264,7 @@ func (r *GatewayGroups) Clone(id uint, requestedName string, keyTemplates []Gate
 		return nil, fmt.Errorf("gateway group id is required")
 	}
 	result := &GatewayGroupCloneResult{
-		Keys:        make([]GatewayKey, 0, len(keyTemplates)),
+		Keys:         make([]GatewayKey, 0, len(keyTemplates)),
 		KeySourceIDs: make([]uint, 0, len(keyTemplates)),
 	}
 	err := r.db.Transaction(func(tx *gorm.DB) error {
@@ -491,12 +493,12 @@ const (
 
 // GatewayResponseRuleImportResult summarizes a successful import.
 type GatewayResponseRuleImportResult struct {
-	Strategy  GatewayResponseRuleImportStrategy `json:"strategy"`
-	Created   int                               `json:"created"`
-	Replaced  int                               `json:"replaced"`
-	Renamed   int                               `json:"renamed"`
-	Skipped   int                               `json:"skipped"`
-	Items     []GatewayResponseRule             `json:"items"`
+	Strategy GatewayResponseRuleImportStrategy `json:"strategy"`
+	Created  int                               `json:"created"`
+	Replaced int                               `json:"replaced"`
+	Renamed  int                               `json:"renamed"`
+	Skipped  int                               `json:"skipped"`
+	Items    []GatewayResponseRule             `json:"items"`
 }
 
 // NewGatewayResponseRules 构造响应规则仓储。
@@ -882,10 +884,28 @@ func normalizeResponseRuleListJSON(raw string, lower bool, maxItemBytes int) (st
 }
 
 // GatewayKeys 网关密钥仓储。
-type GatewayKeys struct{ db *gorm.DB }
+const gatewayKeyLastUsedWriteInterval = 30 * time.Second
+
+type GatewayKeys struct {
+	db *gorm.DB
+
+	// LastUsedAt is informational metadata. Keeping a short in-process write
+	// throttle prevents every streamed request from becoming a SQLite UPDATE;
+	// the first request after a process restart still records immediately. A
+	// per-key lock keeps a slow write for one key from blocking unrelated keys.
+	lastUsedMu sync.Mutex
+	lastUsed   map[uint]*gatewayKeyLastUsedState
+}
+
+type gatewayKeyLastUsedState struct {
+	mu sync.Mutex
+	at time.Time
+}
 
 // NewGatewayKeys 构造网关密钥仓储。
-func NewGatewayKeys(db *gorm.DB) *GatewayKeys { return &GatewayKeys{db: db} }
+func NewGatewayKeys(db *gorm.DB) *GatewayKeys {
+	return &GatewayKeys{db: db, lastUsed: make(map[uint]*gatewayKeyLastUsedState)}
+}
 
 // List 分页列表。
 func (r *GatewayKeys) List() ([]GatewayKey, error) {
@@ -940,14 +960,42 @@ func (r *GatewayKeys) Update(item *GatewayKey) error { return r.db.Save(item).Er
 
 // Delete 按主键删除。
 func (r *GatewayKeys) Delete(id uint) error {
-	return r.db.Delete(&GatewayKey{}, id).Error
+	err := r.db.Delete(&GatewayKey{}, id).Error
+	if err == nil {
+		r.lastUsedMu.Lock()
+		delete(r.lastUsed, id)
+		r.lastUsedMu.Unlock()
+	}
+	return err
 }
 
 // TouchLastUsed 更新密钥最近使用时间。
 func (r *GatewayKeys) TouchLastUsed(id uint, at time.Time) error {
-	return r.db.Model(&GatewayKey{}).Where("id = ?", id).Updates(map[string]any{
+	if r == nil || r.db == nil || id == 0 {
+		return nil
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	r.lastUsedMu.Lock()
+	state := r.lastUsed[id]
+	if state == nil {
+		state = &gatewayKeyLastUsedState{}
+		r.lastUsed[id] = state
+	}
+	r.lastUsedMu.Unlock()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.at.IsZero() && at.Sub(state.at) < gatewayKeyLastUsedWriteInterval {
+		return nil
+	}
+	err := r.db.Model(&GatewayKey{}).Where("id = ?", id).Updates(map[string]any{
 		"last_used_at": at,
 	}).Error
+	if err == nil {
+		state.at = at
+	}
+	return err
 }
 
 // AddQuotaUsed 累加密钥已用额度。
@@ -1389,17 +1437,73 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 }
 
 // GatewayUsageLogs 使用记录仓储。
-type GatewayUsageLogs struct{ db *gorm.DB }
+type GatewayUsageLogs struct {
+	db             *gorm.DB
+	statsMu        sync.Mutex
+	statsCache     map[gatewayStatsQueryKey]gatewayStatsCacheEntry
+	statsInFlight  map[gatewayStatsQueryKey]*gatewayStatsCall
+	statsLastWrite atomic.Int64
+}
+
+type gatewayStatsCacheEntry struct {
+	at    time.Time
+	value *GatewayUsageStats
+}
+
+type gatewayStatsQueryKey struct {
+	gatewayGroupID uint
+	gatewayKeyID   uint
+	channelID      uint
+	model          string
+	requestID      string
+	resultMode     string
+	requestType    int
+	requestTypeSet bool
+	successOnly    bool
+	successSet     bool
+	fromUnixNano   int64
+	fromSet        bool
+	toUnixNano     int64
+	toSet          bool
+}
+
+type gatewayStatsCall struct {
+	done  chan struct{}
+	value *GatewayUsageStats
+	err   error
+}
+
+const (
+	// Stats are an operator-facing aggregate, not a billing source of truth.
+	// Allow a short stale window under sustained write load so every request
+	// attempt does not force the expensive aggregate query back onto SQLite.
+	gatewayStatsCacheTTL        = 10 * time.Second
+	gatewayStatsRefreshInterval = 1 * time.Second
+	gatewayStatsCacheMaxEntries = 256
+)
 
 // NewGatewayUsageLogs 构造用量日志仓储。
-func NewGatewayUsageLogs(db *gorm.DB) *GatewayUsageLogs { return &GatewayUsageLogs{db: db} }
+func NewGatewayUsageLogs(db *gorm.DB) *GatewayUsageLogs {
+	return &GatewayUsageLogs{
+		db:            db,
+		statsCache:    make(map[gatewayStatsQueryKey]gatewayStatsCacheEntry),
+		statsInFlight: make(map[gatewayStatsQueryKey]*gatewayStatsCall),
+	}
+}
 
 // Create 插入记录。
 func (r *GatewayUsageLogs) Create(item *GatewayUsageLog) error {
+	if r == nil || r.db == nil || item == nil {
+		return fmt.Errorf("usage storage is unavailable")
+	}
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = time.Now()
 	}
-	return r.db.Create(item).Error
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.markStatsChanged()
+	}
+	return err
 }
 
 // GatewayFinalizeRequestInput 描述一次请求的终态。Delivered=false 也必须写入
@@ -1547,7 +1651,7 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 		}
 		// At most one attempt for a request is billable. Clearing first also makes
 		// a caller-provided pre-marked loser harmless under concurrent completion.
-		if err := tx.Model(&GatewayUsageLog{}).Where("request_id = ? AND gateway_key_id = ?", input.RequestID, input.GatewayKeyID).
+		if err := tx.Model(&GatewayUsageLog{}).Where("request_id = ? AND gateway_key_id = ? AND winner = ?", input.RequestID, input.GatewayKeyID, true).
 			Update("winner", false).Error; err != nil {
 			return err
 		}
@@ -1578,6 +1682,9 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 	})
 	if err != nil {
 		return false, err
+	}
+	if inserted && input.Delivered {
+		r.markStatsChanged()
 	}
 	return inserted, nil
 }
@@ -1705,6 +1812,9 @@ func (r *GatewayUsageLogs) DeleteBefore(before time.Time) (int64, error) {
 		}
 		return tx.Where("request_id NOT IN (?)", remaining).Delete(&GatewayRequestFinalization{}).Error
 	})
+	if err == nil && deleted > 0 {
+		r.markStatsChanged()
+	}
 	return deleted, err
 }
 
@@ -1723,6 +1833,9 @@ func (r *GatewayUsageLogs) DeleteAll() (int64, error) {
 		}
 		return tx.Where("1 = 1").Delete(&GatewayRequestFinalization{}).Error
 	})
+	if err == nil && deleted > 0 {
+		r.markStatsChanged()
+	}
 	return deleted, err
 }
 
@@ -1871,7 +1984,7 @@ func (r *GatewayUsageLogs) applyFilters(db *gorm.DB, q GatewayUsageQuery) *gorm.
 				GROUP BY request_id
 				HAVING (COUNT(*) > 1 OR MAX(attempt) > 1
 					OR SUM(CASE WHEN attempt_kind IN ('retry','failover','recovery') THEN 1 ELSE 0 END) > 0)
-					AND SUM(CASE WHEN success = 1 OR success = true THEN 1 ELSE 0 END) > 0
+				AND SUM(CASE WHEN success THEN 1 ELSE 0 END) > 0
 			)`,
 		)
 	case "multi_fail", "chain_fail":
@@ -1882,7 +1995,7 @@ func (r *GatewayUsageLogs) applyFilters(db *gorm.DB, q GatewayUsageQuery) *gorm.
 				GROUP BY request_id
 					HAVING (COUNT(*) > 1 OR MAX(attempt) > 1
 					OR SUM(CASE WHEN attempt_kind IN ('retry','failover','recovery') THEN 1 ELSE 0 END) > 0)
-					AND SUM(CASE WHEN success = 1 OR success = true THEN 1 ELSE 0 END) = 0
+					AND SUM(CASE WHEN success THEN 1 ELSE 0 END) = 0
 			)`,
 		)
 	default:
@@ -2166,6 +2279,80 @@ func isAllASCIIDigits(s string) bool {
 
 // Stats 用量聚合统计。
 func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	key := gatewayStatsCacheKey(q)
+	r.statsMu.Lock()
+	if r.statsCache == nil {
+		r.statsCache = make(map[gatewayStatsQueryKey]gatewayStatsCacheEntry)
+	}
+	if ent, ok := r.statsCache[key]; ok && time.Since(ent.at) < gatewayStatsCacheTTL {
+		lastWriteUnixNano := r.statsLastWrite.Load()
+		changedSinceCache := lastWriteUnixNano > 0 && ent.at.UnixNano() < lastWriteUnixNano
+		// A write starts a refresh interval. Serve the previous aggregate for
+		// at most one interval, then let single-flight rebuild it once.
+		if !changedSinceCache || time.Since(ent.at) < gatewayStatsRefreshInterval {
+			value := cloneGatewayUsageStats(ent.value)
+			r.statsMu.Unlock()
+			return value, nil
+		}
+	}
+	if r.statsInFlight == nil {
+		r.statsInFlight = make(map[gatewayStatsQueryKey]*gatewayStatsCall)
+	}
+	if call, ok := r.statsInFlight[key]; ok {
+		r.statsMu.Unlock()
+		<-call.done
+		return cloneGatewayUsageStats(call.value), call.err
+	}
+	queryStartedAt := time.Now()
+	call := &gatewayStatsCall{done: make(chan struct{})}
+	r.statsInFlight[key] = call
+	r.statsMu.Unlock()
+
+	value, err := r.statsUncached(q)
+	r.statsMu.Lock()
+	call.value = value
+	call.err = err
+	if err == nil {
+		// Anchor freshness to the query start. If rows were appended while the
+		// aggregate was running, the cache must become eligible for refresh
+		// after the short coalescing window rather than receiving a new full TTL
+		// from the query completion time.
+		if len(r.statsCache) >= gatewayStatsCacheMaxEntries {
+			var oldestKey gatewayStatsQueryKey
+			var oldestAt time.Time
+			for candidate, entry := range r.statsCache {
+				if oldestAt.IsZero() || entry.at.Before(oldestAt) {
+					oldestKey, oldestAt = candidate, entry.at
+				}
+			}
+			if !oldestAt.IsZero() {
+				delete(r.statsCache, oldestKey)
+			}
+		}
+		r.statsCache[key] = gatewayStatsCacheEntry{at: queryStartedAt, value: value}
+	}
+	delete(r.statsInFlight, key)
+	close(call.done)
+	r.statsMu.Unlock()
+	return cloneGatewayUsageStats(value), err
+}
+
+// markStatsChanged is intentionally lock-free because every upstream attempt
+// writes a usage row. Stats anchors cached results to their query start and
+// compares that timestamp with this marker, so a concurrent write makes the
+// result refreshable after the short coalescing window without putting the
+// request hot path behind the aggregate cache mutex.
+func (r *GatewayUsageLogs) markStatsChanged() {
+	if r == nil {
+		return
+	}
+	r.statsLastWrite.Store(time.Now().UnixNano())
+}
+
+func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStats, error) {
 	db := r.applyFilters(r.db.Model(&GatewayUsageLog{}), q)
 	type aggRow struct {
 		TotalRequests            int64
@@ -2243,6 +2430,45 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 
 // ListModels 聚合使用记录中的 requested_model，供筛选下拉。
 // 沿用组/密钥/时间筛选；忽略 model / result / request_id（避免自过滤）。
+func gatewayStatsCacheKey(q GatewayUsageQuery) gatewayStatsQueryKey {
+	key := gatewayStatsQueryKey{
+		gatewayGroupID: q.GatewayGroupID,
+		gatewayKeyID:   q.GatewayKeyID,
+		channelID:      q.ChannelID,
+		model:          strings.TrimSpace(q.Model),
+		requestID:      strings.TrimSpace(q.RequestID),
+		resultMode:     strings.ToLower(strings.TrimSpace(q.ResultMode)),
+	}
+	if q.From != nil {
+		key.fromSet = true
+		key.fromUnixNano = q.From.UnixNano()
+	}
+	if q.To != nil {
+		key.toSet = true
+		key.toUnixNano = q.To.UnixNano()
+	}
+	if q.SuccessOnly != nil {
+		key.successSet = true
+		key.successOnly = *q.SuccessOnly
+	}
+	if q.RequestType != nil {
+		key.requestTypeSet = true
+		key.requestType = *q.RequestType
+	}
+	return key
+}
+
+func cloneGatewayUsageStats(value *GatewayUsageStats) *GatewayUsageStats {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	if value.Endpoints != nil {
+		clone.Endpoints = append([]GatewayEndpointStat(nil), value.Endpoints...)
+	}
+	return &clone
+}
+
 func (r *GatewayUsageLogs) ListModels(q GatewayUsageQuery) ([]GatewayUsageModelOption, error) {
 	q.Model = ""
 	q.RequestID = ""
@@ -2300,7 +2526,15 @@ func (r *GatewayUsageLogs) performanceRPMAndTPM(q GatewayUsageQuery) (rpm, tpm i
 }
 
 // ModelPriceOverrides 价格覆盖表。
-type ModelPriceOverrides struct{ db *gorm.DB }
+type ModelPriceOverrides struct {
+	db            *gorm.DB
+	mu            sync.RWMutex
+	cache         map[string]ModelPriceOverride
+	cacheLoaded   bool
+	cacheLoadedAt time.Time
+}
+
+const modelPriceOverrideCacheTTL = 30 * time.Second
 
 // NewModelPriceOverrides 构造模型价目覆盖仓储。
 func NewModelPriceOverrides(db *gorm.DB) *ModelPriceOverrides {
@@ -2317,11 +2551,52 @@ func (r *ModelPriceOverrides) List() ([]ModelPriceOverride, error) {
 }
 
 func (r *ModelPriceOverrides) FindByModel(name string) (*ModelPriceOverride, error) {
-	var item ModelPriceOverride
-	if err := r.db.Where("model_name = ?", name).First(&item).Error; err != nil {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	if err := r.ensureCache(); err != nil {
 		return nil, err
 	}
+	r.mu.RLock()
+	item, ok := r.cache[name]
+	if !ok {
+		item, ok = r.cache[strings.ToLower(name)]
+	}
+	r.mu.RUnlock()
+	if !ok {
+		return nil, gorm.ErrRecordNotFound
+	}
 	return &item, nil
+}
+
+func (r *ModelPriceOverrides) ensureCache() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cacheLoaded && time.Since(r.cacheLoadedAt) < modelPriceOverrideCacheTTL {
+		return nil
+	}
+	list, err := r.List()
+	if err != nil {
+		return err
+	}
+	cache := make(map[string]ModelPriceOverride, len(list)*2)
+	for _, item := range list {
+		cache[item.ModelName] = item
+		cache[strings.ToLower(strings.TrimSpace(item.ModelName))] = item
+	}
+	r.cache = cache
+	r.cacheLoaded = true
+	r.cacheLoadedAt = time.Now()
+	return nil
+}
+
+func (r *ModelPriceOverrides) invalidateCache() {
+	r.mu.Lock()
+	r.cacheLoaded = false
+	r.cache = nil
+	r.cacheLoadedAt = time.Time{}
+	r.mu.Unlock()
 }
 
 // Upsert 按模型名插入或更新价目覆盖。
@@ -2334,12 +2609,20 @@ func (r *ModelPriceOverrides) Upsert(item *ModelPriceOverride) error {
 			item.CreatedAt = existing.CreatedAt
 		}
 	}
-	return r.db.Save(item).Error
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.invalidateCache()
+	}
+	return err
 }
 
 // Delete 按主键删除。
 func (r *ModelPriceOverrides) Delete(id uint) error {
-	return r.db.Delete(&ModelPriceOverride{}, id).Error
+	err := r.db.Delete(&ModelPriceOverride{}, id).Error
+	if err == nil {
+		r.invalidateCache()
+	}
+	return err
 }
 
 // ListEnabledMap 返回启用中的价目覆盖 map。

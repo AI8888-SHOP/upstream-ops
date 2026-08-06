@@ -83,12 +83,25 @@ type compiledResponseRule struct {
 	re *regexp.Regexp
 }
 
+// responseRulePrefilters are only a cheap "could this target match?" gate.
+// The original ordered rule loop remains authoritative so a prefilter can
+// never change rule priority, selectors, or the matched text recorded in the
+// validation result.
+type responseRulePrefilters map[string]*regexp.Regexp
+
+type responsePrefilterMatches struct {
+	rawBody       bool
+	assistantText bool
+	errorMessage  bool
+}
+
 type responseValidator struct {
 	enabled       bool
 	streamMode    string
 	prefixBytes   int
 	prefixTimeout time.Duration
 	rules         []compiledResponseRule
+	prefilters    responseRulePrefilters
 }
 
 func newResponseValidator(cfg responseValidationConfig, rules []responseRuleSpec) (*responseValidator, error) {
@@ -144,7 +157,74 @@ func newResponseValidator(cfg responseValidationConfig, rules []responseRuleSpec
 		}
 		v.rules = append(v.rules, compiledResponseRule{responseRuleSpec: rule, re: re})
 	}
+	v.prefilters = buildResponseRulePrefilters(v.rules)
 	return v, nil
+}
+
+// buildResponseRulePrefilters combines rules by target so a no-match stream
+// does one RE2 scan per target instead of scanning every rule independently.
+// Each branch is wrapped in its own capture group because Go's regexp package
+// does not support non-capturing groups. The capture values are deliberately
+// ignored; this regexp is only a boolean prefilter.
+func buildResponseRulePrefilters(rules []compiledResponseRule) responseRulePrefilters {
+	branches := make(map[string][]string)
+	for _, rule := range rules {
+		if rule.re == nil || strings.TrimSpace(rule.Pattern) == "" {
+			continue
+		}
+		branches[rule.Target] = append(branches[rule.Target], "("+rule.Pattern+")")
+	}
+	prefilters := make(responseRulePrefilters, len(branches))
+	for target, targetBranches := range branches {
+		// A single rule would be scanned twice (prefilter + authoritative
+		// match), so only build a prefilter when it removes real duplication.
+		if len(targetBranches) < 2 {
+			continue
+		}
+		combined, err := regexp.Compile(strings.Join(targetBranches, "|"))
+		if err != nil {
+			// Individual rules have already compiled successfully. A combined
+			// expression can still be rejected by a regexp program-size or
+			// capture-name limit; simply fall back to the original path.
+			continue
+		}
+		prefilters[target] = combined
+	}
+	return prefilters
+}
+
+func (v *responseValidator) prefilterMatches(raw, assistant, errorMessage []byte) responsePrefilterMatches {
+	if v == nil {
+		return responsePrefilterMatches{rawBody: true, assistantText: true, errorMessage: true}
+	}
+	return prefilterMatches(v.prefilters, raw, assistant, errorMessage)
+}
+
+func prefilterMatches(prefilters responseRulePrefilters, raw, assistant, errorMessage []byte) responsePrefilterMatches {
+	possible := responsePrefilterMatches{rawBody: true, assistantText: true, errorMessage: true}
+	if prefilter := prefilters["raw_body"]; prefilter != nil {
+		possible.rawBody = prefilter.Match(raw)
+	}
+	if prefilter := prefilters["assistant_text"]; prefilter != nil {
+		possible.assistantText = prefilter.Match(assistant)
+	}
+	if prefilter := prefilters["error_message"]; prefilter != nil {
+		possible.errorMessage = prefilter.Match(errorMessage)
+	}
+	return possible
+}
+
+func (p responsePrefilterMatches) allows(target string) bool {
+	switch target {
+	case "raw_body":
+		return p.rawBody
+	case "assistant_text":
+		return p.assistantText
+	case "error_message":
+		return p.errorMessage
+	default:
+		return true
+	}
 }
 
 func (v *responseValidator) Enabled() bool {
@@ -199,8 +279,12 @@ func (v *responseValidator) match(protocolName, model string, raw, assistant, er
 	if !v.Enabled() {
 		return acceptedValidation()
 	}
+	possible := v.prefilterMatches(raw, assistant, errorMessage)
 	for _, rule := range v.rules {
 		if !responseRuleApplies(rule, protocolName, model) {
+			continue
+		}
+		if !possible.allows(rule.Target) {
 			continue
 		}
 		if result := matchCompiledResponseRule(rule, raw, assistant, errorMessage, postCommit); result.IsRejected() {
@@ -211,10 +295,22 @@ func (v *responseValidator) match(protocolName, model string, raw, assistant, er
 }
 
 func (v *responseValidator) matchCompiled(rules []compiledResponseRule, raw, assistant, errorMessage []byte, postCommit bool) validationResult {
+	return v.matchCompiledWithPrefilters(rules, v.prefilters, raw, assistant, errorMessage, postCommit)
+}
+
+// matchCompiledWithPrefilters is the stream-aware variant of matchCompiled.
+// A stream usually has only a subset of the gateway rules (after protocol and
+// model selectors are applied), so using a prefilter built for that subset
+// avoids scanning unrelated expressions on every SSE chunk.
+func (v *responseValidator) matchCompiledWithPrefilters(rules []compiledResponseRule, prefilters responseRulePrefilters, raw, assistant, errorMessage []byte, postCommit bool) validationResult {
 	if !v.Enabled() {
 		return acceptedValidation()
 	}
+	possible := prefilterMatches(prefilters, raw, assistant, errorMessage)
 	for _, rule := range rules {
+		if !possible.allows(rule.Target) {
+			continue
+		}
 		if result := matchCompiledResponseRule(rule, raw, assistant, errorMessage, postCommit); result.IsRejected() {
 			return result
 		}
@@ -232,7 +328,9 @@ func matchCompiledResponseRule(rule compiledResponseRule, raw, assistant, errorM
 	default:
 		candidate = assistant
 	}
-	if len(candidate) == 0 || !rule.re.Match(candidate) {
+	// Empty candidates remain valid inputs: a rule such as ^$ deliberately
+	// matches an empty upstream response.
+	if !rule.re.Match(candidate) {
 		return acceptedValidation()
 	}
 	matched := string(candidate)
@@ -279,30 +377,43 @@ func acceptedValidation() validationResult { return validationResult{Decision: v
 // exposed. After the prefix is accepted, later bytes are retained only for a
 // single end-of-stream audit; they never switch an already-visible response.
 type streamResponseValidator struct {
-	validator      *responseValidator
-	protocolName   string
-	model          string
-	rules          []compiledResponseRule
-	needsAssistant bool
-	needsError     bool
-	firstContentAt time.Time
-	commitEligible bool
-	timeoutElapsed bool
-	terminalSeen   bool
-	bytesSeen      int
-	prefixReady    bool
-	committed      bool
-	prefixRaw      []byte
-	postRaw        []byte
-	postStart      int
-	prefixDirty    bool
-	preCommitDirty bool
-	prefixResult   validationResult
-	postAuditDone  bool
-	result         validationResult
-	postResult     validationResult
-	responsesSSE   responsesSSEClassifier
+	validator               *responseValidator
+	protocolName            string
+	model                   string
+	rules                   []compiledResponseRule
+	needsAssistant          bool
+	needsError              bool
+	firstContentAt          time.Time
+	commitEligible          bool
+	timeoutElapsed          bool
+	terminalSeen            bool
+	bytesSeen               int
+	prefixReady             bool
+	committed               bool
+	prefixRaw               []byte
+	postRaw                 []byte
+	postStart               int
+	prefixDirty             bool
+	preCommitDirty          bool
+	prefixResult            validationResult
+	postAuditDone           bool
+	result                  validationResult
+	postResult              validationResult
+	prefixCandidates        streamPrefixCandidateCache
+	prefilters              responseRulePrefilters
+	responsesSSE            responsesSSEClassifier
 	responsesPrefixOverflow bool
+}
+
+// streamPrefixCandidateCache avoids parsing the same prefix more than once
+// when the gate asks for a result repeatedly without appending new bytes.
+// prefixRaw is append-only for the lifetime of a pre-commit stream, so its
+// length is a stable identity for the cached extraction.
+type streamPrefixCandidateCache struct {
+	valid        bool
+	rawLen       int
+	assistant    []byte
+	errorMessage []byte
 }
 
 func (v *responseValidator) NewStreamValidator(protocolName, model string) *streamResponseValidator {
@@ -323,6 +434,18 @@ func (v *responseValidator) NewStreamValidator(protocolName, model string) *stre
 				s.needsAssistant = true
 			case "error_message":
 				s.needsError = true
+			}
+		}
+		// Reuse the validator-level compiled prefilters.  Recompiling a combined
+		// regexp for every upstream attempt costs more CPU than the scan it is
+		// meant to avoid.  Restrict the map to targets used by this stream so
+		// inactive target payloads are not parsed at all.
+		if len(v.prefilters) > 0 {
+			s.prefilters = make(responseRulePrefilters, len(v.prefilters))
+			for _, rule := range s.rules {
+				if prefilter := v.prefilters[rule.Target]; prefilter != nil {
+					s.prefilters[rule.Target] = prefilter
+				}
 			}
 		}
 	}
@@ -479,7 +602,7 @@ func (s *streamResponseValidator) AuditPostCommit() validationResult {
 	if s.needsError {
 		errorMessage = []byte(extractResponseErrorMessage(combined, nil))
 	}
-	result := s.validator.matchCompiled(s.rules, combined, assistant, errorMessage, true)
+	result := s.validator.matchCompiledWithPrefilters(s.rules, s.prefilters, combined, assistant, errorMessage, true)
 	if result.IsRejected() {
 		s.postResult = result
 	}
@@ -552,19 +675,31 @@ func (s *streamResponseValidator) matchPrefix() validationResult {
 	if !s.prefixDirty {
 		return s.prefixResult
 	}
-	var assistant, errorMessage []byte
-	if s.needsAssistant {
-		assistant = []byte(extractAssistantText(s.prefixRaw, http.Header{"Content-Type": []string{"text/event-stream"}}))
-	}
-	if s.needsError {
-		errorMessage = []byte(extractResponseErrorMessage(s.prefixRaw, nil))
-	}
-	s.prefixResult = s.validator.matchCompiled(s.rules, s.prefixRaw, assistant, errorMessage, false)
+	assistant, errorMessage := s.cachedPrefixCandidates()
+	s.prefixResult = s.validator.matchCompiledWithPrefilters(s.rules, s.prefilters, s.prefixRaw, assistant, errorMessage, false)
 	s.prefixDirty = false
 	if len(s.postRaw) == 0 {
 		s.preCommitDirty = false
 	}
 	return s.prefixResult
+}
+
+func (s *streamResponseValidator) cachedPrefixCandidates() (assistant, errorMessage []byte) {
+	if s == nil {
+		return nil, nil
+	}
+	if cache := &s.prefixCandidates; cache.valid && cache.rawLen == len(s.prefixRaw) {
+		return cache.assistant, cache.errorMessage
+	}
+	cache := streamPrefixCandidateCache{valid: true, rawLen: len(s.prefixRaw)}
+	if s.needsAssistant {
+		cache.assistant = []byte(extractAssistantText(s.prefixRaw, http.Header{"Content-Type": []string{"text/event-stream"}}))
+	}
+	if s.needsError {
+		cache.errorMessage = []byte(extractResponseErrorMessage(s.prefixRaw, nil))
+	}
+	s.prefixCandidates = cache
+	return cache.assistant, cache.errorMessage
 }
 
 func (s *streamResponseValidator) matchPreCommitBuffered() validationResult {
@@ -584,7 +719,7 @@ func (s *streamResponseValidator) matchPreCommitBuffered() validationResult {
 	if s.needsError {
 		errorMessage = []byte(extractResponseErrorMessage(combined, nil))
 	}
-	s.prefixResult = s.validator.matchCompiled(s.rules, combined, assistant, errorMessage, false)
+	s.prefixResult = s.validator.matchCompiledWithPrefilters(s.rules, s.prefilters, combined, assistant, errorMessage, false)
 	s.prefixDirty = false
 	s.preCommitDirty = false
 	return s.prefixResult
@@ -601,7 +736,7 @@ func (s *streamResponseValidator) matchPreCommitCandidate(raw []byte) validation
 	if s.needsError {
 		errorMessage = []byte(extractResponseErrorMessage(raw, nil))
 	}
-	return s.validator.matchCompiled(s.rules, raw, assistant, errorMessage, false)
+	return s.validator.matchCompiledWithPrefilters(s.rules, s.prefilters, raw, assistant, errorMessage, false)
 }
 
 func (s *streamResponseValidator) appendPost(chunk []byte) {
@@ -995,6 +1130,16 @@ const (
 	responsesSSEFrameTerminal
 )
 
+// These field names are shared by every Responses SSE frame. Keeping them as
+// package-level byte slices avoids constructing a new []byte for each line in
+// the classifier's hot path.
+var (
+	sseFieldEvent = []byte("event")
+	sseFieldData  = []byte("data")
+	sseFieldID    = []byte("id")
+	sseFieldRetry = []byte("retry")
+)
+
 // responsesSSEClassifier owns the incomplete frame across Write calls. SSE
 // frame boundaries are transport-independent, so one Write may contain a
 // partial frame, one frame, or several frames.
@@ -1113,78 +1258,113 @@ func nextSSEFrameBoundary(data []byte, from int) (int, int) {
 	if from >= len(data) {
 		return -1, 0
 	}
-	bestIndex, bestSize := -1, 0
-	for _, separator := range [][]byte{[]byte("\r\n\r\n"), []byte("\n\r\n"), []byte("\n\n"), []byte("\r\r")} {
-		if offset := bytes.Index(data[from:], separator); offset >= 0 {
-			index := from + offset
-			if bestIndex < 0 || index < bestIndex {
-				bestIndex = index
-				bestSize = len(separator)
+	// Scan once instead of running four bytes.Index calls (and allocating a
+	// temporary separator slice) for every classifier invocation. The scan
+	// starts a few bytes before the end of an incomplete frame, so all valid
+	// separators that cross a Write boundary are still considered.
+	for index := from; index < len(data); index++ {
+		switch data[index] {
+		case '\r':
+			if index+3 < len(data) && data[index+1] == '\n' && data[index+2] == '\r' && data[index+3] == '\n' {
+				return index, 4
+			}
+			if index+1 < len(data) && data[index+1] == '\r' {
+				return index, 2
+			}
+		case '\n':
+			if index+2 < len(data) && data[index+1] == '\r' && data[index+2] == '\n' {
+				return index, 3
+			}
+			if index+1 < len(data) && data[index+1] == '\n' {
+				return index, 2
 			}
 		}
 	}
-	return bestIndex, bestSize
+	return -1, 0
 }
 
 func classifyResponsesSSEFrame(frame []byte) responsesSSEFrameClass {
-	var eventName string
-	data := make([]byte, 0, minResponseInt(len(frame), maxResponsesClassifyBytes))
+	var eventName []byte
+	var firstData, data []byte
 	sawData := false
 	malformed := false
-	lines := bytes.Split(frame, []byte{'\n'})
-	if len(lines) == 1 && bytes.Contains(frame, []byte{'\r'}) {
-		lines = bytes.Split(frame, []byte{'\r'})
-	}
-	for _, rawLine := range lines {
-		line := bytes.TrimSuffix(rawLine, []byte{'\r'})
+	for offset := 0; offset < len(frame); {
+		lineStart := offset
+		for offset < len(frame) && frame[offset] != '\n' && frame[offset] != '\r' {
+			offset++
+		}
+		line := frame[lineStart:offset]
+		if offset < len(frame) {
+			if frame[offset] == '\r' {
+				offset++
+				if offset < len(frame) && frame[offset] == '\n' {
+					offset++
+				}
+			} else {
+				offset++
+			}
+		}
 		if len(line) == 0 || line[0] == ':' {
 			continue
 		}
-		field, value, found := bytes.Cut(line, []byte{':'})
-		if !found {
+		fieldEnd := bytes.IndexByte(line, ':')
+		if fieldEnd < 0 {
 			malformed = true
 			continue
 		}
+		field, value := line[:fieldEnd], line[fieldEnd+1:]
 		if len(value) > 0 && value[0] == ' ' {
 			value = value[1:]
 		}
-		switch string(field) {
-		case "event":
-			eventName = strings.TrimSpace(string(value))
-		case "data":
-			if sawData && len(data) < maxResponsesClassifyBytes {
+		switch {
+		case bytes.Equal(field, sseFieldEvent):
+			eventName = bytes.TrimSpace(value)
+		case bytes.Equal(field, sseFieldData):
+			if !sawData {
+				limit := minResponseInt(len(value), maxResponsesClassifyBytes)
+				firstData = value[:limit:limit]
+				sawData = true
+				continue
+			}
+			// A second data line needs a private buffer because append must not
+			// overwrite the source frame while it is still being classified.
+			if data == nil {
+				data = make([]byte, 0, minResponseInt(len(frame), maxResponsesClassifyBytes))
+				data = append(data, firstData...)
+			}
+			if len(data) < maxResponsesClassifyBytes {
 				data = append(data, '\n')
-			}
-			sawData = true
-			remaining := maxResponsesClassifyBytes - len(data)
-			if remaining > len(value) {
-				remaining = len(value)
-			}
-			if remaining > 0 {
+				remaining := maxResponsesClassifyBytes - len(data)
+				if remaining > len(value) {
+					remaining = len(value)
+				}
 				data = append(data, value[:remaining]...)
 			}
-		case "id", "retry":
+		case bytes.Equal(field, sseFieldID), bytes.Equal(field, sseFieldRetry):
 			// SSE control fields do not make a Responses frame visible.
 		default:
 			malformed = true
 		}
 	}
 
+	if data == nil {
+		data = firstData
+	}
 	payload := bytes.TrimSpace(data)
 	if bytes.Equal(payload, []byte("[DONE]")) {
 		return responsesSSEFrameTerminal
 	}
-	dataType := responsesPayloadType(payload)
-	if isResponsesTerminalEvent(eventName) || isResponsesTerminalEvent(dataType) {
+	dataType := responsesPayloadTypeBytes(payload)
+	if isResponsesTerminalEventBytes(eventName) || isResponsesTerminalEventBytes(dataType) {
 		return responsesSSEFrameTerminal
 	}
-	if eventName != "" && !isResponsesLifecycleEvent(eventName) {
+	if len(eventName) > 0 && !isResponsesLifecycleEventBytes(eventName) {
 		return responsesSSEFrameContent
 	}
-	if dataType != "" && !isResponsesLifecycleEvent(dataType) {
+	if len(dataType) > 0 && !isResponsesLifecycleEventBytes(dataType) {
 		return responsesSSEFrameContent
 	}
-	if eventName != "" || dataType != "" {
+	if len(eventName) > 0 || len(dataType) > 0 {
 		return responsesSSEFrameLifecycle
 	}
 	if sawData || malformed {
@@ -1212,6 +1392,193 @@ func responsesPayloadType(payload []byte) string {
 		return strings.TrimSpace(envelope.Type)
 	}
 	return ""
+}
+
+// responsesPayloadTypeBytes extracts a root JSON string member without
+// unmarshalling the complete payload. Responses lifecycle frames often carry
+// large response objects; decoding those objects solely to classify the frame
+// was a significant source of allocations on the streaming path. The returned
+// slice aliases payload and is only valid for the duration of classification.
+func responsesPayloadTypeBytes(payload []byte) []byte {
+	if len(payload) == 0 {
+		return nil
+	}
+	pos := 0
+	skipJSONSpaceBytes(payload, &pos)
+	if pos >= len(payload) || payload[pos] != '{' {
+		return nil
+	}
+	pos++
+	for {
+		skipJSONSpaceBytes(payload, &pos)
+		if pos >= len(payload) || payload[pos] == '}' {
+			return nil
+		}
+		if payload[pos] == ',' {
+			pos++
+			continue
+		}
+		key, ok := scanJSONStringRaw(payload, &pos)
+		if !ok {
+			return nil
+		}
+		skipJSONSpaceBytes(payload, &pos)
+		if pos >= len(payload) || payload[pos] != ':' {
+			return nil
+		}
+		pos++
+		skipJSONSpaceBytes(payload, &pos)
+		if bytes.EqualFold(key, []byte("type")) {
+			value, ok := scanJSONStringRaw(payload, &pos)
+			if !ok {
+				return nil
+			}
+			// The fast scanner intentionally keeps common ASCII values aliased
+			// to the payload. Escaped keys or values need the existing JSON
+			// decoder so sequences such as ty\u0070e and response.\u0066ailed
+			// retain their old classification semantics.
+			if bytes.IndexByte(key, '\\') >= 0 || bytes.IndexByte(value, '\\') >= 0 {
+				return []byte(responsesPayloadType(payload))
+			}
+			return value
+		}
+		if bytes.IndexByte(key, '\\') >= 0 {
+			return []byte(responsesPayloadType(payload))
+		}
+		if !skipJSONValueBytes(payload, &pos) {
+			return nil
+		}
+	}
+}
+
+func skipJSONSpaceBytes(data []byte, pos *int) {
+	for *pos < len(data) {
+		switch data[*pos] {
+		case ' ', '\t', '\r', '\n':
+			(*pos)++
+		default:
+			return
+		}
+	}
+}
+
+// scanJSONStringRaw advances over a JSON string and returns its raw contents
+// (without the surrounding quotes). Event type values are ASCII and normally
+// unescaped, so retaining the raw slice avoids a string allocation.
+func scanJSONStringRaw(data []byte, pos *int) ([]byte, bool) {
+	if *pos >= len(data) || data[*pos] != '"' {
+		return nil, false
+	}
+	start := *pos + 1
+	*pos = start
+	for *pos < len(data) {
+		switch data[*pos] {
+		case '"':
+			value := data[start:*pos]
+			(*pos)++
+			return value, true
+		case '\\':
+			(*pos)++
+			if *pos >= len(data) {
+				return nil, false
+			}
+			(*pos)++
+		default:
+			(*pos)++
+		}
+	}
+	return nil, false
+}
+
+func skipJSONValueBytes(data []byte, pos *int) bool {
+	if *pos >= len(data) {
+		return false
+	}
+	switch data[*pos] {
+	case '"':
+		_, ok := scanJSONStringRaw(data, pos)
+		return ok
+	case '{', '[':
+		open := data[*pos]
+		close := byte('}')
+		if open == '[' {
+			close = ']'
+		}
+		depth := 0
+		inString := false
+		escaped := false
+		for *pos < len(data) {
+			current := data[*pos]
+			if inString {
+				if escaped {
+					escaped = false
+				} else if current == '\\' {
+					escaped = true
+				} else if current == '"' {
+					inString = false
+				}
+				(*pos)++
+				continue
+			}
+			switch current {
+			case '"':
+				inString = true
+			case open:
+				depth++
+			case close:
+				depth--
+				if depth == 0 {
+					(*pos)++
+					return true
+				}
+			}
+			(*pos)++
+		}
+		return false
+	default:
+		start := *pos
+		for *pos < len(data) {
+			switch data[*pos] {
+			case ',', '}', ']', ' ', '\t', '\r', '\n':
+				return *pos > start
+			default:
+				(*pos)++
+			}
+		}
+		return *pos > start
+	}
+}
+
+func isResponsesLifecycleEventBytes(eventType []byte) bool {
+	eventType = bytes.TrimSpace(eventType)
+	switch {
+	case bytes.EqualFold(eventType, []byte("response.created")),
+		bytes.EqualFold(eventType, []byte("response.in_progress")),
+		bytes.EqualFold(eventType, []byte("response.queued")),
+		bytes.EqualFold(eventType, []byte("response.output_item.added")),
+		bytes.EqualFold(eventType, []byte("response.content_part.added")),
+		bytes.EqualFold(eventType, []byte("response.reasoning_summary_part.added")):
+		return true
+	default:
+		return false
+	}
+}
+
+func isResponsesTerminalEventBytes(eventType []byte) bool {
+	eventType = bytes.TrimSpace(eventType)
+	switch {
+	case bytes.EqualFold(eventType, []byte("error")),
+		bytes.EqualFold(eventType, []byte("response.error")),
+		bytes.EqualFold(eventType, []byte("response.failed")),
+		bytes.EqualFold(eventType, []byte("response.incomplete")),
+		bytes.EqualFold(eventType, []byte("response.completed")),
+		bytes.EqualFold(eventType, []byte("response.done")),
+		bytes.EqualFold(eventType, []byte("response.canceled")),
+		bytes.EqualFold(eventType, []byte("response.cancelled")):
+		return true
+	default:
+		return false
+	}
 }
 
 func isResponsesLifecycleEvent(eventType string) bool {

@@ -46,7 +46,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags="-s -w" \
         -o /out/upstream-ops \
-        ./cmd/server
+        ./cmd/server && \
+    CGO_ENABLED=0 GOOS=linux go build \
+        -trimpath \
+        -ldflags="-s -w" \
+        -o /out/upstream-ops-migrate \
+        ./cmd/migrate
 
 # ---------- Stage 3: 运行时 ----------
 FROM alpine:3.20
@@ -54,5 +59,6 @@ RUN apk add --no-cache ca-certificates tzdata wget && \
     mkdir -p /app/data
 WORKDIR /app
 COPY --from=go-builder /out/upstream-ops /usr/local/bin/upstream-ops
+COPY --from=go-builder /out/upstream-ops-migrate /usr/local/bin/upstream-ops-migrate
 EXPOSE 8418
 ENTRYPOINT ["upstream-ops"]

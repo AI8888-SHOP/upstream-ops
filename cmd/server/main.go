@@ -93,6 +93,13 @@ func main() {
 		log.Error("auto migrate failed", "err", err)
 		os.Exit(1)
 	}
+	if assessment := storage.AssessUpgrade(cfg.Database.ToStorageConfig(), db); assessment.Recommended {
+		log.Warn("SQLite upgrade recommended for current traffic",
+			"usage_rows", assessment.UsageRows,
+			"database_bytes", assessment.DatabaseBytes,
+			"guide", assessment.Recommendation,
+		)
+	}
 
 	channels := storage.NewChannels(db)
 	authSessions := storage.NewAuthSessions(db)
@@ -184,28 +191,28 @@ func main() {
 	}
 
 	api.Register(router, &api.Deps{
-		DB:            db,
-		Cipher:        cipher,
-		Runtime:       runtimeMgr,
-		Channels:      channels,
-		Sessions:      authSessions,
-		Captchas:      captchas,
-		Notifies:      notifies,
-		Announcements: announcements,
-		Rates:         rates,
-		MonLogs:       monLogs,
-		ChannelSvc:    channelSvc,
-		Monitor:       monitorSvc,
-		Dispatcher:    dispatcher,
-		UpstreamSync:  syncSvc,
-		Gateway:       gatewaySvc,
-		GatewayGroups: gatewayGroups,
-		GatewayKeys:   gatewayKeys,
-		GatewayUsage:  gatewayUsage,
+		DB:                   db,
+		Cipher:               cipher,
+		Runtime:              runtimeMgr,
+		Channels:             channels,
+		Sessions:             authSessions,
+		Captchas:             captchas,
+		Notifies:             notifies,
+		Announcements:        announcements,
+		Rates:                rates,
+		MonLogs:              monLogs,
+		ChannelSvc:           channelSvc,
+		Monitor:              monitorSvc,
+		Dispatcher:           dispatcher,
+		UpstreamSync:         syncSvc,
+		Gateway:              gatewaySvc,
+		GatewayGroups:        gatewayGroups,
+		GatewayKeys:          gatewayKeys,
+		GatewayUsage:         gatewayUsage,
 		GatewayResponseRules: gatewayResponseRules,
-		ModelPrices:   modelPrices,
-		Log:           log,
-		Frontend:      frontendFS,
+		ModelPrices:          modelPrices,
+		Log:                  log,
+		Frontend:             frontendFS,
 	})
 
 	srv := &http.Server{

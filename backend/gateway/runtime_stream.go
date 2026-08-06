@@ -301,14 +301,14 @@ func (rt *Runtime) forwardStreamIncremental(
 	converted bool,
 	headers http.Header,
 	status int,
-) streamAttemptResult {
+) (result streamAttemptResult) {
 	if upCtx == nil {
 		upCtx = context.Background()
 	}
 	if clientCtx == nil {
 		clientCtx = context.Background()
 	}
-	result := streamAttemptResult{Status: status, Headers: headers}
+	result = streamAttemptResult{Status: status, Headers: headers}
 	clientKind := protocol.NormalizeKind(inbound)
 	upKind := protocol.NormalizeKind(upstream)
 
@@ -411,9 +411,41 @@ func (rt *Runtime) forwardStreamIncremental(
 		errorEventSent   bool
 		lastDownstreamAt = time.Now()
 		usageBuf         bytes.Buffer
-		tokens           UsageTokens
+		// Keep a bounded copy of ordinary SSE data for error conversion and
+		// retry diagnostics.  The usage buffer below intentionally contains
+		// only token-bearing frames, so it cannot replace this capture.
+		responseBuf              bytes.Buffer
+		tokens                   UsageTokens
 		responsesLifecycleBuffer []byte
 	)
+	maxStreamResponseCapture := rt.gatewayRuntime().UsageErrorBodyBytes
+	if maxStreamResponseCapture > maxResponsesPreCommitBytes {
+		maxStreamResponseCapture = maxResponsesPreCommitBytes
+	}
+	appendResponseCapture := func(data string) {
+		// Once downstream output is visible this body cannot participate in a
+		// retry. Avoid copying the rest of a successful stream solely for an
+		// error field that the deferred return path will never use.
+		if data == "" || streamStarted || maxStreamResponseCapture <= 0 || responseBuf.Len() >= maxStreamResponseCapture {
+			return
+		}
+		appendSSEDataCapture(&responseBuf, data, maxStreamResponseCapture)
+	}
+	defer func() {
+		// Scanner errors and cancellations can arrive before the blank line that
+		// terminates an SSE event. Capture those already-read data lines without
+		// converting or exposing the incomplete event downstream.
+		if !streamStarted && len(pendingLines) > 0 {
+			_, data := rt.parseSSEEventLines(pendingLines)
+			appendResponseCapture(data)
+		}
+		// A validator rejection or a pre-commit transport failure returns
+		// before any downstream bytes are visible. Preserve the bounded SSE
+		// capture so retry diagnostics can still extract error.message.
+		if !result.Committed && len(result.Body) == 0 && responseBuf.Len() > 0 {
+			result.Body = append([]byte(nil), responseBuf.Bytes()...)
+		}
+	}()
 
 	stopFirstTimer := func() {
 		if firstTimer != nil {
@@ -507,8 +539,9 @@ func (rt *Runtime) forwardStreamIncremental(
 			return nil
 		}
 		eventName, data := rt.parseSSEEventLines(lines)
+		appendResponseCapture(data)
 		// 旁路 usage：累积原始 data
-		if data != "" && data != "[DONE]" {
+		if data != "" && data != "[DONE]" && mayContainUsageFields(data, upKind) {
 			usageBuf.WriteString(data)
 			usageBuf.WriteByte('\n')
 			rt.mergeStreamUsage(&tokens, data, upKind)
@@ -734,7 +767,7 @@ func (rt *Runtime) forwardStreamIncremental(
 				}
 				if !streamStarted {
 					// 空流
-					result.Body = usageBuf.Bytes()
+					result.Body = append([]byte(nil), responseBuf.Bytes()...)
 					result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
 					// 仍写出转换收尾（可能只有 [DONE]）
 					if err := closeConverters(); err != nil {
@@ -822,5 +855,44 @@ func (rt *Runtime) forwardStreamIncremental(
 			}
 			pendingLines = append(pendingLines, line)
 		}
+	}
+}
+
+// appendSSEDataCapture reconstructs a bounded SSE data event for pre-commit
+// error conversion and diagnostics. It always reserves the final blank line,
+// so even a truncated large data line remains parseable as one complete frame.
+func appendSSEDataCapture(dst *bytes.Buffer, data string, limit int) {
+	if dst == nil || data == "" || limit <= 0 || dst.Len() >= limit {
+		return
+	}
+	const lineOverhead = len("data: \n")
+	for len(data) > 0 {
+		remaining := limit - dst.Len()
+		if remaining <= lineOverhead+1 {
+			break
+		}
+		line := data
+		hasMore := false
+		if newline := strings.IndexByte(data, '\n'); newline >= 0 {
+			line = data[:newline]
+			data = data[newline+1:]
+			hasMore = true
+		} else {
+			data = ""
+		}
+		maxLineBytes := remaining - lineOverhead - 1
+		truncated := len(line) > maxLineBytes
+		if truncated {
+			line = line[:maxLineBytes]
+		}
+		dst.WriteString("data: ")
+		dst.WriteString(line)
+		dst.WriteByte('\n')
+		if truncated || !hasMore {
+			break
+		}
+	}
+	if dst.Len() < limit {
+		dst.WriteByte('\n')
 	}
 }

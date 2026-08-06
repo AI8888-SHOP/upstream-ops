@@ -49,19 +49,30 @@ type DatabaseConfig struct {
 	User         string `mapstructure:"user" yaml:"user" json:"user"`
 	Password     string `mapstructure:"password" yaml:"password" json:"password"`
 	Name         string `mapstructure:"name" yaml:"name" json:"name"`
+	SSLMode      string `mapstructure:"sslMode" yaml:"sslMode" json:"sslMode"`
 	MaxOpenConns int    `mapstructure:"maxOpenConns" yaml:"maxOpenConns" json:"maxOpenConns"`
 	MaxIdleConns int    `mapstructure:"maxIdleConns" yaml:"maxIdleConns" json:"maxIdleConns"`
 }
 
 func (d DatabaseConfig) ToStorageConfig() storage.DBConfig {
+	port := d.Port
+	if port <= 0 {
+		if strings.EqualFold(strings.TrimSpace(d.Driver), string(storage.DBDriverPostgres)) ||
+			strings.EqualFold(strings.TrimSpace(d.Driver), "postgresql") {
+			port = 5432
+		} else {
+			port = 3306
+		}
+	}
 	return storage.DBConfig{
 		Driver:       storage.DBDriver(d.Driver),
 		Path:         d.Path,
 		Host:         d.Host,
-		Port:         d.Port,
+		Port:         port,
 		User:         d.User,
 		Password:     d.Password,
 		Name:         d.Name,
+		SSLMode:      d.SSLMode,
 		MaxOpenConns: d.MaxOpenConns,
 		MaxIdleConns: d.MaxIdleConns,
 	}
@@ -144,15 +155,15 @@ const (
 	DefaultUpstreamUserAgent      = "upstream-ops/0.1"
 
 	// 网关默认值（设置页可改；0/空表示使用下列默认）。
-	DefaultGatewayTempPauseSeconds           = 30
-	DefaultGatewayForwardTimeoutSeconds      = 600 // 10 分钟
-	DefaultGatewayModelsCacheTTLSeconds      = 60
-	DefaultGatewayMaxFailoverSwitches        = 8
-	DefaultGatewayRouteBatchConcurrency      = 8
-	DefaultGatewayUsageErrorBodyBytes        = 32 * 1024
-	DefaultGatewayUsageErrorMsgRunes         = 500
-	DefaultGatewayUsageErrorHeaderValueRunes = 8 * 1024
-	DefaultGatewayUsageErrorHeadersJSONBytes = 64 * 1024
+	DefaultGatewayTempPauseSeconds            = 30
+	DefaultGatewayForwardTimeoutSeconds       = 600 // 10 分钟
+	DefaultGatewayModelsCacheTTLSeconds       = 60
+	DefaultGatewayMaxFailoverSwitches         = 8
+	DefaultGatewayRouteBatchConcurrency       = 8
+	DefaultGatewayUsageErrorBodyBytes         = 32 * 1024
+	DefaultGatewayUsageErrorMsgRunes          = 500
+	DefaultGatewayUsageErrorHeaderValueRunes  = 8 * 1024
+	DefaultGatewayUsageErrorHeadersJSONBytes  = 64 * 1024
 	DefaultGatewayHedgeDelaySeconds           = 10.0
 	DefaultGatewayHedgeMaxParallel            = 2
 	DefaultGatewayHedgeMaxAttempts            = 4
@@ -422,6 +433,9 @@ func load(path string, withEnv bool) (*Config, string, error) {
 		_ = v.BindEnv("database.user", "DATABASE_USER")
 		_ = v.BindEnv("database.password", "DATABASE_PASSWORD")
 		_ = v.BindEnv("database.name", "DATABASE_NAME")
+		_ = v.BindEnv("database.sslMode", "DATABASE_SSL_MODE")
+		_ = v.BindEnv("database.maxOpenConns", "DATABASE_MAX_OPEN_CONNS")
+		_ = v.BindEnv("database.maxIdleConns", "DATABASE_MAX_IDLE_CONNS")
 		_ = v.BindEnv("server.port", "SERVER_PORT")
 		_ = v.BindEnv("server.mode", "SERVER_MODE")
 		_ = v.BindEnv("log.level", "LOG_LEVEL")
@@ -513,8 +527,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.driver", "sqlite")
 	v.SetDefault("database.path", "./data/upstream-ops.db")
 	v.SetDefault("database.host", "localhost")
-	v.SetDefault("database.port", 3306)
+	// Resolve the default by driver in ToStorageConfig: MySQL uses 3306,
+	// PostgreSQL uses 5432. A single static Viper default caused a PostgreSQL
+	// config that omitted port to try MySQL's port.
+	v.SetDefault("database.port", 0)
 	v.SetDefault("database.name", "upstreamops")
+	v.SetDefault("database.sslMode", "disable")
 	v.SetDefault("database.maxOpenConns", 20)
 	v.SetDefault("database.maxIdleConns", 5)
 

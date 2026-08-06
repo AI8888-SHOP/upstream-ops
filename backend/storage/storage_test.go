@@ -2,7 +2,10 @@ package storage
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +13,36 @@ import (
 
 	"gorm.io/gorm"
 )
+
+func TestPostgresDSNNormalizesIPv6AndSetsTimeout(t *testing.T) {
+	dsn := (DBConfig{
+		Driver: DBDriverPostgres, Host: "[::1]", User: "user", Password: "p@ss",
+		Name: "upstreamops", ConnectTimeoutSeconds: 7,
+	}).PostgresDSN()
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse postgres dsn: %v", err)
+	}
+	if parsed.Host != "[::1]:5432" {
+		t.Fatalf("postgres host = %q, want [::1]:5432", parsed.Host)
+	}
+	if got := parsed.Query().Get("connect_timeout"); got != "7" {
+		t.Fatalf("connect_timeout = %q, want 7", got)
+	}
+	if got, _ := parsed.User.Password(); got != "p@ss" {
+		t.Fatalf("password = %q, want p@ss", got)
+	}
+}
+
+func TestSQLiteReadOnlyWindowsDriveURI(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows URI syntax")
+	}
+	dsn := (DBConfig{Driver: DBDriverSQLite, Path: `C:\data\upstream-ops.db`, ReadOnly: true}).SQLiteDSN()
+	if !strings.HasPrefix(dsn, "file:///C:/") {
+		t.Fatalf("Windows SQLite DSN = %q, want file:///C:/ prefix", dsn)
+	}
+}
 
 func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -34,6 +67,58 @@ func openTestDB(t *testing.T) *gorm.DB {
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	return db
+}
+
+func TestOpenSQLiteReadOnlyDoesNotWriteDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "readonly.db")
+	db, err := Open(DBConfig{Driver: DBDriverSQLite, Path: path})
+	if err != nil {
+		t.Fatalf("open writable db: %v", err)
+	}
+	if err := db.Exec("CREATE TABLE readonly_probe (id INTEGER PRIMARY KEY, value TEXT)").Error; err != nil {
+		t.Fatalf("create probe: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get writable sql db: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close writable db: %v", err)
+	}
+
+	readOnly, err := Open(DBConfig{Driver: DBDriverSQLite, Path: path, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only db: %v", err)
+	}
+	readOnlySQL, err := readOnly.DB()
+	if err != nil {
+		t.Fatalf("get read-only sql db: %v", err)
+	}
+	t.Cleanup(func() { _ = readOnlySQL.Close() })
+	var count int64
+	if err := readOnly.Table("readonly_probe").Count(&count).Error; err != nil {
+		t.Fatalf("query read-only db: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("probe count = %d, want 0", count)
+	}
+	if err := readOnly.Exec("CREATE TABLE should_fail (id INTEGER PRIMARY KEY)").Error; err == nil {
+		t.Fatal("read-only SQLite unexpectedly accepted a schema write")
+	}
+}
+
+func TestGatewayStatsCacheKeyKeepsUserFiltersDistinct(t *testing.T) {
+	first := gatewayStatsCacheKey(GatewayUsageQuery{Model: "model|request", RequestID: "id"})
+	second := gatewayStatsCacheKey(GatewayUsageQuery{Model: "model", RequestID: "request|id"})
+	if first == second {
+		t.Fatalf("cache keys collided: %#v", first)
+	}
+	from := time.Unix(0, 0)
+	withoutFrom := gatewayStatsCacheKey(GatewayUsageQuery{})
+	withFrom := gatewayStatsCacheKey(GatewayUsageQuery{From: &from})
+	if withoutFrom == withFrom {
+		t.Fatalf("nil and epoch From filters collided: %#v", withFrom)
+	}
 }
 
 func TestAggregateBalanceTrend(t *testing.T) {
@@ -1144,7 +1229,7 @@ func TestGatewayResponseRulesImportStrategies(t *testing.T) {
 	renameBundle := GatewayResponseRuleBundle{
 		Kind:    GatewayResponseRuleBundleKind,
 		Version: GatewayResponseRuleBundleVersion,
-		Rules: []GatewayResponseRuleBundleRule{{Name: "capacity", Pattern: "third", Target: GatewayResponseRuleTargetAssistantText}},
+		Rules:   []GatewayResponseRuleBundleRule{{Name: "capacity", Pattern: "third", Target: GatewayResponseRuleTargetAssistantText}},
 	}
 	rename, err := rules.Import(group.ID, renameBundle, GatewayResponseRuleImportRename)
 	if err != nil {
@@ -1294,16 +1379,16 @@ func TestGatewayUsageFinalizeVirtualCacheKeepsRawCostAndChargesBilledCost(t *tes
 	// The primary winner is eligible only because a concurrent hedge was also
 	// recorded for this request. The loser can retain its raw cost and status.
 	hedge := &GatewayUsageLog{
-		GatewayKeyID: key.ID,
-		RequestID:    usage.RequestID,
-		Attempt:      2,
-		AttemptKind:  GatewayAttemptKindHedge,
+		GatewayKeyID:  key.ID,
+		RequestID:     usage.RequestID,
+		Attempt:       2,
+		AttemptKind:   GatewayAttemptKindHedge,
 		AttemptStatus: GatewayAttemptStatusCanceled,
-		BillingMode:  "token",
-		InputTokens:  100,
-		ActualCost:   1.25,
-		Success:      false,
-		CreatedAt:    time.Now().UTC(),
+		BillingMode:   "token",
+		InputTokens:   100,
+		ActualCost:    1.25,
+		Success:       false,
+		CreatedAt:     time.Now().UTC(),
 	}
 	if err := logs.Create(hedge); err != nil {
 		t.Fatalf("create hedge usage: %v", err)
@@ -1435,11 +1520,11 @@ func TestGatewayUsageFinalizeVirtualCacheRejectsIneligibleWinner(t *testing.T) {
 
 func TestGatewayUsageFinalizeVirtualCacheRequiresRecordedHedgeAndSuccessfulWinner(t *testing.T) {
 	cases := []struct {
-		name       string
-		success    bool
-		companion  bool
-		billing    string
-		endpoint   string
+		name      string
+		success   bool
+		companion bool
+		billing   string
+		endpoint  string
 	}{
 		{name: "missing companion", success: true},
 		{name: "failed winner", success: false, companion: true},
@@ -1499,9 +1584,9 @@ func TestGatewayUsageFinalizeVirtualCacheRequiresRecordedHedgeAndSuccessfulWinne
 
 func TestGatewayUsageFinalizeVirtualCacheAcceptsRegexRejectedConcurrentCompanion(t *testing.T) {
 	cases := []struct {
-		name         string
-		winnerKind   string
-		companionID  int
+		name        string
+		winnerKind  string
+		companionID int
 	}{
 		{name: "primary winner", winnerKind: GatewayAttemptKindPrimary, companionID: 2},
 		{name: "hedge winner", winnerKind: GatewayAttemptKindHedge, companionID: 1},

@@ -73,6 +73,13 @@ jobs:
       - name: Build server
         run: go build -trimpath ./cmd/server
 
+      - name: Build migration tool
+        run: go build -trimpath ./cmd/migrate
+
+      - name: Exercise storage tests on Windows
+        if: matrix.os == 'windows-latest'
+        run: go test ./backend/storage/...
+
   frontend:
     name: Frontend checks
     runs-on: ubuntu-latest

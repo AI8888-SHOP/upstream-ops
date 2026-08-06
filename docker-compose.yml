@@ -8,8 +8,21 @@ services:
     environment:
       TZ: Asia/Shanghai
       SERVER_PORT: 8418
-      DATABASE_DRIVER: sqlite
-      DATABASE_PATH: /app/data/upstream-ops.db
+      # SQLite remains the default, while DATABASE_DRIVER=postgres in .env
+      # keeps a completed one-click migration active on future restarts.
+      DATABASE_DRIVER: ${DATABASE_DRIVER:-sqlite}
+      DATABASE_PATH: ${DATABASE_PATH:-/app/data/upstream-ops.db}
+      DATABASE_HOST: ${DATABASE_HOST:-}
+      # Leave this empty when no explicit port is configured so the server can
+      # resolve 3306/5432 from DATABASE_DRIVER instead of forcing PostgreSQL's
+      # port on a plain MySQL deployment.
+      DATABASE_PORT: ${DATABASE_PORT:-}
+      DATABASE_USER: ${DATABASE_USER:-}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-}
+      DATABASE_NAME: ${DATABASE_NAME:-upstreamops}
+      DATABASE_SSL_MODE: ${DATABASE_SSL_MODE:-disable}
+      DATABASE_MAX_OPEN_CONNS: ${DATABASE_MAX_OPEN_CONNS:-20}
+      DATABASE_MAX_IDLE_CONNS: ${DATABASE_MAX_IDLE_CONNS:-5}
       SERVER_MODE: ${SERVER_MODE:-release}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       APP_SECRET: ${APP_SECRET:?APP_SECRET is required, set it in .env}
@@ -28,3 +41,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - default
+      - database
+
+networks:
+  database:
+    name: ${DATABASE_NETWORK_NAME:-upstream-ops-database}
+    external: ${DATABASE_NETWORK_EXTERNAL:-false}
