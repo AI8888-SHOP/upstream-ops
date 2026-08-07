@@ -87,8 +87,12 @@ func TestOpenAICacheCreationPriorityAndStaleZeroFallback(t *testing.T) {
 	}
 	usage["prompt_tokens_details"] = map[string]any{}
 	usage["cache_creation_tokens"] = 11
+	if got := openAICacheCreationTokensFromUsage(usage); got != 5 {
+		t.Fatalf("cache creation=%d, want later nested positive value=5", got)
+	}
+	usage["input_tokens_details"] = map[string]any{"cache_write_tokens": 0}
 	if got := openAICacheCreationTokensFromUsage(usage); got != 11 {
-		t.Fatalf("cache creation=%d, want top-level stale-zero fallback=11", got)
+		t.Fatalf("cache creation=%d, want top-level fallback=11 after stale nested zero", got)
 	}
 }
 
