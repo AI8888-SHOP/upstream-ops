@@ -17,6 +17,7 @@ import (
 )
 
 var errSkippedRejectedRoute = errors.New("route skipped after response validation rejection")
+var errSkippedNonRetryableRoute = errors.New("route retry skipped after deterministic upstream failure")
 
 type coordinatedForwardRequest struct {
 	c               *gin.Context
@@ -209,6 +210,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 
 	var states sync.Map
 	var excludedRoutes sync.Map
+	var retrySuppressedRoutes sync.Map
 	run := func(ctx context.Context, info hedgeAttemptInfo) (*coordinatedForwardAttempt, error) {
 		entry := plan[info.Number-1]
 		attempt := &coordinatedForwardAttempt{
@@ -220,6 +222,13 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		}
 		states.Store(info.Number, attempt)
 		defer close(attempt.runnerDone)
+		if attempt.Plan.TryOnRoute > 0 {
+			if _, suppressed := retrySuppressedRoutes.Load(attempt.Route.ID); suppressed {
+				attempt.Skipped = true
+				attempt.Err = errSkippedNonRetryableRoute
+				return attempt, attempt.Err
+			}
+		}
 		if _, excluded := excludedRoutes.Load(attempt.Route.ID); excluded {
 			attempt.Skipped = true
 			attempt.Err = errSkippedRejectedRoute
@@ -251,6 +260,10 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		} else {
 			_, runErr = rt.runCoordinatedNonStreamAttempt(ctx, &req, attempt, attemptTimeout)
 		}
+		suppressSameRouteRetry := coordinatedAttemptSuppressesSameRouteRetries(attempt)
+		if suppressSameRouteRetry {
+			retrySuppressedRoutes.Store(attempt.Route.ID, struct{}{})
+		}
 		// Response validation is allowed to switch routes even when the legacy
 		// transport failover toggle is off. Ordinary transport/status failures
 		// must retain the original retry/failover semantics, however; make the
@@ -260,7 +273,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 			validation, status, _, terminal := attempt.validationSnapshot()
 			if !validation.IsRejected() {
 				failed := runErr != nil || terminal || status < 200 || status >= 300
-				if failed && !coordinatedSameRouteRetryAllowed(req.group, attempt) {
+				if failed && (suppressSameRouteRetry || !coordinatedSameRouteRetryAllowed(req.group, attempt)) {
 					attempt.setTerminal(true)
 					if runErr == nil {
 						runErr = fmt.Errorf("upstream status %d", status)
@@ -701,6 +714,24 @@ func (a *coordinatedForwardAttempt) validationSnapshot() (validationResult, int,
 	return a.Validation, a.Status, a.Err, a.Terminal
 }
 
+func (a *coordinatedForwardAttempt) retryFailureSnapshot() (validationResult, int, error, bool, usageErrorInfo) {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+	return a.Validation, a.Status, a.Err, a.Terminal, a.ErrInfo
+}
+
+func coordinatedAttemptSuppressesSameRouteRetries(attempt *coordinatedForwardAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	validation, status, attemptErr, terminal, errInfo := attempt.retryFailureSnapshot()
+	if validation.IsRejected() {
+		return false
+	}
+	failed := attemptErr != nil || terminal || status < 200 || status >= 300
+	return failed && !isSameRouteRetryableUpstreamFailure(status, errInfo)
+}
+
 func (rt *Runtime) cleanupCoordinatedStreamLosers(result hedgeRunResult[*coordinatedForwardAttempt], states *sync.Map) {
 	winnerNumber := 0
 	if result.Winner != nil {
@@ -911,8 +942,10 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		if isWinner && validation.IsRejected() && validation.PostCommit {
 			attemptStatus = storage.GatewayAttemptStatusAccepted
 		}
+		suppressSameRouteRetry := !validation.IsRejected() && !isSameRouteRetryableUpstreamFailure(status, errInfo)
 		if attemptStatus == storage.GatewayAttemptStatusError && req.group.RetryEnabled &&
-			req.group.CooldownSeconds > 0 && !coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID) {
+			req.group.CooldownSeconds > 0 &&
+			(suppressSameRouteRetry || !coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
 			until := time.Now().Add(time.Duration(req.group.CooldownSeconds) * time.Second)
 			pauseReason := errInfo.Summary
 			if strings.TrimSpace(errInfo.Detail) != "" {

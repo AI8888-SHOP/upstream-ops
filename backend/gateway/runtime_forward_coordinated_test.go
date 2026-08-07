@@ -66,6 +66,25 @@ func TestBuildVirtualCacheSettlementDoesNotRequireLocalPricing(t *testing.T) {
 	}
 }
 
+func TestCoordinatedAttemptSuppressesDeterministicSameRouteRetries(t *testing.T) {
+	attempt := &coordinatedForwardAttempt{
+		Status: http.StatusForbidden,
+		Err:    errors.New("upstream status 403"),
+		ErrInfo: usageErrorInfo{
+			Summary: "HTTP 403: Image generation is not enabled for this group",
+		},
+	}
+	if !coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+		t.Fatal("deterministic capability failure should suppress same-route retries")
+	}
+	attempt.Status = http.StatusServiceUnavailable
+	attempt.Err = errors.New("upstream status 503")
+	attempt.ErrInfo = usageErrorInfo{Summary: "HTTP 503: temporarily overloaded"}
+	if coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+		t.Fatal("temporary 503 must retain configured same-route retries")
+	}
+}
+
 func TestVirtualCacheReasonDoesNotRequireLocalPricing(t *testing.T) {
 	rt := &Runtime{Service: &Service{}}
 	req := &coordinatedForwardRequest{
