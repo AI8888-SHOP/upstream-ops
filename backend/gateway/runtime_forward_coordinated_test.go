@@ -555,8 +555,8 @@ func TestValidateCoordinatedAttemptSkipsExcludedPrimary(t *testing.T) {
 	}
 	var excluded sync.Map
 	excluded.Store(uint(7), struct{}{})
-	accepted, err := validateCoordinatedAttempt(attempt, &excluded)
-	if accepted || !errors.Is(err, errSkippedRejectedRoute) {
+	accepted, err := validateCoordinatedAttempt(attempt, &excluded, nil)
+	if accepted || !errors.Is(err, errSkippedNonRetryableRoute) {
 		t.Fatalf("accepted=%v err=%v, want excluded primary", accepted, err)
 	}
 }
@@ -569,9 +569,49 @@ func TestValidateCoordinatedAttemptAllowsPlannedSameRouteRetryAfterRejection(t *
 	}
 	var excluded sync.Map
 	excluded.Store(uint(7), struct{}{})
-	accepted, err := validateCoordinatedAttempt(attempt, &excluded)
+	accepted, err := validateCoordinatedAttempt(attempt, nil, &excluded)
 	if !accepted || err != nil {
 		t.Fatalf("accepted=%v err=%v, want same-route retry to remain eligible", accepted, err)
+	}
+}
+
+func TestValidateCoordinatedAttemptDoesNotRetryHardExcludedRoute(t *testing.T) {
+	attempt := &coordinatedForwardAttempt{
+		Route:  storage.GatewayRoute{ID: 7},
+		Plan:   coordinatedRoutePlan{TryOnRoute: 1, MaxTries: 2},
+		Status: http.StatusOK,
+	}
+	var excluded sync.Map
+	excluded.Store(uint(7), struct{}{})
+	accepted, err := validateCoordinatedAttempt(attempt, &excluded, nil)
+	if accepted || !errors.Is(err, errSkippedNonRetryableRoute) {
+		t.Fatalf("accepted=%v err=%v, want hard exclusion", accepted, err)
+	}
+}
+
+func TestCoordinatedPlanSchedulerPromotesSameRouteRetry(t *testing.T) {
+	group := &storage.GatewayGroup{RetryEnabled: true, RetryCount: 1, HedgeMaxAttempts: 3}
+	candidates := []ScoredRoute{
+		{Route: storage.GatewayRoute{ID: 1}},
+		{Route: storage.GatewayRoute{ID: 2}},
+	}
+	plan := buildCoordinatedRoutePlan(candidates, group, true, true)
+	if len(plan) != 4 {
+		t.Fatalf("plan length=%d, want full retry plan", len(plan))
+	}
+	scheduler := newCoordinatedPlanScheduler(plan, 3)
+	first := scheduler.reserve(1)
+	if first.Candidate.Route.ID != 1 || first.TryOnRoute != 0 {
+		t.Fatalf("first=%+v, want route 1 primary", first)
+	}
+	scheduler.prioritizeRetry(&coordinatedForwardAttempt{Route: first.Candidate.Route, Plan: first})
+	second := scheduler.reserve(2)
+	if second.Candidate.Route.ID != 1 || second.TryOnRoute != 1 {
+		t.Fatalf("second=%+v, want route 1 retry", second)
+	}
+	third := scheduler.reserve(3)
+	if third.Candidate.Route.ID != 2 || third.TryOnRoute != 0 {
+		t.Fatalf("third=%+v, want route 2 primary after retry", third)
 	}
 }
 

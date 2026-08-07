@@ -343,7 +343,7 @@ IMAGE_TAG=latest
 生产环境建议锁定具体版本，例如：
 
 ```env
-IMAGE_TAG=v0.0.20
+IMAGE_TAG=v0.0.21
 ```
 
 ## MySQL 部署
@@ -377,13 +377,13 @@ MYSQL_PORT=33069
 
 ```bash
 chmod +x scripts/upgrade.sh
-TARGET_TAG=v0.0.20 ./scripts/upgrade.sh
+TARGET_TAG=v0.0.21 ./scripts/upgrade.sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-.\scripts\upgrade.ps1 -TargetTag v0.0.20
+.\scripts\upgrade.ps1 -TargetTag v0.0.21
 ```
 
 脚本会备份 `data/` 与 `.env`、为旧镜像建立不可变的本地回滚标签、拉取目标版本、等待容器健康检查，并在成功后把目标 `IMAGE_TAG` 持久化到 `.env`；启动或健康检查失败时自动恢复旧镜像。非默认 compose 文件、服务名或端口可通过 `COMPOSE_FILE`、`SERVICE`、`HEALTH_URL`、`HEALTH_TIMEOUT_SECONDS` 覆盖。请在新版本完成请求、重试、计费核对后再清理 `backups/` 和回滚镜像标签。
