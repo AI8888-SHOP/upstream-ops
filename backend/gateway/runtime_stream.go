@@ -135,6 +135,28 @@ func (rt *Runtime) forwardStream(
 	converted bool,
 	firstTokenTimeout time.Duration,
 ) streamAttemptResult {
+	return rt.forwardStreamWithVirtualCache(ctx, c, target, path, method, inHeader, body, inboundKind, upstreamKind, model, converted, firstTokenTimeout, 0)
+}
+
+func (rt *Runtime) forwardStreamWithVirtualCache(
+	ctx context.Context,
+	c *gin.Context,
+	target *upstreamTarget,
+	path string,
+	method string,
+	inHeader http.Header,
+	body []byte,
+	inboundKind protocolKind,
+	upstreamKind protocolKind,
+	model string,
+	converted bool,
+	firstTokenTimeout time.Duration,
+	virtualCachePercent ...int,
+) streamAttemptResult {
+	cachePercent := 0
+	if len(virtualCachePercent) > 0 {
+		cachePercent = virtualCachePercent[0]
+	}
 	release, err := rt.acquireUpstreamConcurrency(ctx, target)
 	if err != nil {
 		return streamAttemptResult{Err: err}
@@ -205,9 +227,9 @@ func (rt *Runtime) forwardStream(
 
 	incremental := protocol.SupportsIncrementalStream(inboundKind, upstreamKind, converted)
 	if !incremental {
-		return rt.forwardStreamBuffered(c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status)
+		return rt.forwardStreamBuffered(c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status, cachePercent)
 	}
-	return rt.forwardStreamIncremental(upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status)
+	return rt.forwardStreamIncremental(upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status, cachePercent)
 }
 
 // forwardStreamBuffered 仅兜底：三协议互转已走增量真流；此处保留给未知协议或未实现转换器。
@@ -223,7 +245,12 @@ func (rt *Runtime) forwardStreamBuffered(
 	converted bool,
 	headers http.Header,
 	status int,
+	virtualCachePercent ...int,
 ) streamAttemptResult {
+	cachePercent := 0
+	if len(virtualCachePercent) > 0 {
+		cachePercent = virtualCachePercent[0]
+	}
 	var ft *int64
 	// 从请求发起起算剩余首字预算（含已花费的等响应头时间）
 	bodyWait, timedOut := rt.remainingFirstTokenWait(start, firstTokenTimeout)
@@ -258,9 +285,20 @@ func (rt *Runtime) forwardStreamBuffered(
 	if len(clientBody) == 0 {
 		clientBody = data
 	}
+	virtualCacheApplied := false
+	if cachePercent > 0 {
+		if rewritten, changed := rewriteVirtualCacheResponsePercent(clientBody, inbound, cachePercent); changed {
+			clientBody = rewritten
+			virtualCacheApplied = true
+		}
+	}
+	if virtualCacheApplied {
+		headers = headers.Clone()
+		headers.Del("Content-Length")
+	}
 
 	if err := rt.commitSSEHeaders(c, headers); err != nil {
-		return streamAttemptResult{Status: status, Headers: headers, Body: clientBody, FirstTokenMS: ft, Tokens: tokens, Err: err}
+		return streamAttemptResult{Status: status, Headers: headers, Body: clientBody, FirstTokenMS: ft, Tokens: tokens, VirtualCacheApplied: virtualCacheApplied, Err: err}
 	}
 	if _, err := c.Writer.Write(clientBody); err != nil {
 		var rejected *responseRejectedError
@@ -280,7 +318,7 @@ func (rt *Runtime) forwardStreamBuffered(
 	// 缓冲路径整包写出成功即视为下游完整交付（含转换后的终端帧）。
 	return streamAttemptResult{
 		Status: status, Headers: headers, FirstTokenMS: ft, Tokens: tokens,
-		Committed: streamWriterActuallyCommitted(c), DownstreamComplete: true,
+		Committed: streamWriterActuallyCommitted(c), DownstreamComplete: true, VirtualCacheApplied: virtualCacheApplied,
 	}
 }
 
@@ -301,7 +339,12 @@ func (rt *Runtime) forwardStreamIncremental(
 	converted bool,
 	headers http.Header,
 	status int,
+	virtualCachePercent ...int,
 ) (result streamAttemptResult) {
+	cachePercent := 0
+	if len(virtualCachePercent) > 0 {
+		cachePercent = virtualCachePercent[0]
+	}
 	if upCtx == nil {
 		upCtx = context.Background()
 	}
@@ -312,6 +355,10 @@ func (rt *Runtime) forwardStreamIncremental(
 	result = streamAttemptResult{Status: status, Headers: headers}
 	clientKind := protocol.NormalizeKind(inbound)
 	upKind := protocol.NormalizeKind(upstream)
+	var virtualCache *virtualCacheSSETransformer
+	if cachePercent > 0 {
+		virtualCache = newVirtualCacheSSETransformerPercent(clientKind, cachePercent)
+	}
 
 	var (
 		anth2oai  *protocol.AnthropicToOpenAIStream
@@ -472,6 +519,9 @@ func (rt *Runtime) forwardStreamIncremental(
 		if !result.Committed && len(result.Body) == 0 && responseBuf.Len() > 0 {
 			result.Body = append([]byte(nil), responseBuf.Bytes()...)
 		}
+		if virtualCache != nil {
+			result.VirtualCacheApplied = virtualCache.Applied()
+		}
 	}()
 
 	stopFirstTimer := func() {
@@ -549,6 +599,13 @@ func (rt *Runtime) forwardStreamIncremental(
 				payload = append(payload, f...)
 			}
 		}
+		if virtualCache != nil {
+			payload = virtualCache.Transform(payload, false)
+			payloadLen = len(payload)
+			if len(payload) == 0 {
+				return nil
+			}
+		}
 		if _, err := c.Writer.Write(payload); err != nil {
 			var rejected *responseRejectedError
 			if errors.As(err, &rejected) {
@@ -578,6 +635,21 @@ func (rt *Runtime) forwardStreamIncremental(
 		}
 		result.Committed = streamWriterActuallyCommitted(c)
 		lastDownstreamAt = now
+		return nil
+	}
+
+	flushVirtualCache := func() error {
+		if virtualCache == nil {
+			return nil
+		}
+		payload := virtualCache.Transform(nil, true)
+		if len(payload) == 0 {
+			return nil
+		}
+		if _, err := c.Writer.Write(payload); err != nil {
+			result.ClientDisconnected = true
+			return err
+		}
 		return nil
 	}
 
@@ -776,6 +848,9 @@ func (rt *Runtime) forwardStreamIncremental(
 			if err := closeConverters(); err != nil {
 				return err
 			}
+		}
+		if err := flushVirtualCache(); err != nil {
+			return err
 		}
 		result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
 		rt.finalizeStreamClientDisconnect(&result)

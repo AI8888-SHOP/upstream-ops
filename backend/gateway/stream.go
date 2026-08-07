@@ -110,6 +110,7 @@ type streamAttemptResult struct {
 	Committed          bool
 	ClientDisconnected bool
 	DownstreamComplete bool
+	VirtualCacheApplied bool
 	StreamErr          error
 	Err                error
 	// ValidationRejection is a pre-commit response-rule match. It is a direct
@@ -146,10 +147,14 @@ func (s *Service) forwardStream(ctx context.Context, c *gin.Context, target *ups
 	return s.runtime().forwardStream(ctx, c, target, path, method, inHeader, body, inboundKind, upstreamKind, model, converted, firstTokenTimeout)
 }
 
+func (s *Service) forwardStreamWithVirtualCache(ctx context.Context, c *gin.Context, target *upstreamTarget, path string, method string, inHeader http.Header, body []byte, inboundKind protocolKind, upstreamKind protocolKind, model string, converted bool, firstTokenTimeout time.Duration, percent int) streamAttemptResult {
+	return s.runtime().forwardStreamWithVirtualCache(ctx, c, target, path, method, inHeader, body, inboundKind, upstreamKind, model, converted, firstTokenTimeout, percent)
+}
+
 func (s *Service) forwardStreamBuffered(c *gin.Context, resp *http.Response, start time.Time, firstTokenTimeout time.Duration, inbound, upstream protocolKind, model string, converted bool, headers http.Header, status int) streamAttemptResult {
-	return s.runtime().forwardStreamBuffered(c, resp, start, firstTokenTimeout, inbound, upstream, model, converted, headers, status)
+	return s.runtime().forwardStreamBuffered(c, resp, start, firstTokenTimeout, inbound, upstream, model, converted, headers, status, 0)
 }
 
 func (s *Service) forwardStreamIncremental(upCtx context.Context, clientCtx context.Context, abortReq context.CancelFunc, c *gin.Context, resp *http.Response, start time.Time, firstTokenTimeout time.Duration, inbound, upstream protocolKind, model string, converted bool, headers http.Header, status int) streamAttemptResult {
-	return s.runtime().forwardStreamIncremental(upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout, inbound, upstream, model, converted, headers, status)
+	return s.runtime().forwardStreamIncremental(upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout, inbound, upstream, model, converted, headers, status, 0)
 }

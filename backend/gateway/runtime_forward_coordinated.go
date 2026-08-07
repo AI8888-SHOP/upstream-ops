@@ -381,14 +381,18 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		return accepted, err
 	}
 	hooks := hedgeHooks[*coordinatedForwardAttempt]{
-		OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
-			if result.Value != nil {
-				req.virtualCacheReason = rt.virtualCacheReasonForWinner(&req, result.Value, &states)
-				gate, _, _, _ := result.Value.streamControlSnapshot()
-				if gate != nil {
-					if req.virtualCacheReason != "" {
-						gate.EnableVirtualCache(req.kind)
-					}
+			OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
+				if result.Value != nil {
+					req.virtualCacheReason = rt.virtualCacheReasonForWinner(&req, result.Value, &states)
+					gate, _, _, _ := result.Value.streamControlSnapshot()
+					if gate != nil {
+						if req.virtualCacheReason != "" {
+							percent := 100
+							if req.virtualCacheReason == storage.GatewayVirtualCacheReasonProviderGlobal && result.Value.Target != nil {
+								percent, _ = ProviderVirtualCachePercentForModel(result.Value.Target.Provider, result.Value.UpstreamModel)
+							}
+							gate.EnableVirtualCachePercent(req.kind, percent)
+						}
 					result.Value.setGateCommitError(gate.Win())
 				}
 			}
@@ -1207,28 +1211,31 @@ func (rt *Runtime) virtualCacheReasonForWinner(req *coordinatedForwardRequest, w
 			return storage.GatewayVirtualCacheReasonHedge
 		}
 	}
-	if !req.group.ResponseValidationVirtualCacheEnabled || states == nil {
-		return ""
-	}
-	winnerKind := coordinatedAttemptKind(winner, req.hedgeActive, winner.Info.Number)
-	if winnerKind != storage.GatewayAttemptKindFailover && winnerKind != storage.GatewayAttemptKindHedge {
-		return ""
-	}
-	priorRejectedRoute := false
-	states.Range(func(_, value any) bool {
-		attempt, _ := value.(*coordinatedForwardAttempt)
-		if attempt == nil || attempt.Info.Number >= winner.Info.Number || !attempt.didStartUpstream() || attempt.Route.ID == winner.Route.ID {
-			return true
+	if req.group.ResponseValidationVirtualCacheEnabled && states != nil {
+		winnerKind := coordinatedAttemptKind(winner, req.hedgeActive, winner.Info.Number)
+		if winnerKind == storage.GatewayAttemptKindFailover || winnerKind == storage.GatewayAttemptKindHedge {
+			priorRejectedRoute := false
+			states.Range(func(_, value any) bool {
+				attempt, _ := value.(*coordinatedForwardAttempt)
+				if attempt == nil || attempt.Info.Number >= winner.Info.Number || !attempt.didStartUpstream() || attempt.Route.ID == winner.Route.ID {
+					return true
+				}
+				validation, _, _, _ := attempt.validationSnapshot()
+				if validation.IsRejected() && !validation.PostCommit {
+					priorRejectedRoute = true
+					return false
+				}
+				return true
+			})
+			if priorRejectedRoute {
+				return storage.GatewayVirtualCacheReasonResponseRuleFailover
+			}
 		}
-		validation, _, _, _ := attempt.validationSnapshot()
-		if validation.IsRejected() && !validation.PostCommit {
-			priorRejectedRoute = true
-			return false
+	}
+	if winner.Target != nil {
+		if percent, err := ProviderVirtualCachePercentForModel(winner.Target.Provider, modelForEligibility); err == nil && percent > 0 {
+			return storage.GatewayVirtualCacheReasonProviderGlobal
 		}
-		return true
-	})
-	if priorRejectedRoute {
-		return storage.GatewayVirtualCacheReasonResponseRuleFailover
 	}
 	return ""
 }
@@ -1240,7 +1247,11 @@ func (rt *Runtime) finishCoordinatedNonStream(req *coordinatedForwardRequest, wi
 	}
 	settlement := rt.buildVirtualCacheSettlement(req, winner)
 	if settlement.VirtualCacheReadEnabled {
-		if rewritten, changed := rewriteVirtualCacheResponse(winner.ClientBody, req.kind); changed {
+		percent := 100
+		if settlement.VirtualCacheReason == storage.GatewayVirtualCacheReasonProviderGlobal && winner.Target != nil {
+			percent, _ = ProviderVirtualCachePercentForModel(winner.Target.Provider, winner.UpstreamModel)
+		}
+		if rewritten, changed := rewriteVirtualCacheResponsePercent(winner.ClientBody, req.kind, percent); changed {
 			winner.ClientBody = rewritten
 		} else {
 			settlement = storage.GatewayFinalizeRequestInput{}

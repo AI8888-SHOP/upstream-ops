@@ -222,12 +222,16 @@ func (g *streamPrefixGateWriter) Unwrap() http.ResponseWriter {
 func (g *streamPrefixGateWriter) Ready() <-chan validationResult { return g.ready }
 
 func (g *streamPrefixGateWriter) EnableVirtualCache(kind protocol.Kind) {
+	g.EnableVirtualCachePercent(kind, 100)
+}
+
+func (g *streamPrefixGateWriter) EnableVirtualCachePercent(kind protocol.Kind, percent int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.committed || g.virtualCache != nil {
 		return
 	}
-	g.virtualCache = newVirtualCacheSSETransformer(kind)
+	g.virtualCache = newVirtualCacheSSETransformerPercent(kind, percent)
 }
 
 func (g *streamPrefixGateWriter) Win() error {

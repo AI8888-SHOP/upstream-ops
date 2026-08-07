@@ -53,6 +53,17 @@ func (a *AdminService) CreateProvider(in CreateProviderInput) (*storage.GatewayP
 	if err != nil {
 		return nil, err
 	}
+	virtualCacheModelsJSON, err := NormalizeProviderVirtualCacheModelsJSON(in.VirtualCacheModelsJSON)
+	if err != nil {
+		return nil, err
+	}
+	virtualCachePercent := 0
+	if in.VirtualCachePercent != nil {
+		if *in.VirtualCachePercent < 0 || *in.VirtualCachePercent > 100 {
+			return nil, errors.New("virtual_cache_percent must be between 0 and 100")
+		}
+		virtualCachePercent = *in.VirtualCachePercent
+	}
 	cipherText, err := a.Cipher.Encrypt(key)
 	if err != nil {
 		return nil, err
@@ -78,6 +89,9 @@ func (a *AdminService) CreateProvider(in CreateProviderInput) (*storage.GatewayP
 		ModelPolicy:        modelPolicy,
 		AllowedModelsJSON:  allowedModelsJSON,
 		ConcurrencyLimit:   normalizeProviderConcurrencyLimit(in.ConcurrencyLimit),
+		VirtualCacheEnabled: in.VirtualCacheEnabled != nil && *in.VirtualCacheEnabled,
+		VirtualCacheModelsJSON: virtualCacheModelsJSON,
+		VirtualCachePercent: normalizeProviderVirtualCachePercent(virtualCachePercent),
 		DefaultBillingRate: rate,
 		AuthStyle:          a.normalizeProviderAuthStyle(in.AuthStyle),
 		Enabled:            enabled,
@@ -150,6 +164,22 @@ func (a *AdminService) UpdateProvider(id uint, in UpdateProviderInput) (*storage
 	}
 	if in.ConcurrencyLimit != nil {
 		item.ConcurrencyLimit = normalizeProviderConcurrencyLimit(*in.ConcurrencyLimit)
+	}
+	if in.VirtualCacheEnabled != nil {
+		item.VirtualCacheEnabled = *in.VirtualCacheEnabled
+	}
+	if in.VirtualCacheModelsJSON != nil {
+		models, err := NormalizeProviderVirtualCacheModelsJSON(*in.VirtualCacheModelsJSON)
+		if err != nil {
+			return nil, err
+		}
+		item.VirtualCacheModelsJSON = models
+	}
+	if in.VirtualCachePercent != nil {
+		if *in.VirtualCachePercent < 0 || *in.VirtualCachePercent > 100 {
+			return nil, errors.New("virtual_cache_percent must be between 0 and 100")
+		}
+		item.VirtualCachePercent = normalizeProviderVirtualCachePercent(*in.VirtualCachePercent)
 	}
 	rateChanged := in.DefaultBillingRate != nil
 	if in.DefaultBillingRate != nil {

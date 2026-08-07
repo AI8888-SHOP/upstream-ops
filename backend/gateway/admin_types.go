@@ -133,6 +133,9 @@ type CreateProviderInput struct {
 	ModelPolicy        string  `json:"model_policy"`
 	AllowedModelsJSON  string  `json:"allowed_models_json"`
 	ConcurrencyLimit   int     `json:"concurrency_limit"`
+	VirtualCacheEnabled   *bool  `json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON string `json:"virtual_cache_models_json"`
+	VirtualCachePercent    *int   `json:"virtual_cache_percent"`
 	DefaultBillingRate float64 `json:"default_billing_rate"`
 	AuthStyle          string  `json:"auth_style"`
 	Enabled            *bool   `json:"enabled"`
@@ -150,6 +153,9 @@ type UpdateProviderInput struct {
 	ModelPolicy        *string  `json:"model_policy"`
 	AllowedModelsJSON  *string  `json:"allowed_models_json"`
 	ConcurrencyLimit   *int     `json:"concurrency_limit"`
+	VirtualCacheEnabled   *bool   `json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON *string `json:"virtual_cache_models_json"`
+	VirtualCachePercent    *int    `json:"virtual_cache_percent"`
 	DefaultBillingRate *float64 `json:"default_billing_rate"`
 	AuthStyle          *string  `json:"auth_style"`
 	Enabled            *bool    `json:"enabled"`

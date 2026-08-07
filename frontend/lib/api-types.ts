@@ -733,6 +733,9 @@ export interface GatewayProvider {
   model_policy?: GatewayProviderModelPolicy
   allowed_models_json?: string
   concurrency_limit?: number
+  virtual_cache_enabled?: boolean
+  virtual_cache_models_json?: string
+  virtual_cache_percent?: number
   default_billing_rate: number
   auth_style?: string
   enabled: boolean
@@ -762,6 +765,8 @@ export interface GatewayProviderOption {
   api_key_hint: string
   upstream_protocol: GatewayUpstreamProtocol
   concurrency_limit?: number
+  virtual_cache_enabled?: boolean
+  virtual_cache_percent?: number
   default_billing_rate: number
   enabled: boolean
 }

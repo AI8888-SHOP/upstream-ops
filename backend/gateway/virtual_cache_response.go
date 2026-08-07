@@ -12,14 +12,24 @@ import (
 // bucket exposed to the downstream caller. OpenAI total input fields include
 // cache tokens, while Anthropic input_tokens is already the fresh-input bucket.
 func rewriteVirtualCacheResponse(body []byte, kind protocol.Kind) ([]byte, bool) {
+	return rewriteVirtualCacheResponsePercent(body, kind, 100)
+}
+
+// rewriteVirtualCacheResponsePercent moves a percentage of fresh input into
+// the cache-read bucket exposed to the downstream caller.
+func rewriteVirtualCacheResponsePercent(body []byte, kind protocol.Kind, percent int) ([]byte, bool) {
 	if len(bytes.TrimSpace(body)) == 0 {
+		return body, false
+	}
+	percent = normalizeVirtualCachePercent(percent)
+	if percent <= 0 {
 		return body, false
 	}
 	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body, false
 	}
-	changed := rewriteVirtualCacheValue(payload, protocol.NormalizeKind(kind))
+	changed := rewriteVirtualCacheValuePercent(payload, protocol.NormalizeKind(kind), percent)
 	if !changed {
 		return body, false
 	}
@@ -31,28 +41,40 @@ func rewriteVirtualCacheResponse(body []byte, kind protocol.Kind) ([]byte, bool)
 }
 
 func rewriteVirtualCacheValue(value any, kind protocol.Kind) bool {
+	return rewriteVirtualCacheValuePercent(value, kind, 100)
+}
+
+func rewriteVirtualCacheValuePercent(value any, kind protocol.Kind, percent int) bool {
 	changed := false
 	switch current := value.(type) {
 	case map[string]any:
 		if usage, ok := current["usage"].(map[string]any); ok {
-			changed = rewriteVirtualCacheUsage(usage, kind) || changed
+			changed = rewriteVirtualCacheUsagePercent(usage, kind, percent) || changed
 		}
 		for key, child := range current {
 			if key == "usage" {
 				continue
 			}
-			changed = rewriteVirtualCacheValue(child, kind) || changed
+			changed = rewriteVirtualCacheValuePercent(child, kind, percent) || changed
 		}
 	case []any:
 		for _, child := range current {
-			changed = rewriteVirtualCacheValue(child, kind) || changed
+			changed = rewriteVirtualCacheValuePercent(child, kind, percent) || changed
 		}
 	}
 	return changed
 }
 
 func rewriteVirtualCacheUsage(usage map[string]any, kind protocol.Kind) bool {
+	return rewriteVirtualCacheUsagePercent(usage, kind, 100)
+}
+
+func rewriteVirtualCacheUsagePercent(usage map[string]any, kind protocol.Kind, percent int) bool {
 	if usage == nil {
+		return false
+	}
+	percent = normalizeVirtualCachePercent(percent)
+	if percent <= 0 {
 		return false
 	}
 	switch protocol.NormalizeKind(kind) {
@@ -61,17 +83,25 @@ func rewriteVirtualCacheUsage(usage map[string]any, kind protocol.Kind) bool {
 		if fresh <= 0 {
 			return false
 		}
-		usage["input_tokens"] = 0
-		usage["cache_read_input_tokens"] = max0(mapInt(usage, "cache_read_input_tokens")) + fresh
+		virtual := virtualCacheTokenPercent(fresh, percent)
+		if virtual <= 0 {
+			return false
+		}
+		usage["input_tokens"] = fresh - virtual
+		usage["cache_read_input_tokens"] = max0(mapInt(usage, "cache_read_input_tokens")) + virtual
 		return true
 	case protocol.KindOpenAIResponses:
-		return rewriteOpenAIVirtualCacheUsage(usage)
+		return rewriteOpenAIVirtualCacheUsagePercent(usage, percent)
 	default:
-		return rewriteOpenAIVirtualCacheUsage(usage)
+		return rewriteOpenAIVirtualCacheUsagePercent(usage, percent)
 	}
 }
 
 func rewriteOpenAIVirtualCacheUsage(usage map[string]any) bool {
+	return rewriteOpenAIVirtualCacheUsagePercent(usage, 100)
+}
+
+func rewriteOpenAIVirtualCacheUsagePercent(usage map[string]any, percent int) bool {
 	// Match Sub2API's compatibility parser exactly: input_tokens wins when it
 	// is positive, otherwise prompt_tokens is the fallback. Some OpenAI-compatible
 	// providers return the opposite alias for the requested endpoint.
@@ -95,7 +125,11 @@ func rewriteOpenAIVirtualCacheUsage(usage map[string]any) bool {
 	if fresh <= 0 {
 		return false
 	}
-	virtualCacheRead := cacheRead + fresh
+	virtual := virtualCacheTokenPercent(fresh, percent)
+	if virtual <= 0 {
+		return false
+	}
+	virtualCacheRead := cacheRead + virtual
 	// Keep the canonical top-level aliases coherent with the nested details.
 	// Sub2API currently prefers *_tokens_details, while other OpenAI-compatible
 	// clients read one of these top-level fields instead.
@@ -130,6 +164,29 @@ func rewriteOpenAIVirtualCacheUsage(usage map[string]any) bool {
 	return true
 }
 
+func normalizeVirtualCachePercent(percent int) int {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
+func virtualCacheTokenPercent(fresh, percent int) int {
+	if fresh <= 0 || percent <= 0 {
+		return 0
+	}
+	percent = normalizeVirtualCachePercent(percent)
+	// Token counts are normally small, but avoid an integer overflow if a
+	// malformed upstream usage value is received.
+	if percent > 0 && fresh > int(^uint(0)>>1)/percent {
+		return fresh
+	}
+	return fresh * percent / 100
+}
+
 // Sub2API treats the first present nested creation alias as authoritative,
 // including an explicit zero. If a provider also supplies a positive top-level
 // compatibility field, update that first nested alias so the downstream parser
@@ -157,12 +214,20 @@ func syncOpenAICacheCreationDetails(usage map[string]any, cacheCreation int) {
 // rewritten when Finish is called.
 type virtualCacheSSETransformer struct {
 	kind    protocol.Kind
+	percent int
 	pending []byte
 	applied bool
 }
 
 func newVirtualCacheSSETransformer(kind protocol.Kind) *virtualCacheSSETransformer {
-	return &virtualCacheSSETransformer{kind: protocol.NormalizeKind(kind)}
+	return newVirtualCacheSSETransformerPercent(kind, 100)
+}
+
+func newVirtualCacheSSETransformerPercent(kind protocol.Kind, percent int) *virtualCacheSSETransformer {
+	return &virtualCacheSSETransformer{
+		kind:    protocol.NormalizeKind(kind),
+		percent: normalizeVirtualCachePercent(percent),
+	}
 }
 
 func (t *virtualCacheSSETransformer) Transform(payload []byte, final bool) []byte {
@@ -196,7 +261,7 @@ func (t *virtualCacheSSETransformer) Transform(payload []byte, final bool) []byt
 			break
 		}
 		event := t.pending[:end]
-		rewritten := rewriteVirtualCacheSSEEvent(event, separator, t.kind)
+		rewritten := rewriteVirtualCacheSSEEventPercent(event, separator, t.kind, t.percent)
 		if !bytes.Equal(rewritten, event) {
 			t.applied = true
 		}
@@ -204,7 +269,7 @@ func (t *virtualCacheSSETransformer) Transform(payload []byte, final bool) []byt
 		t.pending = t.pending[end:]
 	}
 	if final && len(t.pending) > 0 {
-		rewritten := rewriteVirtualCacheSSEEvent(t.pending, nil, t.kind)
+		rewritten := rewriteVirtualCacheSSEEventPercent(t.pending, nil, t.kind, t.percent)
 		if !bytes.Equal(rewritten, t.pending) {
 			t.applied = true
 		}
@@ -248,6 +313,10 @@ func nextSSEEventBoundary(payload []byte) (int, []byte) {
 }
 
 func rewriteVirtualCacheSSEEvent(event, separator []byte, kind protocol.Kind) []byte {
+	return rewriteVirtualCacheSSEEventPercent(event, separator, kind, 100)
+}
+
+func rewriteVirtualCacheSSEEventPercent(event, separator []byte, kind protocol.Kind, percent int) []byte {
 	body := event
 	if len(separator) > 0 && len(body) >= len(separator) {
 		body = body[:len(body)-len(separator)]
@@ -282,7 +351,7 @@ func rewriteVirtualCacheSSEEvent(event, separator []byte, kind protocol.Kind) []
 	if strings.TrimSpace(data) == "[DONE]" {
 		return event
 	}
-	rewritten, changed := rewriteVirtualCacheResponse([]byte(data), kind)
+	rewritten, changed := rewriteVirtualCacheResponsePercent([]byte(data), kind, percent)
 	if !changed {
 		return event
 	}

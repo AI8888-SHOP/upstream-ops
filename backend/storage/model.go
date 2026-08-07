@@ -483,6 +483,7 @@ const (
 
 	GatewayVirtualCacheReasonHedge                = "hedge"
 	GatewayVirtualCacheReasonResponseRuleFailover = "response_rule_failover"
+	GatewayVirtualCacheReasonProviderGlobal      = "provider_global"
 
 	GatewayAttemptStatusAccepted = "accepted"
 	GatewayAttemptStatusRejected = "rejected"
@@ -505,6 +506,11 @@ type GatewayProvider struct {
 	// ConcurrencyLimit is shared by every gateway route that references this provider.
 	// Zero preserves the legacy unlimited behavior.
 	ConcurrencyLimit   int     `gorm:"not null;default:0" json:"concurrency_limit"`
+	// Provider-level virtual cache is an opt-in downstream accounting hint for
+	// text models. The percentage is applied to fresh input tokens only.
+	VirtualCacheEnabled    bool   `gorm:"not null;default:false" json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON  string `gorm:"type:text;not null;default:'[]'" json:"virtual_cache_models_json"`
+	VirtualCachePercent     int    `gorm:"not null;default:0" json:"virtual_cache_percent"`
 	DefaultBillingRate float64 `gorm:"not null;default:1" json:"default_billing_rate"`
 	AuthStyle          string  `gorm:"size:16;not null;default:'both'" json:"auth_style"`
 	Enabled            bool    `gorm:"not null;default:true;index" json:"enabled"`

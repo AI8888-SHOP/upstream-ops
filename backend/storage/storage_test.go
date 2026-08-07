@@ -1764,6 +1764,60 @@ func TestGatewayUsageFinalizeResponseRuleVirtualCacheRejectsSameRoute(t *testing
 	}
 }
 
+func TestGatewayUsageFinalizeProviderGlobalVirtualCache(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "vc-provider-key", KeyHash: "vc-provider-hash", KeyPrefix: "sk-vcp-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	usage := &GatewayUsageLog{
+		GatewayKeyID: key.ID, GatewayProviderID: 77, RequestID: "vc-provider-request", RouteID: 7,
+		Attempt: 1, AttemptKind: GatewayAttemptKindPrimary, AttemptStatus: GatewayAttemptStatusAccepted,
+		BillingMode: "token", InputTokens: 100, ActualCost: 1, Success: true,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := logs.Create(usage); err != nil {
+		t.Fatalf("create provider usage: %v", err)
+	}
+	first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: usage.RequestID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: 1, WinnerUsageLogID: usage.ID,
+		BilledCost: 0.7, BilledCostSet: true,
+		VirtualCacheReadEnabled: true, VirtualCacheReadTokens: 30,
+		VirtualCacheReadCost: 0.01, VirtualCacheReason: GatewayVirtualCacheReasonProviderGlobal,
+	})
+	if err != nil || !first {
+		t.Fatalf("provider virtual finalize = %v, err=%v", first, err)
+	}
+	var got GatewayUsageLog
+	if err := db.First(&got, usage.ID).Error; err != nil {
+		t.Fatalf("load provider usage: %v", err)
+	}
+	if got.VirtualCacheReason != GatewayVirtualCacheReasonProviderGlobal || got.VirtualCacheReadTokens != 30 || !got.Winner {
+		t.Fatalf("provider virtual usage=%+v", got)
+	}
+
+	bad := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: "vc-provider-missing-id", RouteID: 8,
+		Attempt: 1, AttemptKind: GatewayAttemptKindPrimary, AttemptStatus: GatewayAttemptStatusAccepted,
+		BillingMode: "token", InputTokens: 10, ActualCost: 1, Success: true,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := logs.Create(bad); err != nil {
+		t.Fatalf("create invalid provider usage: %v", err)
+	}
+	if _, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: bad.RequestID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: 1, WinnerUsageLogID: bad.ID,
+		BilledCost: 0.5, BilledCostSet: true,
+		VirtualCacheReadEnabled: true, VirtualCacheReadTokens: 5,
+		VirtualCacheReason: GatewayVirtualCacheReasonProviderGlobal,
+	}); err == nil {
+		t.Fatal("provider virtual settlement without provider id unexpectedly succeeded")
+	}
+}
+
 func TestGatewayUsageFinalizeRejectsUnboundBilledCostOverride(t *testing.T) {
 	db := openTestDB(t)
 	key := &GatewayKey{Name: "billed-override-key", KeyHash: "billed-override-hash", KeyPrefix: "sk-bco-", KeyCipher: "cipher"}

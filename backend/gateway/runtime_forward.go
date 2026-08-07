@@ -298,7 +298,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			}
 
 			upstreamFullURL := target.BaseURL + upstreamPath
-			usageMeta := usageRecordMeta{
+				usageMeta := usageRecordMeta{
 				InboundEndpoint:   path,
 				UpstreamEndpoint:  upstreamPath,
 				InboundProtocol:   string(kind),
@@ -308,10 +308,14 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				ReasoningEffort:   attemptReasoningEffort,
 				UpstreamURL:       upstreamFullURL,
 				Attempt:           attemptNo,
-				AttemptKind:       attemptKind,
-			}
+					AttemptKind:       attemptKind,
+				}
+				providerVirtualCachePercent := 0
+				if target.Provider != nil && virtualCacheEligible {
+					providerVirtualCachePercent, _ = ProviderVirtualCachePercentForModel(target.Provider, upstreamModel)
+				}
 
-			start := time.Now()
+				start := time.Now()
 			var (
 				status             int
 				respHeaders        http.Header
@@ -319,16 +323,17 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				firstTokenMS       *int64
 				fwdErr             error
 				streamCommitted    bool
-				streamTokens       UsageTokens
-				streamErr          error
-				clientDisconnected bool
+					streamTokens       UsageTokens
+					streamErr          error
+					clientDisconnected bool
+					streamVirtualCacheApplied bool
 			)
 			if stream {
 				// 真流式：边读上游 SSE 边写客户端。Committed 后禁止 retry/failover。
-				res := rt.forwardStream(
-					c.Request.Context(), c, target, upstreamPath, c.Request.Method, c.Request.Header, fwdBody,
-					kind, upstreamKind, upstreamModel, converted, attemptFTTimeout,
-				)
+					res := rt.forwardStreamWithVirtualCache(
+						c.Request.Context(), c, target, upstreamPath, c.Request.Method, c.Request.Header, fwdBody,
+						kind, upstreamKind, upstreamModel, converted, attemptFTTimeout, providerVirtualCachePercent,
+					)
 				status = res.Status
 				respHeaders = res.Headers
 				respBody = res.Body
@@ -336,8 +341,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				fwdErr = res.Err
 				streamCommitted = res.Committed
 				streamTokens = res.Tokens
-				streamErr = res.StreamErr
-				clientDisconnected = res.ClientDisconnected
+					streamErr = res.StreamErr
+					clientDisconnected = res.ClientDisconnected
+					streamVirtualCacheApplied = res.VirtualCacheApplied
 			} else {
 				status, respHeaders, respBody, firstTokenMS, fwdErr = rt.forwardOnce(
 					c.Request.Context(), c, target, upstreamPath, c.Request.Method, c.Request.Header, fwdBody, false, upstreamKind, attemptFTTimeout,
@@ -430,10 +436,24 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				if status == 0 {
 					status = http.StatusOK
 				}
-				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, streamTokens, cand.EffectiveRate, cand.BillingRate, stream, status, success, errInfo, duration, firstTokenMS, c, usageMeta)
-				if !success {
-					rt.finalizeUsageFailure(reqID, key)
-				}
+					settlement := storage.GatewayFinalizeRequestInput{}
+					if success && streamVirtualCacheApplied {
+						settlement = rt.buildProviderVirtualCacheSettlement(
+							target.Provider, upstreamModel, streamTokens, protocol.Kind(upstreamKind),
+							cand.EffectiveRate, cand.BillingRate, virtualCacheEligible,
+						)
+					}
+					usageMeta.DeferSettlement = settlement.VirtualCacheReadEnabled
+					usageID := rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, streamTokens, cand.EffectiveRate, cand.BillingRate, stream, status, success, errInfo, duration, firstTokenMS, c, usageMeta)
+					if !success {
+						rt.finalizeUsageFailure(reqID, key)
+					} else if settlement.VirtualCacheReadEnabled {
+						if usageID == 0 {
+							rt.finalizeUsageFailure(reqID, key)
+						} else if err := rt.finalizeUsageWinnerWithSettlement(reqID, key, attemptNo, usageID, settlement); err != nil {
+							_ = rt.finalizeUsageWinner(reqID, key, attemptNo, usageID)
+						}
+					}
 				return
 			}
 
@@ -545,17 +565,34 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			}
 
 			// 非流式成功：整包转换后写出
-			tokens := rt.parseUsageByKind(respBody, false, upstreamKind)
-			clientBody := rt.convertUpstreamResponse(respBody, kind, upstreamKind, upstreamModel, false, converted)
-			if converted && rt.Log != nil && len(clientBody) == 0 && len(respBody) > 0 {
-				rt.Log.Warn("response convert produced empty body")
-			}
-			rt.copyResponseHeaders(c.Writer.Header(), respHeaders)
-			if converted {
-				c.Writer.Header().Del("Content-Length")
-				c.Header("Content-Type", "application/json")
-			}
-			c.Status(status)
+				tokens := rt.parseUsageByKind(respBody, false, upstreamKind)
+				clientBody := rt.convertUpstreamResponse(respBody, kind, upstreamKind, upstreamModel, false, converted)
+				if converted && rt.Log != nil && len(clientBody) == 0 && len(respBody) > 0 {
+					rt.Log.Warn("response convert produced empty body")
+				}
+				settlement := rt.buildProviderVirtualCacheSettlement(
+					target.Provider, upstreamModel, tokens, protocol.Kind(upstreamKind),
+					cand.EffectiveRate, cand.BillingRate, virtualCacheEligible,
+				)
+				virtualCacheChanged := false
+				if settlement.VirtualCacheReadEnabled {
+					if rewritten, changed := rewriteVirtualCacheResponsePercent(clientBody, kind, virtualCachePercentForSettlement(settlement, target.Provider, upstreamModel)); changed {
+						clientBody = rewritten
+						virtualCacheChanged = true
+					} else {
+						settlement = storage.GatewayFinalizeRequestInput{}
+					}
+				}
+				rt.copyResponseHeaders(c.Writer.Header(), respHeaders)
+				if converted {
+					c.Writer.Header().Del("Content-Length")
+					c.Header("Content-Type", "application/json")
+				}
+				if virtualCacheChanged {
+					c.Writer.Header().Del("Content-Length")
+				}
+				c.Status(status)
+				usageMeta.DeferSettlement = settlement.VirtualCacheReadEnabled
 			written, writeErr := c.Writer.Write(clientBody)
 			if writeErr != nil || (len(clientBody) > 0 && written != len(clientBody)) {
 				if writeErr == nil {
@@ -577,8 +614,20 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			if affinity.shouldRememberRoute(route.ID) {
 				rt.rememberRouteAffinity(affinity.Keys, route.ID, time.Now())
 			}
-			rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, tokens, cand.EffectiveRate, cand.BillingRate, stream, status, true, usageErrorInfo{}, duration, firstTokenMS, c, usageMeta)
-			return
+				usageID := rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, tokens, cand.EffectiveRate, cand.BillingRate, stream, status, true, usageErrorInfo{}, duration, firstTokenMS, c, usageMeta)
+				if settlement.VirtualCacheReadEnabled {
+					if usageID == 0 {
+						rt.finalizeUsageFailure(reqID, key)
+						return
+					}
+					if err := rt.finalizeUsageWinnerWithSettlement(reqID, key, attemptNo, usageID, settlement); err != nil {
+						if rt.Log != nil {
+							rt.Log.Error("finalize provider virtual cache winner failed", "request_id", reqID, "attempt", attemptNo, "err", err)
+						}
+						_ = rt.finalizeUsageWinner(reqID, key, attemptNo, usageID)
+					}
+				}
+				return
 		}
 
 		// 同路由结束：判断能否顺延

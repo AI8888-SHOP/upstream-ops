@@ -132,3 +132,43 @@ func TestVirtualCacheSSETransformerNoUsageFastPath(t *testing.T) {
 		t.Fatal("usage-free frame unexpectedly marked as rewritten")
 	}
 }
+
+func TestRewriteVirtualCacheResponsePercent(t *testing.T) {
+	openAI := []byte(`{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":20,"cache_write_tokens":10}}}`)
+	rewritten, changed := rewriteVirtualCacheResponsePercent(openAI, protocol.KindOpenAIResponses, 50)
+	if !changed {
+		t.Fatal("partial OpenAI response was not rewritten")
+	}
+	got := NormalizeUsageBuckets(ParseOpenAIUsage(rewritten), protocol.KindOpenAIResponses)
+	if got.InputTokens != 35 || got.CacheReadTokens != 55 || got.CacheCreationTokens != 10 {
+		t.Fatalf("partial OpenAI usage=%+v, want fresh=35 read=55 creation=10", got)
+	}
+
+	anthropic := []byte(`{"usage":{"input_tokens":101,"cache_read_input_tokens":7,"cache_creation_input_tokens":3}}`)
+	rewritten, changed = rewriteVirtualCacheResponsePercent(anthropic, protocol.KindAnthropic, 50)
+	if !changed {
+		t.Fatal("partial Anthropic response was not rewritten")
+	}
+	got = ParseAnthropicUsage(rewritten)
+	if got.InputTokens != 51 || got.CacheReadTokens != 57 || got.CacheCreationTokens != 3 {
+		t.Fatalf("partial Anthropic usage=%+v, want fresh=51 read=57 creation=3", got)
+	}
+
+	body := []byte(`{"usage":{"input_tokens":10}}`)
+	rewritten, changed = rewriteVirtualCacheResponsePercent(body, protocol.KindOpenAIResponses, 0)
+	if changed || !bytes.Equal(rewritten, body) {
+		t.Fatalf("zero percent changed response: %s", rewritten)
+	}
+}
+
+func TestVirtualCacheSSETransformerPercent(t *testing.T) {
+	transformer := newVirtualCacheSSETransformerPercent(protocol.KindOpenAIChat, 50)
+	out := transformer.Transform([]byte("data: {\"usage\":{\"prompt_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":20}}}\n\n"), true)
+	if !transformer.Applied() {
+		t.Fatal("partial SSE response was not rewritten")
+	}
+	got := NormalizeUsageBuckets(ParseOpenAISSEUsage(out), protocol.KindOpenAIChat)
+	if got.InputTokens != 40 || got.CacheReadTokens != 60 {
+		t.Fatalf("partial SSE usage=%+v, want fresh=40 read=60", got)
+	}
+}
