@@ -467,6 +467,12 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					lastErr = fmt.Errorf("upstream status %d: %s", status, errInfo.Summary)
 				}
 				// 最后一次同路由尝试失败才进入冷却（客户端取消 / 重试关闭时不写冷却）
+				// Permanent capability/auth/balance errors do not benefit from
+				// repeating the same request on the same route. Keep failover to
+				// other routes available, but end this route's retry ladder now.
+				if tryOnRoute < maxTriesOnRoute-1 && !isSameRouteRetryableUpstreamFailure(status, errInfo) {
+					maxTriesOnRoute = tryOnRoute + 1
+				}
 				lastTryOnRoute := tryOnRoute >= maxTriesOnRoute-1
 				var cooldownUntil *time.Time
 				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && !clientCanceled {

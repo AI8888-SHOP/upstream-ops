@@ -27,6 +27,45 @@ func (svc *Service) isFailoverStatus(code int, failoverOn4xx bool) bool {
 	return false
 }
 
+// isSameRouteRetryableUpstreamFailure distinguishes transient failures from
+// responses that cannot succeed by sending the same request to the same route
+// again. The caller may still fail over to another route when its policy allows
+// it. Keeping this list narrow preserves configured retries for ordinary 4xx
+// responses and all transport/5xx/429 failures.
+func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
+	if status == 0 || status == http.StatusTooManyRequests || status >= 500 {
+		return true
+	}
+	if status < 400 || status >= 500 {
+		return true
+	}
+	text := strings.ToLower(strings.TrimSpace(info.Summary))
+	if body := strings.ToLower(strings.TrimSpace(info.UpstreamBody)); body != "" {
+		if text != "" {
+			text += "\n"
+		}
+		text += body
+	}
+	for _, marker := range []string{
+		"image generation is not enabled",
+		"video generation is not enabled",
+		"not enabled for this group",
+		"insufficient account balance",
+		"model_not_found",
+		"model not found",
+		"no available channel for model",
+		"invalid api key",
+		"invalid_api_key",
+		"permission denied",
+		"not authorized",
+	} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	return true
+}
+
 // isClientDisconnectAfterCommit 流已向客户端提交后，仅因客户端中途断开/取消结束。
 // 此时上游通常已正常响应（甚至完整计费），应记成功而非失败。
 // 注意：若下游已写出终端帧（DownstreamComplete），forwardStream 会先清掉 ClientDisconnected，
