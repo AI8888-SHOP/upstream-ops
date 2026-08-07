@@ -929,12 +929,12 @@ Route field `upstream_protocol`:
 - Default failover: no response, 429, 5xx; with group “failover on 4xx”, all 4xx may failover too.
 - Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
 - Automatic cooldown is isolated by route and final upstream model, so a failure for one model does not pause the channel for other models. Model aliases that resolve to the same upstream model share the cooldown; the management "clear pause" action clears all model cooldowns for that route.
-- Group: `retry_count`, `failover_max`, `cooldown_seconds`.
+- Group: `retry_count`, `response_validation_retry_count`, `failover_max`, `cooldown_seconds`. `response_validation_retry_count` controls extra attempts on the same route after a pre-commit regex rejection; `-1` inherits `retry_count`, while `0` disables only regex-triggered retries.
 - **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
 - **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.
 - Image generation, video generation, and Realtime/WebSocket operations always use the original sequential policy. Multimodal text requests that only include images as input are not excluded.
 - **Regex response validation (off by default)** uses Go RE2 syntax and checks rules in ascending numeric priority. Targets are `assistant_text` (client-visible text after protocol conversion), `raw_body`, and `error_message`. Empty model/protocol filters match all values; `*` / `?` globs are supported.
-- A non-stream response is checked in full before delivery. A match records the attempt as `regex_reject` / `rejected`, retries the current route according to `retry_count`, and then switches to another route.
+- A non-stream response is checked in full before delivery. A match records the attempt as `regex_reject` / `rejected`, retries the current route according to `response_validation_retry_count` (or `retry_count` when it is `-1`), and then switches to another route.
 - Streaming uses the fixed `prefix` mode: buffer at most `response_validation_prefix_bytes` or wait `response_validation_prefix_timeout_ms` before first commit. A match after commit cannot safely switch routes and is audit-only with the post-commit marker.
 - Once valid SSE has been committed to the client, the gateway does not switch routes (avoids half-stream dual responses).
 
@@ -1142,6 +1142,8 @@ Group create/update requests accept the policy fields directly, for example:
   "hedge_delay_seconds": 10,
   "hedge_max_parallel": 2,
   "hedge_max_attempts": 4,
+  "retry_count": 2,
+  "response_validation_retry_count": 1,
   "response_validation_enabled": true,
   "response_validation_stream_mode": "prefix",
   "response_validation_prefix_bytes": 8192,

@@ -48,9 +48,20 @@ type coordinatedForwardRequest struct {
 }
 
 type coordinatedRoutePlan struct {
-	Candidate  ScoredRoute
-	TryOnRoute int
-	MaxTries   int
+	Candidate          ScoredRoute
+	TryOnRoute         int
+	MaxTries           int
+	ResponseMaxTries   int
+}
+
+func (p coordinatedRoutePlan) responseMaxTries() int {
+	if p.ResponseMaxTries > 0 {
+		return p.ResponseMaxTries
+	}
+	// Plans built before response_validation_retry_count was introduced only
+	// carry MaxTries. Treat those in-memory plans as inheriting the transport
+	// retry ladder, which preserves existing unit-test and caller behavior.
+	return p.MaxTries
 }
 
 // coordinatedPlanScheduler keeps the configured hedge order while allowing a
@@ -98,6 +109,9 @@ func (s *coordinatedPlanScheduler) prioritizeRetry(attempt *coordinatedForwardAt
 		return
 	}
 	wantTry := attempt.Plan.TryOnRoute + 1
+	if responseMaxTries := attempt.Plan.responseMaxTries(); responseMaxTries <= wantTry {
+		return
+	}
 	for index := s.started; index < len(s.entries); index++ {
 		entry := s.entries[index]
 		if entry.Candidate.Route.ID != attempt.Route.ID || entry.TryOnRoute != wantTry {
@@ -313,12 +327,18 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 			attempt.Err = errSkippedNonRetryableRoute
 			return attempt, attempt.Err
 		}
-		if _, rejected := responseRejectedRoutes.Load(attempt.Route.ID); rejected && attempt.Plan.TryOnRoute == 0 {
-			// A response-rule rejection excludes a route's primary entry, but it
-			// must not cancel the explicitly planned same-route retry ladder.
-			attempt.Skipped = true
-			attempt.Err = errSkippedRejectedRoute
-			return attempt, attempt.Err
+		if _, rejected := responseRejectedRoutes.Load(attempt.Route.ID); rejected {
+			responseMaxTries := attempt.Plan.responseMaxTries()
+			if attempt.Plan.TryOnRoute > 0 && attempt.Plan.TryOnRoute < responseMaxTries {
+				// A response-rule rejection excludes a route's primary entry, but it
+				// must not cancel the explicitly planned same-route retry ladder.
+			} else {
+				// Once the response-rule retry budget is exhausted, skip remaining
+				// entries for this route so the scheduler can move to failover.
+				attempt.Skipped = true
+				attempt.Err = errSkippedRejectedRoute
+				return attempt, attempt.Err
+			}
 		}
 		if err := rt.prepareCoordinatedAttempt(&req, attempt); err != nil {
 			attempt.Err = err
@@ -466,25 +486,36 @@ func buildCoordinatedRoutePlan(candidates []ScoredRoute, group *storage.GatewayG
 		}
 		routeLimit = minInt(len(candidates), 1+failoverMax)
 	}
-	retries := 0
+	transportRetries := 0
 	if group.RetryEnabled {
-		retries = maxInt(group.RetryCount, 0)
+		transportRetries = maxInt(group.RetryCount, 0)
 	}
-	plan := make([]coordinatedRoutePlan, 0, routeLimit*(1+retries))
+	responseRetries := transportRetries
+	if validationEnabled {
+		responseRetries = effectiveResponseValidationRetryCount(group)
+	}
+	planRetries := maxInt(transportRetries, responseRetries)
+	plan := make([]coordinatedRoutePlan, 0, routeLimit*(1+planRetries))
 	if hedgeActive {
 		// Keep distinct routes in the initial hedge rounds. If a response rule
 		// rejects a route, the coordinator promotes that route's next retry into
 		// the next unstarted slot without disturbing already-running hedges.
-		for try := 0; try <= retries; try++ {
+		for try := 0; try <= planRetries; try++ {
 			for routeIndex := 0; routeIndex < routeLimit; routeIndex++ {
-				plan = append(plan, coordinatedRoutePlan{Candidate: candidates[routeIndex], TryOnRoute: try, MaxTries: 1 + retries})
+				plan = append(plan, coordinatedRoutePlan{
+					Candidate: candidates[routeIndex], TryOnRoute: try,
+					MaxTries: 1 + transportRetries, ResponseMaxTries: 1 + responseRetries,
+				})
 			}
 		}
 		return plan
 	}
 	for routeIndex := 0; routeIndex < routeLimit; routeIndex++ {
-		for try := 0; try <= retries; try++ {
-			plan = append(plan, coordinatedRoutePlan{Candidate: candidates[routeIndex], TryOnRoute: try, MaxTries: 1 + retries})
+		for try := 0; try <= planRetries; try++ {
+			plan = append(plan, coordinatedRoutePlan{
+				Candidate: candidates[routeIndex], TryOnRoute: try,
+				MaxTries: 1 + transportRetries, ResponseMaxTries: 1 + responseRetries,
+			})
 		}
 	}
 	return plan
@@ -496,6 +527,23 @@ func coordinatedTransportFailoverEnabled(group *storage.GatewayGroup) bool {
 
 func coordinatedSameRouteRetryAllowed(group *storage.GatewayGroup, attempt *coordinatedForwardAttempt) bool {
 	return group != nil && group.RetryEnabled && attempt != nil && attempt.Plan.TryOnRoute+1 < attempt.Plan.MaxTries
+}
+
+func effectiveResponseValidationRetryCount(group *storage.GatewayGroup) int {
+	if group == nil || !group.RetryEnabled {
+		return 0
+	}
+	retries := group.ResponseValidationRetryCount
+	if retries < 0 {
+		retries = group.RetryCount
+	}
+	if retries < 0 {
+		return 0
+	}
+	if retries > 10 {
+		return 10
+	}
+	return retries
 }
 
 // coordinatedAttemptFirstTokenTimeout keeps the legacy timeout contract when
@@ -541,12 +589,15 @@ func validateCoordinatedAttempt(attempt *coordinatedForwardAttempt, excludedRout
 			return false, errSkippedNonRetryableRoute
 		}
 	}
-	if responseRejectedRoutes != nil && attempt.Plan.TryOnRoute == 0 {
+	if responseRejectedRoutes != nil {
 		if _, rejected := responseRejectedRoutes.Load(attempt.Route.ID); rejected {
-			// A same-route retry may already be running when another attempt on
-			// that route matches a pre-commit response rule. A later planned retry
-			// is still allowed to test the same route before failover.
-			return false, errSkippedRejectedRoute
+			responseMaxTries := attempt.Plan.responseMaxTries()
+			if attempt.Plan.TryOnRoute == 0 || attempt.Plan.TryOnRoute >= responseMaxTries {
+				// A same-route retry may already be running when another attempt on
+				// that route matches a pre-commit response rule. Only the explicitly
+				// configured response retry ladder remains eligible.
+				return false, errSkippedRejectedRoute
+			}
 		}
 	}
 	validation, status, _, terminal := attempt.validationSnapshot()

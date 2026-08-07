@@ -82,7 +82,7 @@ UpstreamOps 主要解决这些痛点：
 - **首字超时**（可选）：在仍有可顺延路由时，对首字节等待限时，加速切换到下一条路由。
 - **并发兜底（Hedge，可选，默认关闭）**：主请求超过组级延迟仍无有效结果时，按上限并发启动其它路由；首个通过响应校验的 attempt 获胜并取消仍在运行的 loser。`maxParallel` 包含主请求，`maxAttempts` 限制总尝试数；图片/视频生成和 Realtime 请求自动排除。
 - **并发兜底虚拟缓存（可选，默认关闭）**：真实发生重叠 hedge 且成功响应交付后，可将 winner 的新鲜输入按缓存读取 token 计入用户侧结算。用户只按折后 winner 金额扣费；所有 attempt 的原始上游成本和额外成本仍保留用于核算，图片/视频生成和 Realtime 请求不会获得该补贴。
-- **响应正则校验（可选，默认关闭）**：按优先级检查 `assistant_text`、`raw_body` 或 `error_message`，支持模型和协议过滤；命中后先按组内 `RetryCount` 重试当前渠道，仍命中才顺延其它路由。非流式检查完整响应，流式在提交前检查可配置前缀。
+- **响应正则校验（可选，默认关闭）**：按优先级检查 `assistant_text`、`raw_body` 或 `error_message`，支持模型和协议过滤；命中后先按 `response_validation_retry_count` 重试当前渠道，`-1` 表示继承 `retry_count`，`0` 表示不重试，仍命中才顺延其它路由。非流式检查完整响应，流式在提交前检查可配置前缀。
 - User-Agent：路由级 `passthrough` / `group` / `custom`；管理侧拉模型、探测会回落默认 UA。
 - 使用记录对齐 sub2api 字段：endpoint、协议、tokens（含缓存读写分桶）、费用、延迟、首字延迟、attempt 类型/状态、winner、响应规则与上游错误详情；提供列表、stats、模型筛选项与清理。
 - 计费：内置单价表（可覆盖）+ `actual_cost = base_cost × 账号计费倍率`（与上游同步倍率换算一致）。
@@ -1036,13 +1036,13 @@ x-api-key: sk-...
 - 默认可顺延：无响应、429、5xx；组开启「4xx 顺延」时全部 4xx 也可顺延。
 - 失败路由可写入临时不可调度截止时间（冷却秒数，默认来自 `gateway.tempPauseSeconds` / 组配置）。
 - 自动冷却按“路由 + 最终上游模型”隔离：某个模型失败不会暂停同一渠道的其它模型；映射到同一最终上游模型的别名共享冷却。管理端“清除暂停”会清除该路由的全部模型冷却。
-- 组级：`retry_count`、`failover_max`、`cooldown_seconds`。
+- 组级：`retry_count`、`response_validation_retry_count`、`failover_max`、`cooldown_seconds`。
 - **首字超时**：配置后，仅当「本请求仍可切换到其它路由」时启用；最后一条可试路由会关闭首字掐断，避免无意义超时。
 - **并发兜底（默认关闭）**：主 attempt 立即开始；超过 `hedge_delay_seconds` 仍没有通过校验的响应时，按延迟阶梯启动其它路由。`hedge_max_parallel` 包含主请求，`hedge_max_attempts` 是整个请求可启动的 attempt 总上限。第一个通过校验的响应获胜，其余未完成请求会被取消。
 - 图片生成、视频生成与 Realtime/WebSocket 请求始终按原有顺序策略执行，不启用并发兜底；仅把图片作为输入的多模态文本请求不在排除范围内。
 - 开启网关组 `hedge_virtual_cache_enabled` 后，只有确实启动了重叠 hedge 且 winner 成功交付时，才把 winner 的新鲜输入虚拟为缓存读取并降低用户实收；原始 `actual_cost`、所有 loser/额外 attempt 成本和结算差额都会单独保留，失败、顺序重试、媒体请求不会触发。
 - **响应正则校验（默认关闭）**：规则按数值从小到大的优先级匹配，使用 Go RE2 语法。检查目标可选 `assistant_text`（协议转换后的助手可见文本）、`raw_body` 或 `error_message`；模型/协议过滤留空表示全部，也支持 `*` / `?` 通配。
-- 非流式响应会在交付客户端前检查完整响应。命中后将当前 attempt 记为 `regex_reject` / `rejected`，先按 `retry_count` 重试同一路由，再换其它路由。
+- 非流式响应会在交付客户端前检查完整响应。命中后将当前 attempt 记为 `regex_reject` / `rejected`，先按 `response_validation_retry_count` 重试同一路由（`-1` 继承 `retry_count`），再换其它路由。
 - 流式响应采用固定的 `prefix` 模式：最多缓存 `response_validation_prefix_bytes` 或等待 `response_validation_prefix_timeout_ms`，在首次提交客户端前检查。提交后不能再安全切换；后续才出现的匹配只记录为 post-commit 审计事件。
 - 流式一旦已向客户端提交有效 SSE，不再切换路由（避免半截双流）。
 
@@ -1208,7 +1208,7 @@ gateway:
 
 注意：`upstream.timeoutSeconds` 主要影响**监控侧**访问上游站点（登录、同步等）；网关转发超时看 `gateway.forwardTimeoutSeconds`。两者不要混用。
 
-组级策略（`retry_count` / `failover_max` / `cooldown_seconds` / 首字超时 / hedge / response validation 等）在组上单独配置；新建时会参考上述网关默认。
+组级策略（`retry_count` / `response_validation_retry_count` / `failover_max` / `cooldown_seconds` / 首字超时 / hedge / response validation 等）在组上单独配置；`response_validation_retry_count=-1` 继承 `retry_count`，`0` 仅关闭正则拒绝后的当前路由重试；新建时会参考上述网关默认。
 
 ### 管理 API（需后台登录 Token）
 

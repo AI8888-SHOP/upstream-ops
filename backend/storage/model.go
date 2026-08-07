@@ -573,6 +573,10 @@ type GatewayGroup struct {
 	// 响应校验按组启用；流式响应只在提交客户端前检查 prefix。
 	ResponseValidationEnabled             bool   `gorm:"not null;default:false" json:"response_validation_enabled"`
 	ResponseValidationVirtualCacheEnabled bool   `gorm:"not null;default:false" json:"response_validation_virtual_cache_enabled"`
+	// ResponseValidationRetryCount controls same-route retries after a
+	// pre-commit response-rule rejection. -1 inherits RetryCount; 0 disables
+	// response-rule retries while leaving transport retries unchanged.
+	ResponseValidationRetryCount       int    `gorm:"not null;default:-1" json:"response_validation_retry_count"`
 	ResponseValidationStreamMode      string `gorm:"size:16;not null;default:'prefix'" json:"response_validation_stream_mode"`
 	ResponseValidationPrefixBytes     int    `gorm:"not null;default:8192" json:"response_validation_prefix_bytes"`
 	ResponseValidationPrefixTimeoutMS int    `gorm:"not null;default:2000" json:"response_validation_prefix_timeout_ms"`

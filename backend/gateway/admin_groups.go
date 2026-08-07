@@ -80,6 +80,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.ResponseValidationVirtualCacheEnabled != nil {
 		validationVirtualCache = *in.ResponseValidationVirtualCacheEnabled
 	}
+	validationRetryCount := -1
+	if in.ResponseValidationRetryCount != nil {
+		validationRetryCount = clampResponseValidationRetryCount(*in.ResponseValidationRetryCount)
+	}
 	validationMode := gwDefaults.ResponseValidation.StreamMode
 	if in.ResponseValidationStreamMode != nil {
 		validationMode = *in.ResponseValidationStreamMode
@@ -134,6 +138,7 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		HedgeVirtualCacheEnabled:          hedgeVirtualCache,
 		ResponseValidationEnabled:         validationEnabled,
 		ResponseValidationVirtualCacheEnabled: validationVirtualCache,
+		ResponseValidationRetryCount:      validationRetryCount,
 		ResponseValidationStreamMode:      validationMode,
 		ResponseValidationPrefixBytes:     prefixBytes,
 		ResponseValidationPrefixTimeoutMS: prefixTimeoutMS,
@@ -287,6 +292,11 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 		cd = *in.CooldownSeconds
 	}
 	item.RetryCount, item.FailoverMax, item.CooldownSeconds = a.clampGroupRetryPolicy(rc, fm, cd)
+	validationRetryCount := item.ResponseValidationRetryCount
+	if in.ResponseValidationRetryCount != nil {
+		validationRetryCount = *in.ResponseValidationRetryCount
+	}
+	item.ResponseValidationRetryCount = clampResponseValidationRetryCount(validationRetryCount)
 	if in.FirstTokenTimeoutSec != nil {
 		item.FirstTokenTimeoutSec = a.clampFirstTokenTimeoutSec(*in.FirstTokenTimeoutSec)
 	}

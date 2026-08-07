@@ -506,10 +506,11 @@ func TestBuildCoordinatedRoutePlanValidationSwitchesWithoutFailoverToggle(t *tes
 
 func TestBuildCoordinatedRoutePlanValidationIgnoresZeroTransportBudget(t *testing.T) {
 	group := &storage.GatewayGroup{
-		RetryEnabled:    true,
-		RetryCount:      2,
-		FailoverEnabled: true,
-		FailoverMax:     0,
+		RetryEnabled:                true,
+		RetryCount:                  2,
+		ResponseValidationRetryCount: -1,
+		FailoverEnabled:             true,
+		FailoverMax:                 0,
 	}
 	candidates := []ScoredRoute{
 		{Route: storage.GatewayRoute{ID: 1}},
@@ -525,6 +526,40 @@ func TestBuildCoordinatedRoutePlanValidationIgnoresZeroTransportBudget(t *testin
 			t.Fatalf("plan[%d]=route %d try %d max %d, want route %d try %d max 3", i,
 				entry.Candidate.Route.ID, entry.TryOnRoute, entry.MaxTries, wantRoutes[i], i%3)
 		}
+	}
+}
+
+func TestBuildCoordinatedRoutePlanUsesIndependentResponseRetryBudget(t *testing.T) {
+	group := &storage.GatewayGroup{
+		RetryEnabled:                true,
+		RetryCount:                  3,
+		ResponseValidationRetryCount: 1,
+		FailoverEnabled:             true,
+		FailoverMax:                 0,
+	}
+	candidates := []ScoredRoute{
+		{Route: storage.GatewayRoute{ID: 1}},
+		{Route: storage.GatewayRoute{ID: 2}},
+	}
+	plan := buildCoordinatedRoutePlan(candidates, group, false, true)
+	if len(plan) != 8 {
+		t.Fatalf("validation plan length=%d, want 8", len(plan))
+	}
+	for i, entry := range plan {
+		if entry.MaxTries != 4 || entry.ResponseMaxTries != 2 {
+			t.Fatalf("plan[%d] max tries=%d response max=%d, want 4/2", i, entry.MaxTries, entry.ResponseMaxTries)
+		}
+	}
+	if got := effectiveResponseValidationRetryCount(group); got != 1 {
+		t.Fatalf("effective response retries=%d, want 1", got)
+	}
+	group.ResponseValidationRetryCount = -1
+	if got := effectiveResponseValidationRetryCount(group); got != 3 {
+		t.Fatalf("inherited response retries=%d, want 3", got)
+	}
+	group.ResponseValidationRetryCount = 0
+	if got := effectiveResponseValidationRetryCount(group); got != 0 {
+		t.Fatalf("disabled response retries=%d, want 0", got)
 	}
 }
 
@@ -590,7 +625,12 @@ func TestValidateCoordinatedAttemptDoesNotRetryHardExcludedRoute(t *testing.T) {
 }
 
 func TestCoordinatedPlanSchedulerPromotesSameRouteRetry(t *testing.T) {
-	group := &storage.GatewayGroup{RetryEnabled: true, RetryCount: 1, HedgeMaxAttempts: 3}
+	group := &storage.GatewayGroup{
+		RetryEnabled:                true,
+		RetryCount:                  1,
+		ResponseValidationRetryCount: -1,
+		HedgeMaxAttempts:            3,
+	}
 	candidates := []ScoredRoute{
 		{Route: storage.GatewayRoute{ID: 1}},
 		{Route: storage.GatewayRoute{ID: 2}},

@@ -758,6 +758,7 @@ export function GatewayPage() {
       load_balance_route_count: String(g.load_balance_route_count ?? 1),
       retry_enabled: g.retry_enabled !== false,
       retry_count: String(g.retry_count ?? 0),
+      response_validation_retry_count: String(g.response_validation_retry_count ?? -1),
       failover_enabled: g.failover_enabled !== false,
       failover_max: String(g.failover_max ?? 8),
       failover_on_4xx: !!g.failover_on_4xx,
@@ -789,6 +790,10 @@ export function GatewayPage() {
       return
     }
     const retryCount = Math.max(0, Math.min(10, Number(groupForm.retry_count) || 0))
+    const responseValidationRetryInput = Number(groupForm.response_validation_retry_count)
+    const responseValidationRetryCount = Number.isFinite(responseValidationRetryInput)
+      ? Math.max(-1, Math.min(10, Math.floor(responseValidationRetryInput)))
+      : -1
     const failoverMax = Math.max(0, Math.min(32, Number(groupForm.failover_max) || 0))
     const cooldownSeconds = Math.max(
       0,
@@ -833,6 +838,7 @@ export function GatewayPage() {
       load_balance_route_count: loadBalanceRouteCount,
       retry_enabled: groupForm.retry_enabled,
       retry_count: retryCount,
+      response_validation_retry_count: responseValidationRetryCount,
       failover_enabled: groupForm.failover_enabled,
       failover_max: failoverMax,
       failover_on_4xx: groupForm.failover_on_4xx,

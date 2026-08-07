@@ -22,6 +22,7 @@ type CreateGroupInput struct {
 	ModelsMode                        string   `json:"models_mode"`
 	RetryEnabled                      *bool    `json:"retry_enabled"`
 	RetryCount                        *int     `json:"retry_count"`
+	ResponseValidationRetryCount      *int     `json:"response_validation_retry_count"`
 	FailoverEnabled                   *bool    `json:"failover_enabled"`
 	FailoverMax                       *int     `json:"failover_max"`
 	FailoverOn4xx                     *bool    `json:"failover_on_4xx"`
@@ -55,6 +56,7 @@ type UpdateGroupInput struct {
 	ModelsMode                        *string  `json:"models_mode"`
 	RetryEnabled                      *bool    `json:"retry_enabled"`
 	RetryCount                        *int     `json:"retry_count"`
+	ResponseValidationRetryCount      *int     `json:"response_validation_retry_count"`
 	FailoverEnabled                   *bool    `json:"failover_enabled"`
 	FailoverMax                       *int     `json:"failover_max"`
 	FailoverOn4xx                     *bool    `json:"failover_on_4xx"`

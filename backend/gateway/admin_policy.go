@@ -31,6 +31,19 @@ func (svc *Service) clampGroupRetryPolicy(retryCount, failoverMax, cooldownSec i
 	return retryCount, failoverMax, cooldownSec
 }
 
+// clampResponseValidationRetryCount keeps -1 as the compatibility sentinel
+// that inherits retry_count while allowing an explicit 0 to disable retries
+// caused by response-rule matches.
+func clampResponseValidationRetryCount(retryCount int) int {
+	if retryCount < -1 {
+		return -1
+	}
+	if retryCount > 10 {
+		return 10
+	}
+	return retryCount
+}
+
 // clampFirstTokenTimeoutSec 0=关闭；1～300 秒有效（小于 1 且非 0 时抬到 1）。
 func (svc *Service) clampFirstTokenTimeoutSec(sec int) int {
 	if sec <= 0 {
