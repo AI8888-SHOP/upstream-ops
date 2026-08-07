@@ -160,9 +160,69 @@ type requestAnalysis struct {
 
 func parseRequestBodyInfo(body []byte) (requestBodyInfo, bool) {
 	var info requestBodyInfo
-	if len(body) == 0 || json.Unmarshal(body, &info) != nil {
+	if len(body) == 0 {
 		return requestBodyInfo{}, false
 	}
+	// Keep the common request shape on the compact typed fast path. A single
+	// optional field is occasionally sent with a provider-specific JSON type;
+	// do not discard the model/stream fields just because that field cannot be
+	// assigned to the narrow compatibility envelope above.
+	if err := json.Unmarshal(body, &info); err == nil {
+		return info, true
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return requestBodyInfo{}, false
+	}
+	decode := func(key string, dst any) {
+		if value, ok := raw[key]; ok {
+			_ = json.Unmarshal(value, dst)
+		}
+	}
+	decodeString := func(key string, dst *string) {
+		if value, ok := raw[key]; ok {
+			if err := json.Unmarshal(value, dst); err == nil {
+				return
+			}
+			var number json.Number
+			if err := json.Unmarshal(value, &number); err == nil {
+				*dst = number.String()
+			}
+		}
+	}
+	decodeString("model", &info.Model)
+	decode("stream", &info.Stream)
+	decodeString("service_tier", &info.ServiceTier)
+	decodeString("reasoning_effort", &info.ReasoningEffort)
+	decode("reasoning", &info.Reasoning)
+	decode("output_config", &info.OutputConfig)
+	decode("thinking", &info.Thinking)
+	decodeString("session_id", &info.SessionID)
+	decodeString("sessionId", &info.SessionIDCamel)
+	decodeString("conversation_id", &info.ConversationID)
+	decodeString("conversationId", &info.ConversationIDCamel)
+	decodeString("thread_id", &info.ThreadID)
+	decodeString("threadId", &info.ThreadIDCamel)
+	decodeString("prompt_cache_key", &info.PromptCacheKey)
+	decodeString("promptCacheKey", &info.PromptCacheKeyCamel)
+	decodeString("previous_response_id", &info.PreviousResponseID)
+	decodeString("previousResponseId", &info.PreviousResponseIDCamel)
+	decode("response_modalities", &info.ResponseModalities)
+	decode("responseModalities", &info.ResponseModalitiesCamel)
+	decode("output_modalities", &info.OutputModalities)
+	decode("outputModalities", &info.OutputModalitiesCamel)
+	decode("modalities", &info.Modalities)
+	decodeString("response_mime_type", &info.ResponseMIMEType)
+	decodeString("responseMimeType", &info.ResponseMIMETypeCamel)
+	decodeString("output_mime_type", &info.OutputMIMEType)
+	decodeString("outputMimeType", &info.OutputMIMETypeCamel)
+	decode("image_generation", &info.ImageGeneration)
+	decode("imageGeneration", &info.ImageGenerationCamel)
+	decode("video_generation", &info.VideoGeneration)
+	decode("videoGeneration", &info.VideoGenerationCamel)
+	decodeString("task", &info.Task)
+	decodeString("operation", &info.Operation)
+	decode("tools", &info.Tools)
 	return info, true
 }
 

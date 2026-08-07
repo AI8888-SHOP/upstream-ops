@@ -18,7 +18,6 @@ func TestParseGatewayUsageQueryKeepsLegacyAggregateDefaults(t *testing.T) {
 		t.Fatalf("legacy aggregate defaults = sum=%v endpoints=%v, want both enabled", query.IncludeSum, query.IncludeEndpoints)
 	}
 }
-
 func TestParseGatewayUsageQueryAllowsFrontendAggregateOptOut(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	request := httptest.NewRequest("GET", "/api/gateway/usage?include_sum=0&include_endpoints=false", nil)
@@ -30,4 +29,3 @@ func TestParseGatewayUsageQueryAllowsFrontendAggregateOptOut(t *testing.T) {
 		t.Fatalf("explicit aggregate opt-out = sum=%v endpoints=%v, want both disabled", query.IncludeSum, query.IncludeEndpoints)
 	}
 }
-

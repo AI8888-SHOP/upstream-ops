@@ -41,6 +41,22 @@ func TestAnalyzeRequestBodyExtractsAffinityAndMediaOnce(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRequestBodyToleratesProviderSpecificFieldTypes(t *testing.T) {
+	analysis := analyzeRequestBody([]byte(`{
+		"model":"gpt-5.6-sol",
+		"stream":true,
+		"session_id":123456,
+		"modalities":[{"type":"text"}],
+		"tools":[{"type":"function","function":{"name":"lookup"}}]
+	}`))
+	if !analysis.Parsed || analysis.Model != "gpt-5.6-sol" || !analysis.Stream {
+		t.Fatalf("request analysis lost valid fields: %+v", analysis)
+	}
+	if analysis.AffinityID != "123456" {
+		t.Fatalf("numeric affinity id=%q, want 123456", analysis.AffinityID)
+	}
+}
+
 func TestParseOpenAIUsage(t *testing.T) {
 	body := []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
 	u := ParseOpenAIUsage(body)

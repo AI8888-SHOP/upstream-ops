@@ -308,6 +308,7 @@ func (rt *Runtime) forwardStreamIncremental(
 	if clientCtx == nil {
 		clientCtx = context.Background()
 	}
+	clientDone := clientCtx.Done()
 	result = streamAttemptResult{Status: status, Headers: headers}
 	clientKind := protocol.NormalizeKind(inbound)
 	upKind := protocol.NormalizeKind(upstream)
@@ -502,44 +503,81 @@ func (rt *Runtime) forwardStreamIncremental(
 			stopFirstTimer()
 		}
 		result.Committed = streamWriterActuallyCommitted(c)
+		// A cancellation can become ready at the same time as an upstream event.
+		// Recheck it at the write boundary so a randomly selected event cannot
+		// make an undelivered terminal frame look successful.
+		if clientErr := clientCtx.Err(); clientErr != nil {
+			clientDone = nil
+			result.ClientDisconnected = true
+			if result.Committed {
+				return nil
+			}
+			if abortReq != nil {
+				abortReq()
+			}
+			result.Err = clientErr
+			return clientErr
+		}
 		if result.ClientDisconnected && result.Committed {
 			return nil
 		}
 		forceFlush := firstWrite
+		payloadLen := 0
+		terminalFrame := false
 		for _, f := range frames {
 			if len(f) == 0 {
 				continue
 			}
-			if _, err := c.Writer.Write(f); err != nil {
-				var rejected *responseRejectedError
-				if errors.As(err, &rejected) {
-					result.ValidationRejection = rejected.Result
-					result.Err = err
-					return err
-				}
-				if errors.Is(err, errStreamGateLost) {
-					result.Err = err
-					return err
-				}
-				if errors.Is(err, errStreamGateBufferLimit) {
-					result.Err = err
-					return err
-				}
-				result.ClientDisconnected = true
-				return err
-			}
+			payloadLen += len(f)
 			if rt.sseFrameIsTerminal(f) {
-				result.DownstreamComplete = true
+				terminalFrame = true
 				forceFlush = true
 			}
 		}
-		flushState.add(frames)
-		if forceFlush || flushState.shouldFlush(time.Now()) {
+		if payloadLen == 0 {
+			return nil
+		}
+		// Converter feeds commonly return several adjacent frames. One Write keeps
+		// the gate/HTTP writer from taking a lock and crossing the net/http stack
+		// once per frame while preserving their original order.
+		var payload []byte
+		if len(frames) == 1 {
+			payload = frames[0]
+		} else {
+			payload = make([]byte, 0, payloadLen)
+			for _, f := range frames {
+				payload = append(payload, f...)
+			}
+		}
+		if _, err := c.Writer.Write(payload); err != nil {
+			var rejected *responseRejectedError
+			if errors.As(err, &rejected) {
+				result.ValidationRejection = rejected.Result
+				result.Err = err
+				return err
+			}
+			if errors.Is(err, errStreamGateLost) {
+				result.Err = err
+				return err
+			}
+			if errors.Is(err, errStreamGateBufferLimit) {
+				result.Err = err
+				return err
+			}
+			result.ClientDisconnected = true
+			return err
+		}
+		if terminalFrame {
+			result.DownstreamComplete = true
+		}
+		flushState.bytes += payloadLen
+		now := time.Now()
+		if forceFlush || flushState.shouldFlush(now) {
 			rt.flushWriter(c)
-			flushState.reset(time.Now())
+			flushState.reset(now)
 		}
 		result.Committed = streamWriterActuallyCommitted(c)
-		lastDownstreamAt = time.Now()
+		lastDownstreamAt = now
 		return nil
 	}
 
@@ -573,7 +611,8 @@ func (rt *Runtime) forwardStreamIncremental(
 			payload := []byte(trimmedData)
 			payloadType := responsesPayloadTypeBytes(payload)
 			terminal = bytes.EqualFold(payloadType, []byte("message_stop")) ||
-				bytes.EqualFold(payloadType, []byte("error"))
+				bytes.EqualFold(payloadType, []byte("error")) ||
+				isResponsesTerminalEventBytes(payloadType)
 			if !terminal {
 				_, terminal = partialJSONRootMember(payload, "error")
 			}
@@ -686,7 +725,7 @@ func (rt *Runtime) forwardStreamIncremental(
 			frames[0] = combined
 		}
 		err := writeFrames(frames, countsAsFirstToken)
-		if err == nil && upstreamTerminal && anth2oai == nil && oai2anth == nil && resp2anth == nil && resp2oai == nil && anth2resp == nil && chat2resp == nil && len(frames) > 0 {
+		if err == nil && !result.ClientDisconnected && upstreamTerminal && anth2oai == nil && oai2anth == nil && resp2anth == nil && resp2oai == nil && anth2resp == nil && chat2resp == nil && len(frames) > 0 {
 			result.DownstreamComplete = true
 		}
 		return upstreamTerminal, err
@@ -724,9 +763,10 @@ func (rt *Runtime) forwardStreamIncremental(
 			frames = chat2resp.Close()
 		}
 		err := writeFrames(frames, true)
-		if err == nil && streamStarted {
+		if err == nil && streamStarted && flushState.bytes > 0 {
+			now := time.Now()
 			rt.flushWriter(c)
-			flushState.reset(time.Now())
+			flushState.reset(now)
 		}
 		return err
 	}
@@ -743,6 +783,29 @@ func (rt *Runtime) forwardStreamIncremental(
 	}
 
 	for {
+		// A canceled context's Done channel stays ready forever. Disable it after
+		// the first observation; otherwise a draining stream can spin at 100% CPU
+		// while the upstream continues sending usage data.
+		if clientDone != nil {
+			select {
+			case <-clientDone:
+				clientDone = nil
+				if !result.Committed {
+					result.ClientDisconnected = true
+					if err := clientCtx.Err(); err != nil {
+						result.Err = err
+					} else {
+						result.Err = errClientDisconnected
+					}
+					if abortReq != nil {
+						abortReq()
+					}
+					return result
+				}
+				result.ClientDisconnected = true
+			default:
+			}
+		}
 		var keepCh <-chan time.Time
 		if keepTicker != nil && result.Committed && !result.ClientDisconnected {
 			keepCh = keepTicker.C
@@ -759,9 +822,10 @@ func (rt *Runtime) forwardStreamIncremental(
 		select {
 		case <-flushCh:
 			if flushState.bytes > 0 {
+				now := time.Now()
 				rt.flushWriter(c)
-				flushState.reset(time.Now())
-				lastDownstreamAt = time.Now()
+				flushState.reset(now)
+				lastDownstreamAt = now
 			}
 
 		case <-upCtx.Done():
@@ -787,8 +851,9 @@ func (rt *Runtime) forwardStreamIncremental(
 			result.StreamErr = errors.New(msg)
 			return result
 
-		case <-clientCtx.Done():
+		case <-clientDone:
 			// 客户端断开 / 取消
+			clientDone = nil
 			if !result.Committed {
 				// 尚未向客户端提交：中止上游，允许上层记账为客户端取消（不 drain 计费，也无半截响应）
 				result.ClientDisconnected = true
@@ -865,7 +930,7 @@ func (rt *Runtime) forwardStreamIncremental(
 						}
 						return result
 					}
-					pendingLines = pendingLines[:0]
+					pendingLines = nil
 					if upstreamTerminal {
 						if err := finishTerminal(); err != nil {
 							if result.Err == nil {
@@ -925,7 +990,7 @@ func (rt *Runtime) forwardStreamIncremental(
 				return result
 			}
 			if ev.err != nil {
-				pendingLines = append(pendingLines[:0], ev.lines...)
+				pendingLines = ev.lines
 				if !result.Committed {
 					if errors.Is(ev.err, bufio.ErrTooLong) {
 						result.Err = fmt.Errorf("upstream SSE line exceeded %d bytes", maxSSELineSize)
@@ -949,7 +1014,7 @@ func (rt *Runtime) forwardStreamIncremental(
 				return result
 			}
 
-			pendingLines = append(pendingLines[:0], ev.lines...)
+			pendingLines = ev.lines
 			if len(pendingLines) == 0 {
 				continue
 			}
@@ -958,7 +1023,7 @@ func (rt *Runtime) forwardStreamIncremental(
 			// not consume the first-token timeout.
 			event := parseStreamEvent(pendingLines)
 			if !result.Committed && anth2oai == nil && oai2anth == nil && resp2anth == nil && resp2oai == nil && anth2resp == nil && chat2resp == nil && !event.hasPayload {
-				pendingLines = pendingLines[:0]
+				pendingLines = nil
 				continue
 			}
 			countsAsFirstToken := markFirstToken(event)
@@ -969,7 +1034,7 @@ func (rt *Runtime) forwardStreamIncremental(
 				}
 				return result
 			}
-			pendingLines = pendingLines[:0]
+			pendingLines = nil
 			if upstreamTerminal {
 				if err := finishTerminal(); err != nil {
 					if result.Err == nil {

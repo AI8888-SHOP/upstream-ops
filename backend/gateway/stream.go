@@ -50,10 +50,17 @@ func (s *streamFlushState) channel() <-chan time.Time {
 	if s == nil || s.bytes <= 0 {
 		return nil
 	}
+	delay := streamFlushInterval
+	if !s.lastFlush.IsZero() {
+		delay = time.Until(s.lastFlush.Add(streamFlushInterval))
+		if delay < 0 {
+			delay = 0
+		}
+	}
 	if s.timer == nil {
-		s.timer = time.NewTimer(streamFlushInterval)
+		s.timer = time.NewTimer(delay)
 	} else if !s.armed {
-		s.timer.Reset(streamFlushInterval)
+		s.timer.Reset(delay)
 	}
 	s.armed = true
 	return s.timer.C
