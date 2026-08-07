@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Pencil, Plus, RefreshCw, ShieldCheck, Trash2 } from "lucide-react"
+import {
+  Download,
+  Pencil,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+  Upload,
+} from "lucide-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -39,6 +47,24 @@ type RuleForm = {
   models: string
   protocols: string
 }
+
+type ResponseRuleExportItem = {
+  name: string
+  enabled: boolean
+  priority: number
+  pattern: string
+  target: GatewayResponseValidationTarget
+  models?: string[]
+  protocols?: string[]
+}
+
+type ResponseRuleExportPackage = {
+  kind: string
+  version: number
+  rules: ResponseRuleExportItem[]
+}
+
+type ImportStrategy = "skip" | "replace" | "rename"
 
 const emptyRule = (): RuleForm => ({
   name: "",
@@ -88,6 +114,8 @@ export function ResponseRulesPanel({
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<GatewayResponseRule | null>(null)
   const [form, setForm] = useState<RuleForm>(emptyRule)
+  const [importStrategy, setImportStrategy] = useState<ImportStrategy>("skip")
+  const importInputRef = useRef<HTMLInputElement>(null)
   const loadSeqRef = useRef(0)
 
   const load = useCallback(async () => {
@@ -192,6 +220,74 @@ export function ResponseRulesPanel({
     }
   }
 
+  async function exportRules() {
+    setBusy(true)
+    try {
+      const payload = await apiFetch<ResponseRuleExportPackage>(
+        `/gateway/groups/${groupID}/response-rules/export`,
+      )
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json;charset=utf-8",
+      })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = `upstream-ops-response-rules-${groupID}.json`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      toast.success("响应规则已导出")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导出响应规则失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function importRules(file: File) {
+    try {
+      const text = await file.text()
+      const payload = JSON.parse(text) as Partial<ResponseRuleExportPackage>
+      if (!payload || !Array.isArray(payload.rules)) {
+        throw new Error("文件不是有效的响应规则包")
+      }
+      if (payload.rules.length === 0) {
+        throw new Error("响应规则包为空")
+      }
+      if (payload.rules.length > 512) {
+        throw new Error("一次最多导入 512 条规则")
+      }
+      setBusy(true)
+      const result = await apiFetch<{
+        created?: number
+        replaced?: number
+        updated?: number
+        skipped?: number
+      }>(`/gateway/groups/${groupID}/response-rules/import`, {
+        method: "POST",
+        body: JSON.stringify({ ...payload, strategy: importStrategy }),
+      })
+      await load()
+      const replaced = result.replaced ?? result.updated ?? 0
+      const parts = [
+        `新增 ${result.created ?? 0}`,
+        `更新 ${replaced}`,
+      ]
+      if ((result.skipped ?? 0) > 0) parts.push(`跳过 ${result.skipped}`)
+      toast.success(`响应规则导入完成：${parts.join("，")}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导入响应规则失败")
+    } finally {
+      setBusy(false)
+      if (importInputRef.current) importInputRef.current.value = ""
+    }
+  }
+
+  function chooseImportFile() {
+    importInputRef.current?.click()
+  }
+
   return (
     <>
       <Card className="overflow-hidden border-border shadow-none">
@@ -206,10 +302,40 @@ export function ResponseRulesPanel({
                 按优先级检查响应。命中后拒绝当前 attempt，并直接切换其它路由。
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button size="icon-sm" variant="outline" onClick={() => void load()} disabled={loading || busy} title="刷新">
                 <RefreshCw className={loading ? "size-4 animate-spin" : "size-4"} />
               </Button>
+              <Button size="sm" variant="outline" onClick={() => void exportRules()} disabled={loading || busy}>
+                <Download className="size-3.5" /> 导出
+              </Button>
+              <Select
+                value={importStrategy}
+                onValueChange={(value) => setImportStrategy(value as ImportStrategy)}
+                disabled={loading || busy}
+              >
+                <SelectTrigger className="h-8 w-[7.25rem] text-xs" title="导入同名规则的处理方式">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="skip">同名跳过</SelectItem>
+                  <SelectItem value="replace">同名覆盖</SelectItem>
+                  <SelectItem value="rename">同名改名</SelectItem>
+                </SelectContent>
+              </Select>
+              <Button size="sm" variant="outline" onClick={chooseImportFile} disabled={loading || busy}>
+                <Upload className="size-3.5" /> 导入
+              </Button>
+              <input
+                ref={importInputRef}
+                className="hidden"
+                type="file"
+                accept=".json,application/json"
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file) void importRules(file)
+                }}
+              />
               <Button size="sm" onClick={startCreate} disabled={loading || busy}>
                 <Plus className="size-3.5" /> 新建规则
               </Button>

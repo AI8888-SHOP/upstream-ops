@@ -16,21 +16,23 @@ type ResponsesToAnthropicStream struct {
 	messageStopSent  bool
 	done             bool
 
-	contentBlockIndex int
-	contentBlockOpen  bool
-	currentBlockType  string // text | thinking | tool_use
-	currentToolName   string
-	currentToolArgs   string
+	contentBlockIndex   int
+	contentBlockOpen    bool
+	currentBlockType    string // text | thinking | tool_use
+	currentToolName     string
+	currentToolArgs     string
 	currentToolHadDelta bool
-	hasToolCall       bool
+	hasToolCall         bool
 
 	// output_index → anthropic content block index
 	outputIndexToBlockIdx map[int]int
 
-	inputTokens  int
-	outputTokens int
-	cacheRead    int
-	cacheCreate  int
+	inputTokens   int
+	outputTokens  int
+	cacheRead     int
+	cacheCreate   int
+	cacheCreate5m int
+	cacheCreate1h int
 }
 
 func NewResponsesToAnthropicStream(model string) *ResponsesToAnthropicStream {
@@ -60,6 +62,14 @@ func (s *ResponsesToAnthropicStream) Feed(eventName, data string) [][]byte {
 	}
 	if typ == "" {
 		// 裸 Response 对象（少见）
+		if resp, ok := payload["response"].(map[string]any); ok && resp != nil {
+			switch st, _ := resp["status"].(string); st {
+			case "failed":
+				return s.handleFailed(payload)
+			case "completed", "incomplete":
+				return s.handleCompleted(payload)
+			}
+		}
 		if _, ok := payload["output"]; ok {
 			return s.handleCompletedPayload(payload)
 		}
@@ -67,7 +77,7 @@ func (s *ResponsesToAnthropicStream) Feed(eventName, data string) [][]byte {
 	}
 
 	switch typ {
-	case "response.created", "response.in_progress":
+	case "response.created", "response.in_progress", "response.queued":
 		return s.handleCreated(payload)
 	case "response.output_item.added":
 		return s.handleOutputItemAdded(payload)
@@ -85,12 +95,17 @@ func (s *ResponsesToAnthropicStream) Feed(eventName, data string) [][]byte {
 		return s.handleReasoningDelta(payload)
 	case "response.reasoning_summary_text.done", "response.reasoning_text.done":
 		return s.closeCurrentBlock()
-	case "response.completed", "response.done", "response.incomplete", "response.failed":
+	case "response.failed", "response.error", "error":
+		return s.handleFailed(payload)
+	case "response.completed", "response.done", "response.incomplete":
 		return s.handleCompleted(payload)
 	default:
 		// 部分网关只推带 response 的完成包，无 type 前缀事件
 		if resp, ok := payload["response"].(map[string]any); ok && resp != nil {
-			if st, _ := resp["status"].(string); st == "completed" || st == "incomplete" || st == "failed" {
+			switch st, _ := resp["status"].(string); st {
+			case "failed":
+				return s.handleFailed(payload)
+			case "completed", "incomplete":
 				return s.handleCompleted(payload)
 			}
 		}
@@ -131,7 +146,26 @@ func (s *ResponsesToAnthropicStream) handleCreated(payload map[string]any) [][]b
 			}
 		}
 	}
-	return s.ensureMessageStart()
+	return nil
+}
+
+func (s *ResponsesToAnthropicStream) handleFailed(payload map[string]any) [][]byte {
+	if s == nil || s.done || s.messageStopSent {
+		return nil
+	}
+	message, errorType, code := responsesStreamErrorFields(payload)
+	frames := s.closeCurrentBlock()
+	errorObject := map[string]any{"type": errorType, "message": message}
+	if code != "" {
+		errorObject["code"] = code
+	}
+	frames = append(frames, encodeSSEFrame("error", map[string]any{
+		"type":  "error",
+		"error": errorObject,
+	}))
+	s.done = true
+	s.messageStopSent = true
+	return frames
 }
 
 func (s *ResponsesToAnthropicStream) ensureMessageStart() [][]byte {
@@ -493,8 +527,8 @@ func (s *ResponsesToAnthropicStream) synthesizeFromOutput(resp map[string]any) [
 			s.contentBlockOpen = true
 			s.currentBlockType = "thinking"
 			frames = append(frames, encodeSSEFrame("content_block_start", map[string]any{
-				"type":  "content_block_start",
-				"index": idx,
+				"type":          "content_block_start",
+				"index":         idx,
 				"content_block": map[string]any{"type": "thinking", "thinking": ""},
 			}))
 			frames = append(frames, encodeSSEFrame("content_block_delta", map[string]any{
@@ -528,8 +562,8 @@ func (s *ResponsesToAnthropicStream) synthesizeFromOutput(resp map[string]any) [
 			s.contentBlockOpen = true
 			s.currentBlockType = "text"
 			frames = append(frames, encodeSSEFrame("content_block_start", map[string]any{
-				"type":  "content_block_start",
-				"index": idx,
+				"type":          "content_block_start",
+				"index":         idx,
 				"content_block": map[string]any{"type": "text", "text": ""},
 			}))
 			frames = append(frames, encodeSSEFrame("content_block_delta", map[string]any{
@@ -611,6 +645,12 @@ func (s *ResponsesToAnthropicStream) finalize(stopReason string) [][]byte {
 	if s.cacheCreate > 0 {
 		usage["cache_creation_input_tokens"] = s.cacheCreate
 	}
+	if s.cacheCreate5m > 0 || s.cacheCreate1h > 0 {
+		usage["cache_creation"] = map[string]any{
+			"ephemeral_5m_input_tokens": s.cacheCreate5m,
+			"ephemeral_1h_input_tokens": s.cacheCreate1h,
+		}
+	}
 	frames = append(frames, encodeSSEFrame("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
@@ -662,23 +702,12 @@ func (s *ResponsesToAnthropicStream) ingestUsage(m map[string]any) {
 	if u == nil {
 		return
 	}
-	if v, ok := asInt(u["input_tokens"]); ok {
-		s.inputTokens = v
-	}
-	if v, ok := asInt(u["output_tokens"]); ok {
-		s.outputTokens = v
-	}
-	if d, ok := u["input_tokens_details"].(map[string]any); ok {
-		if v, ok := asInt(d["cached_tokens"]); ok {
-			s.cacheRead = v
-			if s.inputTokens >= v {
-				s.inputTokens -= v
-			}
-		}
-	}
-	if v, ok := asInt(u["cache_creation_input_tokens"]); ok {
-		s.cacheCreate = v
-	}
+	converted := openAIUsageToAnthropic(u)
+	s.inputTokens, _ = asInt(converted["input_tokens"])
+	s.outputTokens, _ = asInt(converted["output_tokens"])
+	s.cacheRead, _ = asInt(converted["cache_read_input_tokens"])
+	s.cacheCreate, _ = asInt(converted["cache_creation_input_tokens"])
+	s.cacheCreate5m, s.cacheCreate1h = anthropicCacheCreationBreakdown(converted)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +760,7 @@ func (s *ResponsesToOpenAIStream) Feed(eventName, data string) [][]byte {
 	}
 
 	switch typ {
-	case "response.created", "response.in_progress":
+	case "response.created", "response.in_progress", "response.queued":
 		if resp, ok := payload["response"].(map[string]any); ok && resp != nil {
 			if id, ok := resp["id"].(string); ok && id != "" {
 				s.MsgID = id
@@ -740,7 +769,7 @@ func (s *ResponsesToOpenAIStream) Feed(eventName, data string) [][]byte {
 				s.Model = m
 			}
 		}
-		return s.ensureRole()
+		return nil
 	case "response.output_text.delta":
 		delta, _ := payload["delta"].(string)
 		if delta == "" {
@@ -887,11 +916,82 @@ func (s *ResponsesToOpenAIStream) Feed(eventName, data string) [][]byte {
 			"tool_calls": []any{tc},
 		}, nil)))
 		return frames
-	case "response.completed", "response.done", "response.incomplete", "response.failed":
+	case "response.failed", "response.error", "error":
+		return s.handleFailed(payload)
+	case "response.completed", "response.done", "response.incomplete":
 		return s.handleCompleted(payload)
 	default:
+		if resp, ok := payload["response"].(map[string]any); ok && resp != nil {
+			switch st, _ := resp["status"].(string); st {
+			case "failed":
+				return s.handleFailed(payload)
+			case "completed", "incomplete":
+				return s.handleCompleted(payload)
+			}
+		}
 		return nil
 	}
+}
+
+func (s *ResponsesToOpenAIStream) handleFailed(payload map[string]any) [][]byte {
+	if s == nil || s.done {
+		return nil
+	}
+	message, errorType, code := responsesStreamErrorFields(payload)
+	errorObject := map[string]any{"message": message, "type": errorType}
+	if code != "" {
+		errorObject["code"] = code
+	}
+	body, _ := json.Marshal(map[string]any{"error": errorObject})
+	s.done = true
+	return [][]byte{openAISSEFrame(body), []byte("data: [DONE]\n\n")}
+}
+
+func responsesStreamErrorFields(payload map[string]any) (message, errorType, code string) {
+	response, _ := payload["response"].(map[string]any)
+	errorObject := map[string]any(nil)
+	if response != nil {
+		errorObject, _ = response["error"].(map[string]any)
+	}
+	if errorObject == nil {
+		errorObject, _ = payload["error"].(map[string]any)
+	}
+	if errorObject == nil {
+		if response != nil {
+			errorObject = response
+		} else {
+			errorObject = payload
+		}
+	}
+	message, _ = errorObject["message"].(string)
+	if message == "" && response != nil {
+		message, _ = response["message"].(string)
+	}
+	if message == "" {
+		message, _ = payload["message"].(string)
+	}
+	if message == "" && response != nil {
+		if raw, ok := response["error"].(string); ok {
+			message = raw
+		}
+	}
+	if message == "" {
+		if raw, ok := payload["error"].(string); ok {
+			message = raw
+		}
+	}
+	if message == "" {
+		message = "upstream response failed"
+	}
+	errorType, _ = errorObject["type"].(string)
+	code, _ = errorObject["code"].(string)
+	if errorType == "" {
+		errorType = code
+	}
+	if errorType == "" {
+		errorType = "api_error"
+	}
+	return message, errorType, code
 }
 
 func (s *ResponsesToOpenAIStream) Close() [][]byte {
@@ -979,6 +1079,9 @@ func (s *ResponsesToOpenAIStream) handleCompleted(payload map[string]any) [][]by
 				var m map[string]any
 				if json.Unmarshal(chat, &m) == nil {
 					frames := s.emitChatMessageAsChunks(m)
+					if usage := responsesUsageToOpenAI(resp); len(usage) > 0 {
+						frames = append(frames, openAIUsageFrame(s.MsgID, s.Model, usage))
+					}
 					s.done = true
 					frames = append(frames, []byte("data: [DONE]\n\n"))
 					return frames
@@ -998,8 +1101,27 @@ func (s *ResponsesToOpenAIStream) handleCompleted(payload map[string]any) [][]by
 	var frames [][]byte
 	frames = append(frames, s.ensureRole()...)
 	frames = append(frames, openAISSEFrame(openaiChunk(s.MsgID, s.Model, map[string]any{}, s.finish)))
+	if resp, ok := payload["response"].(map[string]any); ok {
+		if usage := responsesUsageToOpenAI(resp); len(usage) > 0 {
+			frames = append(frames, openAIUsageFrame(s.MsgID, s.Model, usage))
+		}
+	}
 	frames = append(frames, []byte("data: [DONE]\n\n"))
 	return frames
+}
+
+func responsesUsageToOpenAI(response map[string]any) map[string]any {
+	usage, _ := response["usage"].(map[string]any)
+	return openAIUsageToChat(usage)
+}
+
+func openAIUsageFrame(id, model string, usage map[string]any) []byte {
+	payload := map[string]any{
+		"id": id, "object": "chat.completion.chunk", "created": 0, "model": model,
+		"choices": []any{}, "usage": usage,
+	}
+	raw, _ := json.Marshal(payload)
+	return openAISSEFrame(raw)
 }
 
 func (s *ResponsesToOpenAIStream) emitChatMessageAsChunks(m map[string]any) [][]byte {

@@ -1,0 +1,24 @@
+name: upstream-ops
+
+services:
+  app:
+    environment:
+      DATABASE_DRIVER: postgres
+      DATABASE_HOST: ${DATABASE_HOST:?DATABASE_HOST is required}
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      DATABASE_NAME: ${DATABASE_NAME:-upstreamops}
+      DATABASE_SSL_MODE: ${DATABASE_SSL_MODE:-disable}
+      DATABASE_MAX_OPEN_CONNS: ${DATABASE_MAX_OPEN_CONNS:-20}
+      DATABASE_MAX_IDLE_CONNS: ${DATABASE_MAX_IDLE_CONNS:-5}
+    # Set DATABASE_NETWORK_NAME to the Docker network that contains PostgreSQL
+    # (for example sub2api-localtest_default).  Set
+    # DATABASE_NETWORK_EXTERNAL=true when that network already exists.
+    networks:
+      - database
+
+networks:
+  database:
+    name: ${DATABASE_NETWORK_NAME:-upstream-ops-database}
+    external: ${DATABASE_NETWORK_EXTERNAL:-false}

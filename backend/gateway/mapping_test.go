@@ -1,6 +1,10 @@
 package gateway
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/bejix/upstream-ops/backend/gateway/protocol"
+)
 
 func TestRewriteModelInBody(t *testing.T) {
 	in := []byte(`{"model":"a","stream":true}`)
@@ -10,6 +14,46 @@ func TestRewriteModelInBody(t *testing.T) {
 	}
 	if !ExtractStreamFlag(out) {
 		t.Fatal("stream lost")
+	}
+}
+
+func TestAnalyzeRequestBodyExtractsAffinityAndMediaOnce(t *testing.T) {
+	analysis := analyzeRequestBody([]byte(`{
+		"model":"gpt-5.6-sol",
+		"stream":true,
+		"prompt_cache_key":"codex-session-1",
+		"response_modalities":["text","image"],
+		"input":[{"role":"user","content":"large conversation is ignored by the typed envelope"}]
+	}`))
+	if !analysis.Parsed || analysis.Model != "gpt-5.6-sol" || !analysis.Stream {
+		t.Fatalf("request analysis=%+v", analysis)
+	}
+	if analysis.AffinityID != "codex-session-1" {
+		t.Fatalf("affinity id=%q", analysis.AffinityID)
+	}
+	if !analysis.MediaGeneration {
+		t.Fatal("image response modality was not classified as media generation")
+	}
+
+	ordinary := analyzeRequestBody([]byte(`{"model":"gpt-5.6-sol","image_generation":false,"modalities":["text"]}`))
+	if !ordinary.Parsed || ordinary.MediaGeneration {
+		t.Fatalf("ordinary request analysis=%+v", ordinary)
+	}
+}
+
+func TestAnalyzeRequestBodyToleratesProviderSpecificFieldTypes(t *testing.T) {
+	analysis := analyzeRequestBody([]byte(`{
+		"model":"gpt-5.6-sol",
+		"stream":true,
+		"session_id":123456,
+		"modalities":[{"type":"text"}],
+		"tools":[{"type":"function","function":{"name":"lookup"}}]
+	}`))
+	if !analysis.Parsed || analysis.Model != "gpt-5.6-sol" || !analysis.Stream {
+		t.Fatalf("request analysis lost valid fields: %+v", analysis)
+	}
+	if analysis.AffinityID != "123456" {
+		t.Fatalf("numeric affinity id=%q, want 123456", analysis.AffinityID)
 	}
 }
 
@@ -55,6 +99,40 @@ func TestParseOpenAIUsage_InputTokensDetailsCached(t *testing.T) {
 	u := ParseOpenAIUsage(body)
 	if u.InputTokens != 100 || u.CacheReadTokens != 40 || u.CacheCreationTokens != 5 {
 		t.Fatalf("%+v", u)
+	}
+}
+
+func TestOpenAICacheReadSkipsStaleNestedZero(t *testing.T) {
+	usage := map[string]any{
+		"input_tokens_details":  map[string]any{"cached_tokens": 0},
+		"prompt_tokens_details": map[string]any{"cached_tokens": 5},
+		"cache_read_tokens":     12,
+	}
+	if got := openAICacheReadTokensFromUsage(usage); got != 5 {
+		t.Fatalf("cache read=%d, want later nested positive value=5", got)
+	}
+}
+
+func TestOpenAICacheCreationPriorityAndStaleZeroFallback(t *testing.T) {
+	usage := map[string]any{
+		"input_tokens_details":  map[string]any{"cache_creation_tokens": 5},
+		"prompt_tokens_details": map[string]any{"cache_write_tokens": 7},
+	}
+	if got := openAICacheCreationTokensFromUsage(usage); got != 7 {
+		t.Fatalf("cache creation=%d, want prompt cache_write_tokens=7", got)
+	}
+	usage["input_tokens_details"] = map[string]any{
+		"cache_write_tokens":    0,
+		"cache_creation_tokens": 5,
+	}
+	usage["prompt_tokens_details"] = map[string]any{}
+	usage["cache_creation_tokens"] = 11
+	if got := openAICacheCreationTokensFromUsage(usage); got != 5 {
+		t.Fatalf("cache creation=%d, want later nested positive value=5", got)
+	}
+	usage["input_tokens_details"] = map[string]any{"cache_write_tokens": 0}
+	if got := openAICacheCreationTokensFromUsage(usage); got != 11 {
+		t.Fatalf("cache creation=%d, want top-level fallback=11 after stale nested zero", got)
 	}
 }
 
@@ -363,5 +441,17 @@ func TestParseAnthropicUsage(t *testing.T) {
 	u := ParseAnthropicUsage(body)
 	if u.InputTokens != 1 || u.OutputTokens != 2 || u.CacheReadTokens != 5 {
 		t.Fatalf("%+v", u)
+	}
+}
+
+func TestNormalizeUsageBucketsPreservesAnthropicFreshInput(t *testing.T) {
+	raw := UsageTokens{InputTokens: 100, CacheReadTokens: 40, CacheCreationTokens: 10}
+	anthropic := NormalizeUsageBuckets(raw, protocol.KindAnthropic)
+	if anthropic.InputTokens != 100 || anthropic.CacheReadTokens != 40 || anthropic.CacheCreationTokens != 10 {
+		t.Fatalf("anthropic buckets=%+v, want fresh input preserved", anthropic)
+	}
+	openAI := NormalizeUsageBuckets(raw, protocol.KindOpenAIChat)
+	if openAI.InputTokens != 50 || openAI.CacheReadTokens != 40 || openAI.CacheCreationTokens != 10 {
+		t.Fatalf("openai buckets=%+v, want cache fields subtracted", openAI)
 	}
 }

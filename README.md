@@ -77,6 +77,7 @@ UpstreamOps focuses on these problems:
 - Failover on network errors, 429, and 5xx with temporary pause; optional “failover on 4xx”; group-level retry count, max switches, and cooldown.
 - **First-token timeout** (optional): fail fast on the first byte when another route can still be tried.
 - **Concurrent fallback (hedging, optional and off by default)**: when the primary has no valid result after the group delay, start other routes up to the configured limits. The first validated attempt wins and in-flight losers are canceled. `maxParallel` includes the primary and `maxAttempts` caps all attempts; image/video generation and Realtime requests are always excluded.
+- **Hedge virtual cache credit (optional and off by default)**: when a real overlapping hedge was launched and a successful winner is delivered, the group can bill the winner's fresh input as cache-read tokens. The gateway charges only the discounted winner amount while retaining every attempt's raw upstream cost and extra-cost audit; image/video generation and Realtime requests never qualify.
 - **Regex response validation (optional and off by default)**: priority-ordered rules inspect `assistant_text`, `raw_body`, or `error_message`, with optional model/protocol filters. A match rejects that attempt and switches directly to another route. Non-stream responses are checked in full; streams are checked through a configurable pre-commit prefix gate.
 - User-Agent modes: `passthrough` / `group` / `custom`; admin model pull and probe fall back to the default UA.
 - Usage logs aligned with sub2api fields (endpoint, protocol, tokens including cache buckets, cost, latency, first-token latency, attempt kind/status, winner, response rule, and error detail) with list, stats, model filters, and cleanup.
@@ -237,7 +238,7 @@ The system settings page manages:
 - Balance sync cron.
 - Rate sync cron.
 - Scheduler concurrency.
-- Monitor log, balance snapshot, notification log, and announcement retention.
+- Monitor log, balance snapshot, notification log, gateway usage, and announcement retention.
 - Rate change notification merge policy.
 - Minimum rate change percentage for notifications.
 - Low-balance alert cooldown.
@@ -329,7 +330,7 @@ Commit only `.env.example` to a public repository. Never commit `.env`, `data/`,
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.11
+IMAGE_TAG=v0.0.20
 ```
 
 ## MySQL Deployment
@@ -350,6 +351,107 @@ MYSQL_PASSWORD=replace-with-database-password
 MYSQL_ROOT_PASSWORD=replace-with-root-password
 MYSQL_PORT=33069
 ```
+
+## High-load deployment and one-click upgrade
+
+When `gateway_usage_logs` grows beyond roughly 50,000 rows or the SQLite file is larger than about 128 MB, use PostgreSQL as the durable primary database. Redis is optional cache/lock infrastructure and is not used as the accounting source of truth.
+
+### Upgrade an older Docker installation
+
+Download the `upstream-ops-upgrade-kit-<version>` asset from the GitHub Release
+and extract it outside the live deployment directory. The kit contains the
+helpers and Compose templates, but never contains `.env`, `data/`, or secrets.
+For the complete path-based guide, see [`docs/UPGRADE.md`](docs/UPGRADE.md).
+
+For a normal image upgrade that keeps the existing database, run the guided
+helper with the live deployment paths:
+
+```bash
+chmod +x scripts/upgrade.sh
+TARGET_TAG=v0.0.20 ./scripts/upgrade.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+.\scripts\upgrade.ps1 -TargetTag v0.0.20
+```
+
+The helper defaults to `ghcr.io/ai8888-shop/upstream-ops` as the image
+repository. Set `IMAGE_REPOSITORY` in the live `.env` when using a fork or
+private mirror. It also writes `docker-compose.upstream-ops-image.yml` beside
+the first Compose file and persists that override in `COMPOSE_FILE`, so a later
+plain `docker compose up` cannot fall back to an old hard-coded image.
+
+The helper backs up `data/` and `.env`, gives the old image an immutable local
+rollback tag, pulls the target image, waits for the container health check,
+and persists the target `IMAGE_TAG` to `.env`. It restores the rollback image
+when startup or health verification fails. Set `HEALTH_URL`,
+`HEALTH_TIMEOUT_SECONDS`, `COMPOSE_FILE`, `COMPOSE_EXTRA_FILES`, or `SERVICE`
+for a non-default installation. For MySQL, include
+`COMPOSE_EXTRA_FILES=docker-compose.mysql.yml` (PowerShell uses
+`-ComposeExtraFile`). Keep the generated `backups/` directory until the new release
+has passed a complete request and billing check.
+
+### Migrate a high-load SQLite installation
+
+Create a new empty PostgreSQL database and set these values in `.env`:
+
+```env
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
+DATABASE_USER=upstreamops
+DATABASE_PASSWORD=replace-with-database-password
+DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
+```
+
+For an old Docker/SQLite deployment that also needs the database migration, run
+the PostgreSQL helper from the kit with explicit live deployment paths:
+
+```bash
+chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.20/scripts/upgrade-to-postgres.sh
+ENV_FILE=/srv/upstream-ops/.env DATA_DIR=/srv/upstream-ops/data \
+COMPOSE_FILE=/srv/upstream-ops/docker-compose.yml \
+POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.20/docker-compose.postgres.yml \
+TARGET_TAG=v0.0.20 MIGRATION_IMAGE_TAG=v0.0.20 \
+/tmp/upstream-ops-upgrade-kit-v0.0.20/scripts/upgrade-to-postgres.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+.\scripts\upgrade-to-postgres.ps1 `
+  -ComposeFile 'D:\upstream-ops\docker-compose.yml' `
+  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.20\docker-compose.postgres.yml' `
+  -EnvFile 'D:\upstream-ops\.env' -DataDir 'D:\upstream-ops\data' `
+  -TargetTag 'v0.0.20' -MigrationImageTag 'v0.0.20'
+```
+
+The helper validates both Compose files and the external network before stopping
+the old service, pulls the same target image used by the migration tool and the
+new app, backs up `data/` and `.env`, refuses a populated target, copies all
+compatible tables (including schemas from older releases), and waits for
+`/healthz` before completing. On success it persists `DATABASE_DRIVER=postgres`,
+`IMAGE_TAG`, and a generated Compose override so a normal restart does not
+switch back to SQLite. A migration or health failure restores the immutable old
+image. Keep the backup until usage, billing, and gateway requests have been
+verified. The helper copies the SQLite database and any WAL/SHM sidecars into a
+writable temporary snapshot before migration and removes that snapshot on every
+exit. Set `MIGRATION_TIMEOUT_SECONDS` (PowerShell:
+`-MigrationTimeoutSeconds`) for a larger database; the default is 30 minutes.
+
+The migration helper uses the repository's `latest` image by default so an old
+deployment does not accidentally run a version without
+`upstream-ops-migrate`. Override it with `IMAGE` (PowerShell `-Image`) or
+`MIGRATION_IMAGE_TAG` (PowerShell `-MigrationImageTag`) when using a private
+registry or a pinned release. `TARGET_TAG` is used for both the migration
+binary and the new app when provided; otherwise `MIGRATION_IMAGE_TAG` supplies
+both.
+
+For a MySQL installation, keep both Compose files in the upgrade command;
+PowerShell accepts repeated `-ComposeExtraFile` values and Bash accepts
+`COMPOSE_EXTRA_FILES=docker-compose.mysql.yml`.
 
 ## Environment Variables
 
@@ -388,6 +490,24 @@ DATABASE_USER=upstreamops
 DATABASE_PASSWORD=change-me
 DATABASE_NAME=upstreamops
 ```
+
+PostgreSQL:
+
+```env
+DATABASE_DRIVER=postgres
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
+DATABASE_USER=upstreamops
+DATABASE_PASSWORD=change-me
+DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
+DATABASE_MAX_OPEN_CONNS=20
+DATABASE_MAX_IDLE_CONNS=5
+```
+
+PostgreSQL is the durable primary store for configuration, usage, quota, and
+settlement. Redis can be added later for short-lived cache or locks, but must
+not replace these records.
 
 ### Security and Login
 
@@ -700,7 +820,7 @@ The request gateway aggregates multiple upstreams (monitored NewAPI/Sub2API chan
 
 | Concept | Description |
 |---------|-------------|
-| **Group** | Configuration unit: route table, group-level model map, model list, retry / failover / cooldown / first-token timeout, hedging, response validation, group UA |
+| **Group** | Configuration unit: route table, group-level model map, model list, retry / failover / cooldown / first-token timeout, hedging, response validation, group UA, and an optional maximum billing multiplier |
 | **Key** | Client auth credential bound to a group; supports quota and IP allow/deny lists; plaintext is shown only on create/reveal |
 | **Route** | A schedulable upstream target: monitor channel + source group, or a direct Provider; weight, ratio conversion, protocol, UA policy |
 | **Provider** | Gateway-managed base URL + API key + default billing ratio; no need to create a monitor channel first |
@@ -713,7 +833,7 @@ The request gateway aggregates multiple upstreams (monitored NewAPI/Sub2API chan
    - Option A: an existing monitored NewAPI/Sub2API channel and the source group to use.
    - Option B: create a **Provider** on the gateway page (base URL, key, protocol, default billing ratio).
 2. **Create a gateway group**
-   Sort direction (ratio asc/desc), reorder-after-scan, retry/failover, and optional first-token timeout, hedging, regex response validation, and group UA.
+   Sort direction (ratio asc/desc), reorder-after-scan, retry/failover, and optional first-token timeout, hedging, regex response validation, group UA, and a maximum billing multiplier. Set the maximum to `0` to disable the guard; routes whose effective billing multiplier is higher are excluded from scheduling automatically.
 3. **Add routes**
    Choose monitor or provider; set weight, ratio conversion, `upstream_protocol`, UA mode; optionally **Ensure upstream keys** (monitor routes only).
 4. **Models**
@@ -800,6 +920,7 @@ Route field `upstream_protocol`:
   2. if source group matches → live ratio with raw / ×100 / ÷100 conversion
   3. else stored “account billing ratio” on the route
   4. else conversion default
+- A group's optional `max_billing_rate_multiplier` guard uses the same effective ratio. `0` disables it; a route above the limit is automatically excluded from scheduling and model discovery. The derived auto-disabled marker is separate from the route's manual `enabled` setting, and is cleared when the ratio returns within the limit.
 - When the group enables reorder-after-ratio-scan, ratio scan rewrites route order and billing-ratio snapshots for related groups.
 - Cost: `base_cost` from model unit price × token buckets; `actual_cost = base_cost × account billing ratio` (multiplied once).
 
@@ -807,6 +928,7 @@ Route field `upstream_protocol`:
 
 - Default failover: no response, 429, 5xx; with group “failover on 4xx”, all 4xx may failover too.
 - Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
+- Automatic cooldown is isolated by route and final upstream model, so a failure for one model does not pause the channel for other models. Model aliases that resolve to the same upstream model share the cooldown; the management "clear pause" action clears all model cooldowns for that route.
 - Group: `retry_count`, `failover_max`, `cooldown_seconds`.
 - **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
 - **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.
@@ -1194,6 +1316,7 @@ Default retention:
 - Upstream synchronization logs: follow the monitor log retention period.
 - Balance snapshots: 90 days.
 - Notification logs: 90 days.
+- Gateway usage records and cost details: 90 days.
 - Upstream announcements: controlled by announcement retention days. `0` disables cleanup.
 - Rate change logs are not cleaned by default.
 

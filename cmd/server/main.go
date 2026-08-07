@@ -45,7 +45,11 @@ func main() {
 	resolvedConfigPath := config.ResolvePath(*configPath, usedConfigPath)
 
 	log := logger.New(cfg.Log.Level, cfg.Log.Format)
-	log.Info("starting UpstreamOps", "port", cfg.Server.Port, "mode", cfg.Server.Mode)
+	log.Info("starting UpstreamOps",
+		"port", cfg.Server.Port,
+		"mode", cfg.Server.Mode,
+		"database_driver", cfg.Database.ToStorageConfig().Driver,
+	)
 
 	if _, err := os.Stat(resolvedConfigPath); errors.Is(err, os.ErrNotExist) {
 		if err := config.Save(resolvedConfigPath, cfg); err != nil {
@@ -92,6 +96,13 @@ func main() {
 	if err := storage.AutoMigrate(db); err != nil {
 		log.Error("auto migrate failed", "err", err)
 		os.Exit(1)
+	}
+	if assessment := storage.AssessUpgrade(cfg.Database.ToStorageConfig(), db); assessment.Recommended {
+		log.Warn("SQLite upgrade recommended for current traffic",
+			"usage_rows", assessment.UsageRows,
+			"database_bytes", assessment.DatabaseBytes,
+			"guide", assessment.Recommendation,
+		)
 	}
 
 	channels := storage.NewChannels(db)
@@ -142,7 +153,7 @@ func main() {
 	syncSvc.SetDispatcher(dispatcher)
 
 	schedulerFactory := func(scfg config.SchedulerConfig, pcfg config.ProxyConfig) *scheduler.Scheduler {
-		return scheduler.New(scfg, monitorSvc, monLogs, syncLogs, rates, notifies, announcements, captchas, cipher, syncSvc, gatewaySvc, pcfg, log)
+		return scheduler.New(scfg, monitorSvc, monLogs, gatewayUsage, syncLogs, rates, notifies, announcements, captchas, cipher, syncSvc, gatewaySvc, pcfg, log)
 	}
 	sch := schedulerFactory(cfg.Scheduler, cfg.Proxy)
 	if err := sch.Start(); err != nil {
@@ -184,28 +195,28 @@ func main() {
 	}
 
 	api.Register(router, &api.Deps{
-		DB:            db,
-		Cipher:        cipher,
-		Runtime:       runtimeMgr,
-		Channels:      channels,
-		Sessions:      authSessions,
-		Captchas:      captchas,
-		Notifies:      notifies,
-		Announcements: announcements,
-		Rates:         rates,
-		MonLogs:       monLogs,
-		ChannelSvc:    channelSvc,
-		Monitor:       monitorSvc,
-		Dispatcher:    dispatcher,
-		UpstreamSync:  syncSvc,
-		Gateway:       gatewaySvc,
-		GatewayGroups: gatewayGroups,
-		GatewayKeys:   gatewayKeys,
-		GatewayUsage:  gatewayUsage,
+		DB:                   db,
+		Cipher:               cipher,
+		Runtime:              runtimeMgr,
+		Channels:             channels,
+		Sessions:             authSessions,
+		Captchas:             captchas,
+		Notifies:             notifies,
+		Announcements:        announcements,
+		Rates:                rates,
+		MonLogs:              monLogs,
+		ChannelSvc:           channelSvc,
+		Monitor:              monitorSvc,
+		Dispatcher:           dispatcher,
+		UpstreamSync:         syncSvc,
+		Gateway:              gatewaySvc,
+		GatewayGroups:        gatewayGroups,
+		GatewayKeys:          gatewayKeys,
+		GatewayUsage:         gatewayUsage,
 		GatewayResponseRules: gatewayResponseRules,
-		ModelPrices:   modelPrices,
-		Log:           log,
-		Frontend:      frontendFS,
+		ModelPrices:          modelPrices,
+		Log:                  log,
+		Frontend:             frontendFS,
 	})
 
 	srv := &http.Server{

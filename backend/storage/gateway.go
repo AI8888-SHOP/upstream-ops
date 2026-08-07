@@ -7,7 +7,10 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,10 +19,15 @@ import (
 // ---------- GatewayProviders（直连渠道） ----------
 
 // GatewayProviders 直连上游仓储。
-type GatewayProviders struct{ db *gorm.DB }
+type GatewayProviders struct {
+	db         *gorm.DB
+	readCaches *storageReadCaches
+}
 
 // NewGatewayProviders 构造直连渠道仓储。
-func NewGatewayProviders(db *gorm.DB) *GatewayProviders { return &GatewayProviders{db: db} }
+func NewGatewayProviders(db *gorm.DB) *GatewayProviders {
+	return &GatewayProviders{db: db, readCaches: readCachesForDB(db)}
+}
 
 // GatewayProviderQuery 分页列表查询。
 type GatewayProviderQuery struct {
@@ -96,8 +104,12 @@ func (r *GatewayProviders) ListOptions(q string) ([]GatewayProvider, error) {
 
 // FindByID 按主键查询。
 func (r *GatewayProviders) FindByID(id uint) (*GatewayProvider, error) {
-	var item GatewayProvider
-	if err := r.db.First(&item, id).Error; err != nil {
+	item, err := r.readCaches.gatewayProviders.load(id, func() (GatewayProvider, error) {
+		var loaded GatewayProvider
+		err := r.db.First(&loaded, id).Error
+		return loaded, err
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
 	return &item, nil
@@ -113,21 +125,42 @@ func (r *GatewayProviders) FindByName(name string) (*GatewayProvider, error) {
 }
 
 // Create 插入记录。
-func (r *GatewayProviders) Create(item *GatewayProvider) error { return r.db.Create(item).Error }
+func (r *GatewayProviders) Create(item *GatewayProvider) error {
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.readCaches.gatewayProviders.invalidate(item.ID)
+	}
+	return err
+}
 
 // Update 全量保存。
-func (r *GatewayProviders) Update(item *GatewayProvider) error { return r.db.Save(item).Error }
+func (r *GatewayProviders) Update(item *GatewayProvider) error {
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.readCaches.gatewayProviders.invalidate(item.ID)
+	}
+	return err
+}
 
 // Delete 按主键删除。
 func (r *GatewayProviders) Delete(id uint) error {
-	return r.db.Delete(&GatewayProvider{}, id).Error
+	err := r.db.Delete(&GatewayProvider{}, id).Error
+	if err == nil {
+		r.readCaches.gatewayProviders.invalidate(id)
+	}
+	return err
 }
 
 // GatewayGroups 网关组仓储。
-type GatewayGroups struct{ db *gorm.DB }
+type GatewayGroups struct {
+	db         *gorm.DB
+	readCaches *storageReadCaches
+}
 
 // NewGatewayGroups 构造网关分组仓储。
-func NewGatewayGroups(db *gorm.DB) *GatewayGroups { return &GatewayGroups{db: db} }
+func NewGatewayGroups(db *gorm.DB) *GatewayGroups {
+	return &GatewayGroups{db: db, readCaches: readCachesForDB(db)}
+}
 
 // List 分页列表。
 func (r *GatewayGroups) List() ([]GatewayGroup, error) {
@@ -156,7 +189,7 @@ func (r *GatewayGroups) Reorder(ids []uint) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		seen := make(map[uint]struct{}, len(ids))
 		for i, id := range ids {
 			if id == 0 {
@@ -173,12 +206,20 @@ func (r *GatewayGroups) Reorder(ids []uint) error {
 		}
 		return nil
 	})
+	if err == nil {
+		r.readCaches.gatewayGroups.clear()
+	}
+	return err
 }
 
 // FindByID 按主键查询。
 func (r *GatewayGroups) FindByID(id uint) (*GatewayGroup, error) {
-	var item GatewayGroup
-	if err := r.db.First(&item, id).Error; err != nil {
+	item, err := r.readCaches.gatewayGroups.load(id, func() (GatewayGroup, error) {
+		var loaded GatewayGroup
+		err := r.db.First(&loaded, id).Error
+		return loaded, err
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
 	return &item, nil
@@ -194,16 +235,37 @@ func (r *GatewayGroups) FindByName(name string) (*GatewayGroup, error) {
 }
 
 // Create 插入记录。
-func (r *GatewayGroups) Create(item *GatewayGroup) error { return r.db.Create(item).Error }
+func (r *GatewayGroups) Create(item *GatewayGroup) error {
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.readCaches.gatewayGroups.invalidate(item.ID)
+	}
+	return err
+}
 
 // Update 全量保存。
-func (r *GatewayGroups) Update(item *GatewayGroup) error { return r.db.Save(item).Error }
+func (r *GatewayGroups) Update(item *GatewayGroup) error {
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.readCaches.gatewayGroups.invalidate(item.ID)
+	}
+	return err
+}
 
 // Delete 按主键删除。
 func (r *GatewayGroups) Delete(id uint) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayResponseRule{}).Error; err != nil {
 			return err
+		}
+		var routeIDs []uint
+		if err := tx.Model(&GatewayRoute{}).Where("gateway_group_id = ?", id).Pluck("id", &routeIDs).Error; err != nil {
+			return err
+		}
+		if len(routeIDs) > 0 {
+			if err := tx.Where("route_id IN ?", routeIDs).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
+				return err
+			}
 		}
 		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayRoute{}).Error; err != nil {
 			return err
@@ -213,10 +275,295 @@ func (r *GatewayGroups) Delete(id uint) error {
 		}
 		return tx.Delete(&GatewayGroup{}, id).Error
 	})
+	if err == nil {
+		r.readCaches.gatewayGroups.invalidate(id)
+		r.readCaches.gatewayRoutes.invalidate(id)
+		// Group deletion is an administrative operation. Clearing this small
+		// cache also covers in-flight lookups for keys removed by the transaction.
+		r.readCaches.clearGatewayKeys()
+	}
+	return err
+}
+
+// GatewayGroupCloneKey contains the newly generated credential material for a
+// source gateway key. The source key's user-editable configuration is loaded
+// inside the clone transaction; only the encrypted replacement credential is
+// supplied by the gateway service.
+//
+// KeyHash and KeyCipher are deliberately accepted only in their persisted
+// forms. A plaintext client key must never cross the storage boundary.
+type GatewayGroupCloneKey struct {
+	SourceID  uint
+	KeyHash   string
+	KeyPrefix string
+	KeyCipher string
+}
+
+// GatewayGroupCloneResult is returned after a complete group clone commits.
+// Keys contain persisted metadata only; plaintext secrets are attached by the
+// admin service in its one-time API response.
+type GatewayGroupCloneResult struct {
+	Group        GatewayGroup
+	Keys         []GatewayKey
+	KeySourceIDs []uint
+}
+
+// Clone creates a complete, independent gateway group in one transaction.
+// Group policy, routes, model mappings, response rules and gateway-key
+// configuration are copied. Usage counters and all automatic route cooldown /
+// temporary-unschedulable state are intentionally reset.
+//
+// The clone key templates must contain exactly one replacement credential for
+// every source key. This keeps the source configuration authoritative while
+// allowing the gateway service to generate new client secrets without exposing
+// plaintext to storage.
+func (r *GatewayGroups) Clone(id uint, requestedName string, keyTemplates []GatewayGroupCloneKey) (*GatewayGroupCloneResult, error) {
+	if id == 0 {
+		return nil, fmt.Errorf("gateway group id is required")
+	}
+	result := &GatewayGroupCloneResult{
+		Keys:         make([]GatewayKey, 0, len(keyTemplates)),
+		KeySourceIDs: make([]uint, 0, len(keyTemplates)),
+	}
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var source GatewayGroup
+		if err := tx.First(&source, id).Error; err != nil {
+			return err
+		}
+
+		name := strings.TrimSpace(requestedName)
+		if name == "" {
+			name = source.Name + " (copy)"
+		}
+		var err error
+		name, err = uniqueGatewayCloneName(tx, "gateway_groups", name, 128)
+		if err != nil {
+			return err
+		}
+		var maxPosition *int
+		if err := tx.Model(&GatewayGroup{}).Select("MAX(position)").Scan(&maxPosition).Error; err != nil {
+			return err
+		}
+		position := 0
+		if maxPosition != nil {
+			position = *maxPosition + 1
+		}
+		clone := source
+		clone.ID = 0
+		clone.Name = name
+		clone.Position = position
+		clone.CreatedAt = time.Time{}
+		clone.UpdatedAt = time.Time{}
+		if err := tx.Create(&clone).Error; err != nil {
+			return err
+		}
+		result.Group = clone
+
+		var sourceRoutes []GatewayRoute
+		if err := tx.Where("gateway_group_id = ?", id).Order("position ASC, id ASC").Find(&sourceRoutes).Error; err != nil {
+			return err
+		}
+		for _, sourceRoute := range sourceRoutes {
+			route := sourceRoute
+			route.ID = 0
+			route.GatewayGroupID = clone.ID
+			route.RateLimitAutoDisabled = false
+			route.RateLimitAutoDisabledReason = ""
+			route.TempUnschedulableUntil = nil
+			route.TempUnschedulableReason = ""
+			route.TempUnschedulableAt = nil
+			route.TempUnschedulableRequestID = ""
+			route.RecoverSuccessStreak = 0
+			route.ModelCooldowns = nil
+			route.CreatedAt = time.Time{}
+			route.UpdatedAt = time.Time{}
+			if err := tx.Create(&route).Error; err != nil {
+				return err
+			}
+		}
+
+		var sourceRules []GatewayResponseRule
+		if err := tx.Where("gateway_group_id = ?", id).Order("priority ASC, id ASC").Find(&sourceRules).Error; err != nil {
+			return err
+		}
+		for _, sourceRule := range sourceRules {
+			rule := sourceRule
+			rule.ID = 0
+			rule.GatewayGroupID = clone.ID
+			rule.CreatedAt = time.Time{}
+			rule.UpdatedAt = time.Time{}
+			if err := tx.Create(&rule).Error; err != nil {
+				return err
+			}
+		}
+
+		var sourceKeys []GatewayKey
+		if err := tx.Where("group_id = ?", id).Order("id ASC").Find(&sourceKeys).Error; err != nil {
+			return err
+		}
+		if len(sourceKeys) != len(keyTemplates) {
+			return fmt.Errorf("clone key templates do not match source keys")
+		}
+		templatesBySourceID := make(map[uint]GatewayGroupCloneKey, len(keyTemplates))
+		for _, template := range keyTemplates {
+			if template.SourceID == 0 || template.KeyHash == "" || template.KeyPrefix == "" || template.KeyCipher == "" {
+				return fmt.Errorf("clone key template is incomplete")
+			}
+			if _, exists := templatesBySourceID[template.SourceID]; exists {
+				return fmt.Errorf("duplicate clone key template for source key %d", template.SourceID)
+			}
+			templatesBySourceID[template.SourceID] = template
+		}
+		for _, sourceKey := range sourceKeys {
+			template, ok := templatesBySourceID[sourceKey.ID]
+			if !ok {
+				return fmt.Errorf("missing clone key template for source key %d", sourceKey.ID)
+			}
+			var hashCount int64
+			if err := tx.Model(&GatewayKey{}).Where("key_hash = ?", template.KeyHash).Count(&hashCount).Error; err != nil {
+				return err
+			}
+			if hashCount > 0 {
+				return fmt.Errorf("clone key hash already exists")
+			}
+			keyName, err := uniqueGatewayCloneName(tx, "gateway_keys", sourceKey.Name+" (copy)", 128)
+			if err != nil {
+				return err
+			}
+			key := GatewayKey{
+				GroupID:         clone.ID,
+				Name:            keyName,
+				KeyHash:         template.KeyHash,
+				KeyPrefix:       template.KeyPrefix,
+				KeyCipher:       template.KeyCipher,
+				Status:          sourceKey.Status,
+				Quota:           sourceKey.Quota,
+				QuotaUsed:       0,
+				IPWhitelistJSON: sourceKey.IPWhitelistJSON,
+				IPBlacklistJSON: sourceKey.IPBlacklistJSON,
+				LastUsedAt:      nil,
+			}
+			if err := tx.Create(&key).Error; err != nil {
+				return err
+			}
+			result.Keys = append(result.Keys, key)
+			result.KeySourceIDs = append(result.KeySourceIDs, sourceKey.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	r.readCaches.gatewayGroups.invalidate(result.Group.ID)
+	r.readCaches.gatewayRoutes.invalidate(result.Group.ID)
+	for _, key := range result.Keys {
+		r.readCaches.rememberGatewayKey(key)
+		r.readCaches.gatewayKeys.invalidate(key.KeyHash)
+	}
+	return result, nil
+}
+
+// uniqueGatewayCloneName returns a case-insensitively unique name in one of
+// the two gateway tables. The suffix is trimmed to the model's byte limit so
+// names containing multibyte characters remain valid UTF-8.
+func uniqueGatewayCloneName(tx *gorm.DB, table, requested string, maxBytes int) (string, error) {
+	base := strings.TrimSpace(requested)
+	if base == "" {
+		base = "copy"
+	}
+	base = truncateGatewayCloneName(base, maxBytes)
+	if available, err := gatewayCloneNameAvailable(tx, table, base); err != nil {
+		return "", err
+	} else if available {
+		return base, nil
+	}
+	for suffix := 2; ; suffix++ {
+		tail := fmt.Sprintf(" (%d)", suffix)
+		prefix := truncateGatewayCloneName(base, maxBytes-len(tail))
+		candidate := prefix + tail
+		available, err := gatewayCloneNameAvailable(tx, table, candidate)
+		if err != nil {
+			return "", err
+		}
+		if available {
+			return candidate, nil
+		}
+	}
+}
+
+func gatewayCloneNameAvailable(tx *gorm.DB, table, name string) (bool, error) {
+	var count int64
+	if err := tx.Table(table).Where("LOWER(name) = LOWER(?)", name).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count == 0, nil
+}
+
+func truncateGatewayCloneName(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 // GatewayResponseRules 组级响应正则规则仓储。
 type GatewayResponseRules struct{ db *gorm.DB }
+
+// GatewayResponseRuleBundleKind identifies the portable response-rule export
+// format. The bundle intentionally contains no gateway group IDs, so it can
+// be imported into any group.
+const GatewayResponseRuleBundleKind = "upstream_ops.gateway_response_rules"
+
+// GatewayResponseRuleBundleVersion is incremented when the portable schema
+// changes incompatibly.
+const GatewayResponseRuleBundleVersion = 1
+
+// GatewayResponseRuleBundle is the portable response-rule export format.
+// Rules contain only user-editable fields; database IDs and timestamps are
+// deliberately omitted.
+type GatewayResponseRuleBundle struct {
+	Kind       string                          `json:"kind"`
+	Version    int                             `json:"version"`
+	ExportedAt time.Time                       `json:"exported_at"`
+	Rules      []GatewayResponseRuleBundleRule `json:"rules"`
+}
+
+// GatewayResponseRuleBundleRule is a group-independent response rule.
+// Enabled is a pointer so imports of hand-written bundles can retain the
+// existing create API default (enabled=true) when the field is omitted.
+type GatewayResponseRuleBundleRule struct {
+	Name      string   `json:"name"`
+	Enabled   *bool    `json:"enabled,omitempty"`
+	Priority  int      `json:"priority"`
+	Pattern   string   `json:"pattern"`
+	Target    string   `json:"target"`
+	Models    []string `json:"models"`
+	Protocols []string `json:"protocols"`
+}
+
+// GatewayResponseRuleImportStrategy controls what happens when a rule with
+// the same (case-insensitive) name already exists in the target group.
+type GatewayResponseRuleImportStrategy string
+
+const (
+	GatewayResponseRuleImportSkip    GatewayResponseRuleImportStrategy = "skip"
+	GatewayResponseRuleImportReplace GatewayResponseRuleImportStrategy = "replace"
+	GatewayResponseRuleImportRename  GatewayResponseRuleImportStrategy = "rename"
+)
+
+// GatewayResponseRuleImportResult summarizes a successful import.
+type GatewayResponseRuleImportResult struct {
+	Strategy GatewayResponseRuleImportStrategy `json:"strategy"`
+	Created  int                               `json:"created"`
+	Replaced int                               `json:"replaced"`
+	Renamed  int                               `json:"renamed"`
+	Skipped  int                               `json:"skipped"`
+	Items    []GatewayResponseRule             `json:"items"`
+}
 
 // NewGatewayResponseRules 构造响应规则仓储。
 func NewGatewayResponseRules(db *gorm.DB) *GatewayResponseRules {
@@ -294,6 +641,197 @@ func (r *GatewayResponseRules) Update(item *GatewayResponseRule) error {
 // Delete 按主键删除。
 func (r *GatewayResponseRules) Delete(id uint) error {
 	return r.db.Delete(&GatewayResponseRule{}, id).Error
+}
+
+// Export returns a group-independent rule bundle. IDs, group IDs and
+// timestamps are intentionally excluded from the returned schema.
+func (r *GatewayResponseRules) Export(groupID uint) (GatewayResponseRuleBundle, error) {
+	if err := r.ensureGroupExists(groupID); err != nil {
+		return GatewayResponseRuleBundle{}, err
+	}
+	items, err := r.ListByGroupID(groupID)
+	if err != nil {
+		return GatewayResponseRuleBundle{}, err
+	}
+	bundle := GatewayResponseRuleBundle{
+		Kind:       GatewayResponseRuleBundleKind,
+		Version:    GatewayResponseRuleBundleVersion,
+		ExportedAt: time.Now().UTC(),
+		Rules:      make([]GatewayResponseRuleBundleRule, 0, len(items)),
+	}
+	for _, item := range items {
+		models, err := decodeGatewayResponseRuleList(item.ModelsJSON, false, 256)
+		if err != nil {
+			return GatewayResponseRuleBundle{}, fmt.Errorf("rule %q models_json: %w", item.Name, err)
+		}
+		protocols, err := decodeGatewayResponseRuleList(item.ProtocolsJSON, true, 64)
+		if err != nil {
+			return GatewayResponseRuleBundle{}, fmt.Errorf("rule %q protocols_json: %w", item.Name, err)
+		}
+		enabled := item.Enabled
+		bundle.Rules = append(bundle.Rules, GatewayResponseRuleBundleRule{
+			Name: item.Name, Enabled: &enabled, Priority: item.Priority,
+			Pattern: item.Pattern, Target: item.Target,
+			Models: models, Protocols: protocols,
+		})
+	}
+	return bundle, nil
+}
+
+// Import applies a validated rule bundle to one target group in a single
+// transaction. It performs all regex and field validation before writing any
+// row, so malformed input cannot leave a partially imported set behind.
+func (r *GatewayResponseRules) Import(groupID uint, bundle GatewayResponseRuleBundle, strategy GatewayResponseRuleImportStrategy) (*GatewayResponseRuleImportResult, error) {
+	if err := r.ensureGroupExists(groupID); err != nil {
+		return nil, err
+	}
+	if bundle.Kind == "" {
+		// Allow a plain {rules:[...]} payload for hand-written imports while
+		// still normalizing it to the current portable format.
+		bundle.Kind = GatewayResponseRuleBundleKind
+	}
+	if bundle.Kind != GatewayResponseRuleBundleKind {
+		return nil, fmt.Errorf("unsupported response rule bundle kind %q", bundle.Kind)
+	}
+	if bundle.Version == 0 {
+		bundle.Version = GatewayResponseRuleBundleVersion
+	}
+	if bundle.Version != GatewayResponseRuleBundleVersion {
+		return nil, fmt.Errorf("unsupported response rule bundle version %d", bundle.Version)
+	}
+	strategy = normalizeGatewayResponseRuleImportStrategy(strategy)
+	switch strategy {
+	case GatewayResponseRuleImportSkip, GatewayResponseRuleImportReplace, GatewayResponseRuleImportRename:
+	default:
+		return nil, fmt.Errorf("strategy must be skip, replace, or rename")
+	}
+	if len(bundle.Rules) > 512 {
+		return nil, fmt.Errorf("bundle contains too many rules (maximum 512)")
+	}
+
+	// Normalize and validate every rule before opening the write transaction.
+	// This also catches duplicate names within the uploaded file rather than
+	// allowing their result to depend on input order.
+	validated := make([]GatewayResponseRule, 0, len(bundle.Rules))
+	seen := make(map[string]struct{}, len(bundle.Rules))
+	for index, spec := range bundle.Rules {
+		enabled := true
+		if spec.Enabled != nil {
+			enabled = *spec.Enabled
+		}
+		modelsJSON, err := json.Marshal(spec.Models)
+		if err != nil {
+			return nil, fmt.Errorf("rule %d models: %w", index+1, err)
+		}
+		protocolsJSON, err := json.Marshal(spec.Protocols)
+		if err != nil {
+			return nil, fmt.Errorf("rule %d protocols: %w", index+1, err)
+		}
+		item := GatewayResponseRule{
+			GatewayGroupID: groupID,
+			Name:           spec.Name,
+			Enabled:        enabled,
+			Priority:       spec.Priority,
+			Pattern:        spec.Pattern,
+			Target:         spec.Target,
+			ModelsJSON:     string(modelsJSON),
+			ProtocolsJSON:  string(protocolsJSON),
+		}
+		if err := normalizeGatewayResponseRule(&item); err != nil {
+			return nil, fmt.Errorf("rule %d: %w", index+1, err)
+		}
+		nameKey := strings.ToLower(item.Name)
+		if _, exists := seen[nameKey]; exists {
+			return nil, fmt.Errorf("bundle contains duplicate rule name %q", item.Name)
+		}
+		seen[nameKey] = struct{}{}
+		validated = append(validated, item)
+	}
+
+	result := &GatewayResponseRuleImportResult{
+		Strategy: strategy,
+		Items:    make([]GatewayResponseRule, 0, len(validated)),
+	}
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var existing []GatewayResponseRule
+		if err := tx.Where("gateway_group_id = ?", groupID).
+			Order("priority ASC, id ASC").Find(&existing).Error; err != nil {
+			return err
+		}
+		existingByName := make(map[string]GatewayResponseRule, len(existing))
+		for _, item := range existing {
+			existingByName[strings.ToLower(item.Name)] = item
+		}
+
+		for _, item := range validated {
+			nameKey := strings.ToLower(item.Name)
+			if old, exists := existingByName[nameKey]; exists {
+				switch strategy {
+				case GatewayResponseRuleImportSkip:
+					result.Skipped++
+					continue
+				case GatewayResponseRuleImportReplace:
+					item.ID = old.ID
+					item.CreatedAt = old.CreatedAt
+					if err := tx.Save(&item).Error; err != nil {
+						return err
+					}
+					result.Replaced++
+					result.Items = append(result.Items, item)
+					continue
+				case GatewayResponseRuleImportRename:
+					item.Name = uniqueGatewayResponseRuleName(item.Name, existingByName)
+					nameKey = strings.ToLower(item.Name)
+					result.Renamed++
+				}
+			}
+			if err := tx.Create(&item).Error; err != nil {
+				return err
+			}
+			existingByName[nameKey] = item
+			result.Created++
+			result.Items = append(result.Items, item)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func normalizeGatewayResponseRuleImportStrategy(strategy GatewayResponseRuleImportStrategy) GatewayResponseRuleImportStrategy {
+	return GatewayResponseRuleImportStrategy(strings.ToLower(strings.TrimSpace(string(strategy))))
+}
+
+func uniqueGatewayResponseRuleName(base string, existing map[string]GatewayResponseRule) string {
+	for suffix := 2; ; suffix++ {
+		candidateSuffix := fmt.Sprintf(" (%d)", suffix)
+		prefix := base
+		for len(prefix)+len(candidateSuffix) > 128 {
+			_, size := utf8.DecodeLastRuneInString(prefix)
+			if size <= 0 || size > len(prefix) {
+				break
+			}
+			prefix = prefix[:len(prefix)-size]
+		}
+		candidate := prefix + candidateSuffix
+		if _, exists := existing[strings.ToLower(candidate)]; !exists {
+			return candidate
+		}
+	}
+}
+
+func decodeGatewayResponseRuleList(raw string, lower bool, maxItemBytes int) ([]string, error) {
+	normalized, err := normalizeResponseRuleListJSON(raw, lower, maxItemBytes)
+	if err != nil {
+		return nil, err
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(normalized), &values); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func (r *GatewayResponseRules) ensureGroupExists(groupID uint) error {
@@ -410,10 +948,41 @@ func normalizeResponseRuleListJSON(raw string, lower bool, maxItemBytes int) (st
 }
 
 // GatewayKeys 网关密钥仓储。
-type GatewayKeys struct{ db *gorm.DB }
+const gatewayKeyLastUsedWriteInterval = 30 * time.Second
+
+type GatewayKeys struct {
+	db         *gorm.DB
+	readCaches *storageReadCaches
+
+	// LastUsedAt is informational metadata. Keeping a short in-process write
+	// throttle prevents every streamed request from becoming a SQLite UPDATE;
+	// the first request after a process restart still records immediately. A
+	// per-key lock keeps a slow write for one key from blocking unrelated keys.
+	lastUsedMu sync.Mutex
+	lastUsed   map[uint]*gatewayKeyLastUsedState
+}
+
+type gatewayKeyLastUsedState struct {
+	mu sync.Mutex
+	at time.Time
+}
 
 // NewGatewayKeys 构造网关密钥仓储。
-func NewGatewayKeys(db *gorm.DB) *GatewayKeys { return &GatewayKeys{db: db} }
+func NewGatewayKeys(db *gorm.DB) *GatewayKeys {
+	return &GatewayKeys{
+		db:         db,
+		readCaches: readCachesForDB(db),
+		lastUsed:   make(map[uint]*gatewayKeyLastUsedState),
+	}
+}
+
+func (r *GatewayKeys) invalidateReadCache(id uint, currentHash ...string) {
+	hash := ""
+	if len(currentHash) > 0 {
+		hash = currentHash[0]
+	}
+	r.readCaches.invalidateGatewayKey(id, hash)
+}
 
 // List 分页列表。
 func (r *GatewayKeys) List() ([]GatewayKey, error) {
@@ -444,10 +1013,17 @@ func (r *GatewayKeys) FindByID(id uint) (*GatewayKey, error) {
 
 // FindByHash 按密钥哈希查询。
 func (r *GatewayKeys) FindByHash(hash string) (*GatewayKey, error) {
-	var item GatewayKey
-	if err := r.db.Where("key_hash = ?", hash).First(&item).Error; err != nil {
+	item, err := r.readCaches.gatewayKeys.load(hash, func() (GatewayKey, error) {
+		var loaded GatewayKey
+		err := r.db.Where("key_hash = ?", hash).First(&loaded).Error
+		return loaded, err
+	}, func(item GatewayKey) bool {
+		return item.Quota <= 0
+	})
+	if err != nil {
 		return nil, err
 	}
+	r.readCaches.rememberGatewayKey(item)
 	return &item, nil
 }
 
@@ -461,21 +1037,63 @@ func (r *GatewayKeys) FindByName(name string) (*GatewayKey, error) {
 }
 
 // Create 插入记录。
-func (r *GatewayKeys) Create(item *GatewayKey) error { return r.db.Create(item).Error }
+func (r *GatewayKeys) Create(item *GatewayKey) error {
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.invalidateReadCache(item.ID, item.KeyHash)
+	}
+	return err
+}
 
 // Update 全量保存。
-func (r *GatewayKeys) Update(item *GatewayKey) error { return r.db.Save(item).Error }
+func (r *GatewayKeys) Update(item *GatewayKey) error {
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.invalidateReadCache(item.ID, item.KeyHash)
+	}
+	return err
+}
 
 // Delete 按主键删除。
 func (r *GatewayKeys) Delete(id uint) error {
-	return r.db.Delete(&GatewayKey{}, id).Error
+	err := r.db.Delete(&GatewayKey{}, id).Error
+	if err == nil {
+		r.lastUsedMu.Lock()
+		delete(r.lastUsed, id)
+		r.lastUsedMu.Unlock()
+		r.invalidateReadCache(id)
+	}
+	return err
 }
 
 // TouchLastUsed 更新密钥最近使用时间。
 func (r *GatewayKeys) TouchLastUsed(id uint, at time.Time) error {
-	return r.db.Model(&GatewayKey{}).Where("id = ?", id).Updates(map[string]any{
+	if r == nil || r.db == nil || id == 0 {
+		return nil
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	r.lastUsedMu.Lock()
+	state := r.lastUsed[id]
+	if state == nil {
+		state = &gatewayKeyLastUsedState{}
+		r.lastUsed[id] = state
+	}
+	r.lastUsedMu.Unlock()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.at.IsZero() && at.Sub(state.at) < gatewayKeyLastUsedWriteInterval {
+		return nil
+	}
+	err := r.db.Model(&GatewayKey{}).Where("id = ?", id).Updates(map[string]any{
 		"last_used_at": at,
 	}).Error
+	if err == nil {
+		state.at = at
+		r.invalidateReadCache(id)
+	}
+	return err
 }
 
 // AddQuotaUsed 累加密钥已用额度。
@@ -483,22 +1101,41 @@ func (r *GatewayKeys) AddQuotaUsed(id uint, amount float64) error {
 	if amount == 0 {
 		return nil
 	}
-	return r.db.Model(&GatewayKey{}).Where("id = ?", id).
+	err := r.db.Model(&GatewayKey{}).Where("id = ?", id).
 		UpdateColumn("quota_used", gorm.Expr("quota_used + ?", amount)).Error
+	if err == nil {
+		r.invalidateReadCache(id)
+	}
+	return err
 }
 
 // GatewayRoutes 网关路由仓储。
-type GatewayRoutes struct{ db *gorm.DB }
+type GatewayRoutes struct {
+	db         *gorm.DB
+	readCaches *storageReadCaches
+}
 
 // NewGatewayRoutes 构造网关路由仓储。
-func NewGatewayRoutes(db *gorm.DB) *GatewayRoutes { return &GatewayRoutes{db: db} }
+func NewGatewayRoutes(db *gorm.DB) *GatewayRoutes {
+	return &GatewayRoutes{db: db, readCaches: readCachesForDB(db)}
+}
 
 // ListByGroupID 列出某分组下资源。
 func (r *GatewayRoutes) ListByGroupID(groupID uint) ([]GatewayRoute, error) {
-	var list []GatewayRoute
-	if err := r.db.Where("gateway_group_id = ?", groupID).Order("position ASC, id ASC").Find(&list).Error; err != nil {
+	list, err := r.readCaches.gatewayRoutes.load(groupID, func() ([]GatewayRoute, error) {
+		var loaded []GatewayRoute
+		if err := r.db.Where("gateway_group_id = ?", groupID).Order("position ASC, id ASC").Find(&loaded).Error; err != nil {
+			return nil, err
+		}
+		if err := r.loadModelCooldowns(loaded); err != nil {
+			return nil, err
+		}
+		return loaded, nil
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
+	r.readCaches.rememberGatewayRoutes(groupID, list)
 	// 不过期即清 reason：调度层用 until 判断是否仍暂停；reason 作为「上次错误」保留供管理端查看
 	return list, nil
 }
@@ -509,7 +1146,50 @@ func (r *GatewayRoutes) FindByID(id uint) (*GatewayRoute, error) {
 	if err := r.db.First(&item, id).Error; err != nil {
 		return nil, err
 	}
+	list := []GatewayRoute{item}
+	if err := r.loadModelCooldowns(list); err != nil {
+		return nil, err
+	}
+	item = list[0]
+	r.readCaches.rememberGatewayRoutes(item.GatewayGroupID, list)
 	return &item, nil
+}
+
+func (r *GatewayRoutes) loadModelCooldowns(routes []GatewayRoute) error {
+	if len(routes) == 0 {
+		return nil
+	}
+	ids := make([]uint, 0, len(routes))
+	for _, route := range routes {
+		if route.ID > 0 {
+			ids = append(ids, route.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var cooldowns []GatewayRouteModelCooldown
+	if err := r.db.Where("route_id IN ?", ids).Find(&cooldowns).Error; err != nil {
+		return err
+	}
+	byRoute := make(map[uint]map[string]GatewayRouteModelCooldown, len(ids))
+	for _, cooldown := range cooldowns {
+		key := NormalizeGatewayModel(cooldown.Model)
+		if key == "" {
+			continue
+		}
+		if byRoute[cooldown.RouteID] == nil {
+			byRoute[cooldown.RouteID] = make(map[string]GatewayRouteModelCooldown)
+		}
+		cooldown.Model = key
+		byRoute[cooldown.RouteID][key] = cooldown
+	}
+	for i := range routes {
+		if models := byRoute[routes[i].ID]; len(models) > 0 {
+			routes[i].ModelCooldowns = models
+		}
+	}
+	return nil
 }
 
 // SaveForGroup 全量保存某组下的路由列表。
@@ -519,7 +1199,7 @@ func (r *GatewayRoutes) FindByID(id uint) (*GatewayRoute, error) {
 //
 // position 有 (group_id, position) 唯一索引：先写临时 position 再写最终值，避免换序冲突。
 func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var existing []GatewayRoute
 		if err := tx.Where("gateway_group_id = ?", groupID).Find(&existing).Error; err != nil {
 			return err
@@ -560,6 +1240,8 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 				list[i].SourceAPIKeyID = prev.SourceAPIKeyID
 				list[i].SourceAPIKeyName = prev.SourceAPIKeyName
 				list[i].SourceAPIKeyCipher = prev.SourceAPIKeyCipher
+				list[i].RateLimitAutoDisabled = prev.RateLimitAutoDisabled
+				list[i].RateLimitAutoDisabledReason = prev.RateLimitAutoDisabledReason
 				list[i].TempUnschedulableUntil = prev.TempUnschedulableUntil
 				list[i].TempUnschedulableReason = prev.TempUnschedulableReason
 				list[i].TempUnschedulableAt = prev.TempUnschedulableAt
@@ -570,6 +1252,8 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 				list[i].SourceAPIKeyID = 0
 				list[i].SourceAPIKeyName = ""
 				list[i].SourceAPIKeyCipher = ""
+				list[i].RateLimitAutoDisabled = false
+				list[i].RateLimitAutoDisabledReason = ""
 				list[i].TempUnschedulableUntil = nil
 				list[i].TempUnschedulableReason = ""
 				list[i].TempUnschedulableAt = nil
@@ -578,6 +1262,11 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 			}
 
 			if hasPrev {
+				if !sameSource {
+					if err := tx.Where("route_id = ?", list[i].ID).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
+						return err
+					}
+				}
 				if err := tx.Save(&list[i]).Error; err != nil {
 					return err
 				}
@@ -593,12 +1282,20 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 			if _, ok := keep[id]; ok {
 				continue
 			}
+			if err := tx.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
+				return err
+			}
 			if err := tx.Delete(&GatewayRoute{}, id).Error; err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+	if err == nil {
+		r.readCaches.rememberGatewayRoutes(groupID, list)
+		r.readCaches.gatewayRoutes.invalidate(groupID)
+	}
+	return err
 }
 
 func normalizeGatewayRoute(item *GatewayRoute) {
@@ -661,15 +1358,55 @@ func normalizeGatewayRoute(item *GatewayRoute) {
 }
 
 // Update 全量保存。
-func (r *GatewayRoutes) Update(item *GatewayRoute) error { return r.db.Save(item).Error }
+func (r *GatewayRoutes) Update(item *GatewayRoute) error {
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.readCaches.rememberGatewayRoutes(item.GatewayGroupID, []GatewayRoute{*item})
+		r.readCaches.invalidateGatewayRoute(item.ID)
+		r.readCaches.gatewayRoutes.invalidate(item.GatewayGroupID)
+	}
+	return err
+}
+
+// SetRateLimitAutoDisabled updates only the derived multiplier guard state.
+// Keeping this as a targeted update avoids overwriting concurrent cooldown or
+// upstream-key changes with a stale route snapshot.
+func (r *GatewayRoutes) SetRateLimitAutoDisabled(id uint, disabled bool, reason string) error {
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
+		"rate_limit_auto_disabled":        disabled,
+		"rate_limit_auto_disabled_reason": strings.TrimSpace(reason),
+	})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
+}
+
+// SetProviderBillingSnapshot updates the persisted provider billing fields
+// without overwriting concurrent cooldown, key, or route-policy fields.
+func (r *GatewayRoutes) SetProviderBillingSnapshot(id uint, rate, convertValue float64) error {
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).
+		Updates(map[string]any{
+			"billing_rate_multiplier": rate,
+			"rate_convert_value":      convertValue,
+		})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
+}
 
 // UpdateSourceKey 更新路由绑定的上游密钥密文。
 func (r *GatewayRoutes) UpdateSourceKey(id uint, keyID int64, keyName, keyCipher string) error {
-	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
 		"source_api_key_id":     keyID,
 		"source_api_key_name":   keyName,
 		"source_api_key_cipher": keyCipher,
-	}).Error
+	})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // UpdateSourceGroupSnapshot 补全源分组显示名（保留 source_group_id）。
@@ -680,7 +1417,11 @@ func (r *GatewayRoutes) UpdateSourceGroupSnapshot(id uint, groupID *int64, group
 	if groupID != nil {
 		updates["source_group_id"] = *groupID
 	}
-	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(updates).Error
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(updates)
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // SetTempUnschedulable 写入冷却截止时间、错误详情，以及触发失败的请求时间/ request_id。
@@ -688,30 +1429,212 @@ func (r *GatewayRoutes) SetTempUnschedulable(id uint, until time.Time, reason st
 	if failedAt.IsZero() {
 		failedAt = time.Now()
 	}
-	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
 		"temp_unschedulable_until":      until,
 		"temp_unschedulable_reason":     reason,
 		"temp_unschedulable_at":         failedAt,
 		"temp_unschedulable_request_id": strings.TrimSpace(requestID),
 		"recover_success_streak":        0,
+	})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
+}
+
+// SetModelTempUnschedulable writes automatic cooldown state for one model on a
+// route. The unique route/model key makes concurrent failures idempotent.
+func (r *GatewayRoutes) SetModelTempUnschedulable(id uint, model string, until time.Time, reason string, failedAt time.Time, requestID string) error {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" {
+		return nil
+	}
+	if failedAt.IsZero() {
+		failedAt = time.Now()
+	}
+	requestID = strings.TrimSpace(requestID)
+	err := r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "route_id"}, {Name: "model"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"temp_unschedulable_until":      until,
+			"temp_unschedulable_reason":     reason,
+			"temp_unschedulable_at":         failedAt,
+			"temp_unschedulable_request_id": requestID,
+			"recover_success_streak":        0,
+			"updated_at":                    time.Now(),
+		}),
+	}).Create(&GatewayRouteModelCooldown{
+		RouteID: id, Model: model, TempUnschedulableUntil: &until,
+		TempUnschedulableReason: reason, TempUnschedulableAt: &failedAt,
+		TempUnschedulableRequestID: requestID,
 	}).Error
+	if err == nil {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return err
+}
+
+// ClearModelTempUnschedulable clears one model's automatic cooldown state.
+func (r *GatewayRoutes) ClearModelTempUnschedulable(id uint, model string) error {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" {
+		return nil
+	}
+	result := r.db.Exec(
+		`UPDATE gateway_route_model_cooldowns
+		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
+		     temp_unschedulable_at = NULL, temp_unschedulable_request_id = '',
+		     recover_success_streak = 0, updated_at = ?
+		 WHERE route_id = ? AND model = ?`,
+		time.Now(), id, model,
+	)
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
+}
+
+// ClearModelTempUnschedulableUntil ends one model's automatic pause while
+// retaining the failure reason, timestamp, request id, and recovery streak
+// for management diagnostics. This is used for a bounded emergency recovery
+// probe when every otherwise-valid route is cooling for the requested model.
+func (r *GatewayRoutes) ClearModelTempUnschedulableUntil(id uint, model string) error {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" {
+		return nil
+	}
+	result := r.db.Exec(
+		`UPDATE gateway_route_model_cooldowns
+		 SET temp_unschedulable_until = NULL, updated_at = ?
+		 WHERE route_id = ? AND model = ?`,
+		time.Now(), id, model,
+	)
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
+}
+
+// ClearModelTempUnschedulableUntilIfMatch ends one model's automatic pause
+// only when the cooldown still has the values observed by the caller. This
+// prevents an older recovery probe from clearing a newer failure written by a
+// concurrent request.
+func (r *GatewayRoutes) ClearModelTempUnschedulableUntilIfMatch(
+	id uint,
+	model string,
+	until time.Time,
+	failedAt *time.Time,
+	requestID string,
+) (bool, error) {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" || until.IsZero() {
+		return false, nil
+	}
+	query := `UPDATE gateway_route_model_cooldowns
+		SET temp_unschedulable_until = NULL, updated_at = ?
+		WHERE route_id = ? AND model = ? AND temp_unschedulable_until = ?`
+	args := []any{time.Now(), id, model, until}
+	if failedAt == nil || failedAt.IsZero() {
+		query += ` AND temp_unschedulable_at IS NULL`
+	} else {
+		query += ` AND temp_unschedulable_at = ?`
+		args = append(args, *failedAt)
+	}
+	query += ` AND temp_unschedulable_request_id = ?`
+	args = append(args, requestID)
+	result := r.db.Exec(query, args...)
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.RowsAffected > 0, result.Error
+}
+
+// NoteSuccessForModelPauseError mirrors route-level recovery bookkeeping for
+// one model and leaves every other model cooldown untouched. The observed
+// failure generation is required so an older successful request cannot clear
+// a newer cooldown written concurrently for the same route and model.
+func (r *GatewayRoutes) NoteSuccessForModelPauseError(
+	id uint,
+	model string,
+	failedAt *time.Time,
+	requestID string,
+) error {
+	model = NormalizeGatewayModel(model)
+	if id == 0 || model == "" {
+		return nil
+	}
+	requestID = strings.TrimSpace(requestID)
+	generationSQL := ` AND temp_unschedulable_request_id = ?`
+	generationArgs := []any{requestID}
+	if failedAt == nil || failedAt.IsZero() {
+		generationSQL += ` AND temp_unschedulable_at IS NULL`
+	} else {
+		generationSQL += ` AND temp_unschedulable_at = ?`
+		generationArgs = append(generationArgs, *failedAt)
+	}
+	now := time.Now()
+	updateSQL :=
+		`UPDATE gateway_route_model_cooldowns
+		 SET recover_success_streak = recover_success_streak + 1,
+		     temp_unschedulable_until = NULL, updated_at = ?
+		 WHERE route_id = ? AND model = ?
+		   AND (
+		     (temp_unschedulable_reason IS NOT NULL AND temp_unschedulable_reason != '')
+		     OR temp_unschedulable_until IS NOT NULL
+		     OR (temp_unschedulable_request_id IS NOT NULL AND temp_unschedulable_request_id != '')
+		     OR temp_unschedulable_at IS NOT NULL
+		   )` + generationSQL
+	updateArgs := append([]any{now, id, model}, generationArgs...)
+	result := r.db.Exec(updateSQL, updateArgs...)
+	if result.Error != nil {
+		return result.Error
+	}
+	// Healthy routes do not have a cooldown row to recover. Avoid issuing the
+	// second UPDATE in that overwhelmingly common case; this method is called
+	// after every successful gateway request.
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	clearSQL :=
+		`UPDATE gateway_route_model_cooldowns
+		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
+		     temp_unschedulable_at = NULL, temp_unschedulable_request_id = '',
+		     recover_success_streak = 0, updated_at = ?
+		 WHERE route_id = ? AND model = ? AND recover_success_streak >= ?` + generationSQL
+	clearArgs := append([]any{now, id, model, RouteRecoverSuccessClearStreak}, generationArgs...)
+	clearResult := r.db.Exec(clearSQL, clearArgs...)
+	r.readCaches.invalidateGatewayRoute(id)
+	return clearResult.Error
 }
 
 // ClearTempUnschedulable 手动清除暂停时间与错误信息。
 func (r *GatewayRoutes) ClearTempUnschedulable(id uint) error {
 	// 用 Exec 强制写 NULL；GORM Updates(map) 对 nil 在部分版本会跳过
-	return r.db.Exec(
+	if err := r.db.Exec(
 		`UPDATE gateway_routes SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '', temp_unschedulable_at = NULL, temp_unschedulable_request_id = '', recover_success_streak = 0, updated_at = ? WHERE id = ?`,
 		time.Now(), id,
-	).Error
+	).Error; err != nil {
+		return err
+	}
+	result := r.db.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{})
+	r.readCaches.invalidateGatewayRoute(id)
+	return result.Error
 }
 
 // ClearTempUnschedulableUntil 仅结束临时暂停（恢复调度），保留 reason / request_id / at 供排查。
 func (r *GatewayRoutes) ClearTempUnschedulableUntil(id uint) error {
-	return r.db.Exec(
+	if err := r.db.Exec(
 		`UPDATE gateway_routes SET temp_unschedulable_until = NULL, updated_at = ? WHERE id = ?`,
 		time.Now(), id,
-	).Error
+	).Error; err != nil {
+		return err
+	}
+	result := r.db.Exec(
+		`UPDATE gateway_route_model_cooldowns SET temp_unschedulable_until = NULL, updated_at = ? WHERE route_id = ?`,
+		time.Now(), id,
+	)
+	r.readCaches.invalidateGatewayRoute(id)
+	return result.Error
 }
 
 // NoteSuccessForPauseError 路由请求成功时调用：
@@ -724,7 +1647,7 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 	}
 	now := time.Now()
 	// 仅处理仍有暂停/错误残留的路由，避免无意义写放大
-	if err := r.db.Exec(
+	result := r.db.Exec(
 		`UPDATE gateway_routes
 		 SET recover_success_streak = recover_success_streak + 1,
 		     temp_unschedulable_until = NULL,
@@ -737,10 +1660,14 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 		     OR temp_unschedulable_at IS NOT NULL
 		   )`,
 		now, id,
-	).Error; err != nil {
-		return err
+	)
+	if result.Error != nil {
+		return result.Error
 	}
-	return r.db.Exec(
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	clearResult := r.db.Exec(
 		`UPDATE gateway_routes
 		 SET temp_unschedulable_until = NULL,
 		     temp_unschedulable_reason = '',
@@ -750,21 +1677,84 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 		     updated_at = ?
 		 WHERE id = ? AND recover_success_streak >= ?`,
 		now, id, RouteRecoverSuccessClearStreak,
-	).Error
+	)
+	r.readCaches.invalidateGatewayRoute(id)
+	return clearResult.Error
 }
 
 // GatewayUsageLogs 使用记录仓储。
-type GatewayUsageLogs struct{ db *gorm.DB }
+type GatewayUsageLogs struct {
+	db             *gorm.DB
+	statsMu        sync.Mutex
+	// statsQueryMu serializes expensive aggregate refreshes across distinct
+	// dashboard filter keys. Per-key single-flight alone still allows a
+	// dashboard to launch several parallel COUNT(DISTINCT ...) scans.
+	statsQueryMu   sync.Mutex
+	statsCache     map[gatewayStatsQueryKey]gatewayStatsCacheEntry
+	statsInFlight  map[gatewayStatsQueryKey]*gatewayStatsCall
+	statsLastWrite atomic.Int64
+}
+
+type gatewayStatsCacheEntry struct {
+	at    time.Time
+	value *GatewayUsageStats
+}
+
+type gatewayStatsQueryKey struct {
+	gatewayGroupID uint
+	gatewayKeyID   uint
+	channelID      uint
+	includeEndpoints bool
+	model          string
+	requestID      string
+	resultMode     string
+	requestType    int
+	requestTypeSet bool
+	successOnly    bool
+	successSet     bool
+	fromUnixNano   int64
+	fromSet        bool
+	toUnixNano     int64
+	toSet          bool
+}
+
+type gatewayStatsCall struct {
+	done  chan struct{}
+	value *GatewayUsageStats
+	err   error
+}
+
+const (
+	// Stats are an operator-facing aggregate, not a billing source of truth.
+	// The bundled UI polls every 30 seconds, so refresh less frequently under
+	// sustained writes while retaining a bounded hard lifetime for idle caches.
+	gatewayStatsCacheTTL        = 10 * time.Minute
+	gatewayStatsRefreshInterval = 2 * time.Minute
+	gatewayStatsCacheMaxEntries = 256
+)
 
 // NewGatewayUsageLogs 构造用量日志仓储。
-func NewGatewayUsageLogs(db *gorm.DB) *GatewayUsageLogs { return &GatewayUsageLogs{db: db} }
+func NewGatewayUsageLogs(db *gorm.DB) *GatewayUsageLogs {
+	return &GatewayUsageLogs{
+		db:            db,
+		statsCache:    make(map[gatewayStatsQueryKey]gatewayStatsCacheEntry),
+		statsInFlight: make(map[gatewayStatsQueryKey]*gatewayStatsCall),
+	}
+}
 
 // Create 插入记录。
 func (r *GatewayUsageLogs) Create(item *GatewayUsageLog) error {
+	if r == nil || r.db == nil || item == nil {
+		return fmt.Errorf("usage storage is unavailable")
+	}
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = time.Now()
 	}
-	return r.db.Create(item).Error
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.markStatsChanged()
+	}
+	return err
 }
 
 // GatewayFinalizeRequestInput 描述一次请求的终态。Delivered=false 也必须写入
@@ -775,6 +1765,19 @@ type GatewayFinalizeRequestInput struct {
 	Delivered        bool
 	WinnerAttempt    int
 	WinnerUsageLogID uint
+	// BilledCost is optional for backwards compatibility. When BilledCostSet
+	// is true it is the amount charged to the gateway key; ActualCost on the
+	// usage row remains the raw upstream cost.
+	BilledCost    float64
+	BilledCostSet bool
+	// HedgeTriggered must be set by the runtime only after an auxiliary hedge
+	// attempt was actually launched. It allows a primary winner to receive the
+	// credit when the hedge ran but lost the race.
+	HedgeTriggered          bool
+	VirtualCacheReadEnabled bool
+	VirtualCacheReadTokens  int
+	VirtualCacheReadCost    float64
+	VirtualCacheReason      string
 }
 
 // FinalizeRequest 原子完成 winner-only 结算。返回值表示本次调用是否首次
@@ -829,47 +1832,207 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 		if math.IsNaN(usage.ActualCost) || math.IsInf(usage.ActualCost, 0) || usage.ActualCost < 0 {
 			return fmt.Errorf("winner actual cost must be a finite non-negative number")
 		}
+		billedCost := usage.ActualCost
+		if input.BilledCostSet {
+			billedCost = input.BilledCost
+		}
+		if math.IsNaN(billedCost) || math.IsInf(billedCost, 0) || billedCost < 0 {
+			return fmt.Errorf("winner billed cost must be a finite non-negative number")
+		}
+		virtualReason := strings.TrimSpace(input.VirtualCacheReason)
+		if virtualReason == "" && input.HedgeTriggered {
+			// Backwards compatibility for callers created before the reason field.
+			virtualReason = GatewayVirtualCacheReasonHedge
+		}
+		virtualRequested := input.VirtualCacheReadEnabled || input.VirtualCacheReadTokens > 0 ||
+			input.VirtualCacheReadCost > 0 || virtualReason != ""
+		if input.BilledCostSet && !virtualRequested {
+			return fmt.Errorf("billed cost override requires virtual cache settlement")
+		}
+		if virtualRequested {
+			if !input.BilledCostSet {
+				return fmt.Errorf("virtual cache settlement requires billed cost")
+			}
+			if !input.VirtualCacheReadEnabled || input.VirtualCacheReadTokens <= 0 {
+				return fmt.Errorf("virtual cache settlement requires positive virtual cache tokens")
+			}
+			if !usage.Success {
+				return fmt.Errorf("virtual cache settlement requires a successful winner")
+			}
+			if gatewayUsageHasMediaOutput(usage) {
+				return fmt.Errorf("virtual cache settlement is not available for media output")
+			}
+			switch virtualReason {
+			case GatewayVirtualCacheReasonHedge:
+				if !input.HedgeTriggered {
+					return fmt.Errorf("virtual cache hedge settlement requires a real hedge")
+				}
+				if usage.AttemptKind != GatewayAttemptKindPrimary && usage.AttemptKind != GatewayAttemptKindHedge {
+					return fmt.Errorf("virtual cache hedge settlement requires a hedge winner")
+				}
+				hasCompanion, err := gatewayUsageHasHedgeCompanion(tx, input.RequestID, input.GatewayKeyID, usage)
+				if err != nil {
+					return fmt.Errorf("check hedge companion: %w", err)
+				}
+				if !hasCompanion {
+					return fmt.Errorf("virtual cache hedge settlement requires a recorded hedge attempt")
+				}
+			case GatewayVirtualCacheReasonResponseRuleFailover:
+				if usage.AttemptKind != GatewayAttemptKindFailover && usage.AttemptKind != GatewayAttemptKindHedge {
+					return fmt.Errorf("virtual cache response-rule settlement requires a failover or hedge winner")
+				}
+				hasCompanion, err := gatewayUsageHasResponseRuleCompanion(tx, input.RequestID, input.GatewayKeyID, usage)
+				if err != nil {
+					return fmt.Errorf("check response-rule companion: %w", err)
+				}
+				if !hasCompanion {
+					return fmt.Errorf("virtual cache response-rule settlement requires a prior rejected route")
+				}
+			default:
+				return fmt.Errorf("unsupported virtual cache reason %q", virtualReason)
+			}
+			if input.VirtualCacheReadTokens > usage.InputTokens {
+				return fmt.Errorf("virtual cache read tokens exceed fresh input tokens")
+			}
+			if billedCost > usage.ActualCost {
+				return fmt.Errorf("virtual cache settlement cannot increase winner cost")
+			}
+		}
+		if input.VirtualCacheReadTokens < 0 {
+			return fmt.Errorf("virtual cache read tokens must be non-negative")
+		}
+		if math.IsNaN(input.VirtualCacheReadCost) || math.IsInf(input.VirtualCacheReadCost, 0) || input.VirtualCacheReadCost < 0 {
+			return fmt.Errorf("virtual cache read cost must be a finite non-negative number")
+		}
+		if virtualRequested && input.VirtualCacheReadCost > billedCost {
+			return fmt.Errorf("virtual cache read cost cannot exceed billed cost")
+		}
 		settlement := &GatewayWinnerSettlement{
-			RequestID:         input.RequestID,
-			GatewayKeyID:      input.GatewayKeyID,
-			RouteID:           usage.RouteID,
-			WinnerAttempt:     input.WinnerAttempt,
-			GatewayUsageLogID: usage.ID,
-			ActualCost:        usage.ActualCost,
-			CreatedAt:         time.Now().UTC(),
+			RequestID:              input.RequestID,
+			GatewayKeyID:           input.GatewayKeyID,
+			RouteID:                usage.RouteID,
+			WinnerAttempt:          input.WinnerAttempt,
+			GatewayUsageLogID:      usage.ID,
+			ActualCost:             usage.ActualCost,
+			BilledCost:             billedCost,
+			VirtualCacheReadTokens: input.VirtualCacheReadTokens,
+			VirtualCacheReadCost:   input.VirtualCacheReadCost,
+			VirtualCacheReason:     virtualReason,
+			CreatedAt:              time.Now().UTC(),
 		}
 		if err := tx.Create(settlement).Error; err != nil {
 			return fmt.Errorf("create winner settlement: %w", err)
 		}
 		// At most one attempt for a request is billable. Clearing first also makes
 		// a caller-provided pre-marked loser harmless under concurrent completion.
-		if err := tx.Model(&GatewayUsageLog{}).Where("request_id = ? AND gateway_key_id = ?", input.RequestID, input.GatewayKeyID).
+		if err := tx.Model(&GatewayUsageLog{}).Where("request_id = ? AND gateway_key_id = ? AND winner = ?", input.RequestID, input.GatewayKeyID, true).
 			Update("winner", false).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&GatewayUsageLog{}).Where("id = ?", usage.ID).Updates(map[string]any{
-			"winner":                true,
-			"attempt_status":        GatewayAttemptStatusAccepted,
-			"estimated_extra_cost": 0,
+			"winner":                    true,
+			"attempt_status":            GatewayAttemptStatusAccepted,
+			"estimated_extra_cost":      0,
+			"billed_cost":               billedCost,
+			"virtual_cache_read_tokens": input.VirtualCacheReadTokens,
+			"virtual_cache_read_cost":   input.VirtualCacheReadCost,
+			"virtual_cache_reason":      virtualReason,
 		}).Error; err != nil {
 			return err
 		}
-		if usage.ActualCost > 0 {
+		if billedCost > 0 {
 			if err := tx.Model(&GatewayKey{}).Where("id = ?", input.GatewayKeyID).
-				UpdateColumn("quota_used", gorm.Expr("quota_used + ?", usage.ActualCost)).Error; err != nil {
+				UpdateColumn("quota_used", gorm.Expr("quota_used + ?", billedCost)).Error; err != nil {
 				return err
 			}
 		}
 		return tx.Model(&GatewayRequestFinalization{}).Where("request_id = ?", input.RequestID).
 			Updates(map[string]any{
-				"winner_usage_log_id": usage.ID,
-				"actual_cost":        usage.ActualCost,
+				"winner_usage_log_id":       usage.ID,
+				"actual_cost":               usage.ActualCost,
+				"billed_cost":               billedCost,
+				"virtual_cache_read_tokens": input.VirtualCacheReadTokens,
+				"virtual_cache_read_cost":   input.VirtualCacheReadCost,
+				"virtual_cache_reason":      virtualReason,
 			}).Error
 	})
 	if err != nil {
 		return false, err
 	}
+	if inserted && input.Delivered {
+		r.markStatsChanged()
+	}
 	return inserted, nil
+}
+
+// gatewayUsageHasHedgeCompanion verifies that the request log contains the
+// other side of the concurrent race. AttemptKind=hedge is only written after
+// an auxiliary upstream has actually started, so this keeps the storage layer
+// from trusting a caller-provided HedgeTriggered flag on its own.
+func gatewayUsageHasHedgeCompanion(tx *gorm.DB, requestID string, gatewayKeyID uint, winner GatewayUsageLog) (bool, error) {
+	if tx == nil || strings.TrimSpace(requestID) == "" || gatewayKeyID == 0 {
+		return false, nil
+	}
+	query := tx.Model(&GatewayUsageLog{}).
+		Where("request_id = ? AND gateway_key_id = ? AND id <> ?", requestID, gatewayKeyID, winner.ID)
+	if winner.AttemptKind == GatewayAttemptKindPrimary {
+		// A hedge loser that is rejected by a pre-commit response rule is
+		// recorded as regex_reject for operator visibility, even though it was
+		// launched by the concurrent hedge scheduler. The runtime's
+		// HedgeTriggered flag still proves that this was a real concurrent run;
+		// keep both log shapes eligible here.
+		query = query.Where("attempt_kind IN ?", []string{GatewayAttemptKindHedge, GatewayAttemptKindRegexReject})
+	} else {
+		// The primary side can likewise be a regex_reject when it lost a
+		// concurrent race before the client prefix was committed.
+		query = query.Where("attempt_kind IN ?", []string{GatewayAttemptKindPrimary, GatewayAttemptKindRecovery, GatewayAttemptKindRegexReject})
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func gatewayUsageHasResponseRuleCompanion(tx *gorm.DB, requestID string, gatewayKeyID uint, winner GatewayUsageLog) (bool, error) {
+	if tx == nil || strings.TrimSpace(requestID) == "" || gatewayKeyID == 0 || winner.Attempt <= 1 {
+		return false, nil
+	}
+	var count int64
+	err := tx.Model(&GatewayUsageLog{}).
+		Where("request_id = ? AND gateway_key_id = ?", requestID, gatewayKeyID).
+		Where("attempt < ? AND route_id <> ?", winner.Attempt, winner.RouteID).
+		Where("attempt_kind = ? AND attempt_status = ?", GatewayAttemptKindRegexReject, GatewayAttemptStatusRejected).
+		Where("validation_post_commit = ?", false).
+		Count(&count).Error
+	return count > 0, err
+}
+
+// gatewayUsageHasMediaOutput covers both the normal runtime billing fields and
+// endpoint/mode snapshots from older or provider-specific usage records where
+// image/video output tokens were not parsed.
+func gatewayUsageHasMediaOutput(usage GatewayUsageLog) bool {
+	if usage.ImageOutputTokens != 0 || usage.ImageOutputCost != 0 {
+		return true
+	}
+	mode := strings.ToLower(strings.TrimSpace(usage.BillingMode))
+	mode = strings.ReplaceAll(mode, "-", "_")
+	switch mode {
+	case "image", "video", "image_generation", "video_generation":
+		return true
+	}
+	for _, endpoint := range []string{usage.InboundEndpoint, usage.UpstreamEndpoint} {
+		path := strings.ToLower(strings.TrimSpace(endpoint))
+		for _, marker := range []string{
+			"/images/generations", "/images/edits", "/images/batches",
+			"/videos/generations", "/videos/edits", "/videos/extensions",
+		} {
+			if strings.Contains(path, marker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FinalizeFailedRequest 写入没有 winner 的终端失败标记。
@@ -939,6 +2102,9 @@ func (r *GatewayUsageLogs) DeleteBefore(before time.Time) (int64, error) {
 		}
 		return tx.Where("request_id NOT IN (?)", remaining).Delete(&GatewayRequestFinalization{}).Error
 	})
+	if err == nil && deleted > 0 {
+		r.markStatsChanged()
+	}
 	return deleted, err
 }
 
@@ -957,6 +2123,9 @@ func (r *GatewayUsageLogs) DeleteAll() (int64, error) {
 		}
 		return tx.Where("1 = 1").Delete(&GatewayRequestFinalization{}).Error
 	})
+	if err == nil && deleted > 0 {
+		r.markStatsChanged()
+	}
 	return deleted, err
 }
 
@@ -964,6 +2133,11 @@ type GatewayUsageQuery struct {
 	GatewayGroupID uint
 	GatewayKeyID   uint
 	ChannelID      uint
+	// IncludeSum and IncludeEndpoints keep optional dashboard aggregates out of
+	// latency-sensitive list/stat calls. The HTTP API enables both by default
+	// for backwards compatibility; the bundled UI explicitly opts out.
+	IncludeSum       bool
+	IncludeEndpoints bool
 	Model          string
 	// RequestID 模糊匹配 request_id
 	RequestID   string
@@ -1004,22 +2178,31 @@ type GatewayUsagePage struct {
 }
 
 type GatewayUsageStats struct {
-	TotalRequests            int64   `json:"total_requests"`
-	AttemptCount             int64   `json:"attempt_count"`
-	WinnerCount              int64   `json:"winner_count"`
-	SuccessCount             int64   `json:"success_count"`
-	ErrorCount               int64   `json:"error_count"`
-	TotalInputTokens         int64   `json:"total_input_tokens"`
-	TotalOutputTokens        int64   `json:"total_output_tokens"`
-	TotalCacheCreationTokens int64   `json:"total_cache_creation_tokens"`
-	TotalCacheReadTokens     int64   `json:"total_cache_read_tokens"`
-	TotalTokens              int64   `json:"total_tokens"`
-	TotalCost                float64 `json:"total_cost"`
-	TotalActualCost          float64 `json:"total_actual_cost"`
-	TotalUpstreamCost        float64 `json:"total_upstream_cost"`
-	WinnerCost               float64 `json:"winner_cost"`
-	ExtraAttemptCost         float64 `json:"extra_attempt_cost"`
-	AverageDurationMS        float64 `json:"average_duration_ms"`
+	TotalRequests            int64 `json:"total_requests"`
+	AttemptCount             int64 `json:"attempt_count"`
+	WinnerCount              int64 `json:"winner_count"`
+	SuccessCount             int64 `json:"success_count"`
+	ErrorCount               int64 `json:"error_count"`
+	TotalInputTokens         int64 `json:"total_input_tokens"`
+	TotalOutputTokens        int64 `json:"total_output_tokens"`
+	TotalCacheCreationTokens int64 `json:"total_cache_creation_tokens"`
+	// TotalCacheReadTokens includes actual upstream reads and winner virtual
+	// cache credits; total token count remains unchanged by the reclassification.
+	TotalCacheReadTokens int64   `json:"total_cache_read_tokens"`
+	TotalTokens          int64   `json:"total_tokens"`
+	TotalCost            float64 `json:"total_cost"`
+	TotalActualCost      float64 `json:"total_actual_cost"`
+	TotalUpstreamCost    float64 `json:"total_upstream_cost"`
+	WinnerCost           float64 `json:"winner_cost"`
+	// VirtualCacheSubsidyCost is the amount absorbed by the gateway when a
+	// virtual-cache winner's raw upstream cost exceeds the amount billed to
+	// the gateway key. It is included in ExtraAttemptCost for the aggregate
+	// "extra cost" total, but remains separate for accounting breakdowns.
+	VirtualCacheSubsidyCost float64 `json:"virtual_cache_subsidy_cost"`
+	// ExtraAttemptCost includes loser/rejected attempts and virtual-cache
+	// subsidies. Keep the field name for API compatibility.
+	ExtraAttemptCost     float64 `json:"extra_attempt_cost"`
+	AverageDurationMS    float64 `json:"average_duration_ms"`
 	// RPM/TPM：近 5 分钟均值（对齐 sub2api），与筛选时间范围无关；TPM 仅 input+output
 	RPM       int64                 `json:"rpm"`
 	TPM       int64                 `json:"tpm"`
@@ -1091,7 +2274,7 @@ func (r *GatewayUsageLogs) applyFilters(db *gorm.DB, q GatewayUsageQuery) *gorm.
 				WHERE request_id != '' AND request_id IS NOT NULL
 				GROUP BY request_id
 				HAVING COUNT(*) > 1 OR MAX(attempt) > 1
-					OR SUM(CASE WHEN attempt_kind IN ('retry','failover') THEN 1 ELSE 0 END) > 0
+					OR SUM(CASE WHEN attempt_kind IN ('retry','failover','recovery') THEN 1 ELSE 0 END) > 0
 			)`,
 		)
 	case "multi_success", "failover_success", "chain_success":
@@ -1102,8 +2285,8 @@ func (r *GatewayUsageLogs) applyFilters(db *gorm.DB, q GatewayUsageQuery) *gorm.
 				WHERE request_id != '' AND request_id IS NOT NULL
 				GROUP BY request_id
 				HAVING (COUNT(*) > 1 OR MAX(attempt) > 1
-					OR SUM(CASE WHEN attempt_kind IN ('retry','failover') THEN 1 ELSE 0 END) > 0)
-					AND SUM(CASE WHEN success = 1 OR success = true THEN 1 ELSE 0 END) > 0
+					OR SUM(CASE WHEN attempt_kind IN ('retry','failover','recovery') THEN 1 ELSE 0 END) > 0)
+				AND SUM(CASE WHEN success THEN 1 ELSE 0 END) > 0
 			)`,
 		)
 	case "multi_fail", "chain_fail":
@@ -1112,9 +2295,9 @@ func (r *GatewayUsageLogs) applyFilters(db *gorm.DB, q GatewayUsageQuery) *gorm.
 				SELECT request_id FROM gateway_usage_logs
 				WHERE request_id != '' AND request_id IS NOT NULL
 				GROUP BY request_id
-				HAVING (COUNT(*) > 1 OR MAX(attempt) > 1
-					OR SUM(CASE WHEN attempt_kind IN ('retry','failover') THEN 1 ELSE 0 END) > 0)
-					AND SUM(CASE WHEN success = 1 OR success = true THEN 1 ELSE 0 END) = 0
+					HAVING (COUNT(*) > 1 OR MAX(attempt) > 1
+					OR SUM(CASE WHEN attempt_kind IN ('retry','failover','recovery') THEN 1 ELSE 0 END) > 0)
+					AND SUM(CASE WHEN success THEN 1 ELSE 0 END) = 0
 			)`,
 		)
 	default:
@@ -1168,7 +2351,9 @@ func (r *GatewayUsageLogs) List(q GatewayUsageQuery) (*GatewayUsagePage, error) 
 		return nil, err
 	}
 	var sum float64
-	_ = db.Session(&gorm.Session{}).Select("COALESCE(SUM(actual_cost),0)").Scan(&sum).Error
+	if q.IncludeSum {
+		_ = db.Session(&gorm.Session{}).Select("COALESCE(SUM(actual_cost),0)").Scan(&sum).Error
+	}
 
 	var rows []GatewayUsageLog
 	offset := (q.Page - 1) * q.PageSize
@@ -1398,6 +2583,84 @@ func isAllASCIIDigits(s string) bool {
 
 // Stats 用量聚合统计。
 func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	key := gatewayStatsCacheKey(q)
+	r.statsMu.Lock()
+	if r.statsCache == nil {
+		r.statsCache = make(map[gatewayStatsQueryKey]gatewayStatsCacheEntry)
+	}
+	if ent, ok := r.statsCache[key]; ok && time.Since(ent.at) < gatewayStatsCacheTTL {
+		lastWriteUnixNano := r.statsLastWrite.Load()
+		changedSinceCache := lastWriteUnixNano > 0 && ent.at.UnixNano() < lastWriteUnixNano
+		// A write starts a refresh interval. Serve the previous aggregate for
+		// at most one interval, then let single-flight rebuild it once.
+		if !changedSinceCache || time.Since(ent.at) < gatewayStatsRefreshInterval {
+			value := cloneGatewayUsageStats(ent.value)
+			r.statsMu.Unlock()
+			return value, nil
+		}
+	}
+	if r.statsInFlight == nil {
+		r.statsInFlight = make(map[gatewayStatsQueryKey]*gatewayStatsCall)
+	}
+	if call, ok := r.statsInFlight[key]; ok {
+		r.statsMu.Unlock()
+		<-call.done
+		return cloneGatewayUsageStats(call.value), call.err
+	}
+	queryStartedAt := time.Now()
+	call := &gatewayStatsCall{done: make(chan struct{})}
+	r.statsInFlight[key] = call
+	r.statsMu.Unlock()
+
+	value, err := func() (*GatewayUsageStats, error) {
+		r.statsQueryMu.Lock()
+		defer r.statsQueryMu.Unlock()
+		return r.statsUncached(q)
+	}()
+	r.statsMu.Lock()
+	call.value = value
+	call.err = err
+	if err == nil {
+		// Anchor freshness to the query start. If rows were appended while the
+		// aggregate was running, the cache must become eligible for refresh
+		// after the short coalescing window rather than receiving a new full TTL
+		// from the query completion time.
+		if len(r.statsCache) >= gatewayStatsCacheMaxEntries {
+			var oldestKey gatewayStatsQueryKey
+			var oldestAt time.Time
+			for candidate, entry := range r.statsCache {
+				if oldestAt.IsZero() || entry.at.Before(oldestAt) {
+					oldestKey, oldestAt = candidate, entry.at
+				}
+			}
+			if !oldestAt.IsZero() {
+				delete(r.statsCache, oldestKey)
+			}
+		}
+		r.statsCache[key] = gatewayStatsCacheEntry{at: queryStartedAt, value: value}
+	}
+	delete(r.statsInFlight, key)
+	close(call.done)
+	r.statsMu.Unlock()
+	return cloneGatewayUsageStats(value), err
+}
+
+// markStatsChanged is intentionally lock-free because every upstream attempt
+// writes a usage row. Stats anchors cached results to their query start and
+// compares that timestamp with this marker, so a concurrent write makes the
+// result refreshable after the short coalescing window without putting the
+// request hot path behind the aggregate cache mutex.
+func (r *GatewayUsageLogs) markStatsChanged() {
+	if r == nil {
+		return
+	}
+	r.statsLastWrite.Store(time.Now().UnixNano())
+}
+
+func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStats, error) {
 	db := r.applyFilters(r.db.Model(&GatewayUsageLog{}), q)
 	type aggRow struct {
 		TotalRequests            int64
@@ -1413,6 +2676,7 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 		TotalActualCost          float64
 		TotalUpstreamCost        float64
 		WinnerCost               float64
+		VirtualCacheSubsidyCost  float64
 		ExtraAttemptCost         float64
 		AvgDurationMS            float64
 	}
@@ -1423,27 +2687,36 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 		COUNT(DISTINCT CASE WHEN winner THEN request_id END) as winner_count,
 		COUNT(DISTINCT CASE WHEN winner THEN request_id END) as success_count,
 		COUNT(DISTINCT request_id) - COUNT(DISTINCT CASE WHEN winner THEN request_id END) as error_count,
-		COALESCE(SUM(input_tokens),0) as total_input_tokens,
+		COALESCE(SUM(input_tokens - virtual_cache_read_tokens),0) as total_input_tokens,
 		COALESCE(SUM(output_tokens),0) as total_output_tokens,
 		COALESCE(SUM(cache_creation_tokens),0) as total_cache_creation_tokens,
-		COALESCE(SUM(cache_read_tokens),0) as total_cache_read_tokens,
+		COALESCE(SUM(cache_read_tokens + virtual_cache_read_tokens),0) as total_cache_read_tokens,
 		COALESCE(SUM(total_cost),0) as total_cost,
 		COALESCE(SUM(actual_cost),0) as total_actual_cost,
 		COALESCE(SUM(actual_cost),0) as total_upstream_cost,
-		COALESCE(SUM(CASE WHEN winner THEN actual_cost ELSE 0 END),0) as winner_cost,
-		COALESCE(SUM(estimated_extra_cost),0) as extra_attempt_cost,
+		COALESCE(SUM(CASE WHEN winner THEN
+			CASE WHEN billed_cost > 0 OR virtual_cache_read_tokens > 0 OR actual_cost = 0
+				THEN billed_cost ELSE actual_cost END
+			ELSE 0 END),0) as winner_cost,
+		COALESCE(SUM(CASE WHEN winner AND virtual_cache_read_tokens > 0 AND actual_cost > billed_cost
+			THEN actual_cost - billed_cost ELSE 0 END),0) as virtual_cache_subsidy_cost,
+		COALESCE(SUM(estimated_extra_cost),0) +
+			COALESCE(SUM(CASE WHEN winner AND virtual_cache_read_tokens > 0 AND actual_cost > billed_cost
+				THEN actual_cost - billed_cost ELSE 0 END),0) as extra_attempt_cost,
 		COALESCE(AVG(duration_ms),0) as avg_duration_ms
 	`).Scan(&row).Error; err != nil {
 		return nil, err
 	}
 	var endpoints []GatewayEndpointStat
-	_ = r.applyFilters(r.db.Model(&GatewayUsageLog{}), q).
-		Select("inbound_endpoint as endpoint, COUNT(DISTINCT request_id) as requests").
-		Where("inbound_endpoint <> ''").
-		Group("inbound_endpoint").
-		Order("requests DESC").
-		Limit(20).
-		Scan(&endpoints).Error
+	if q.IncludeEndpoints {
+		_ = r.applyFilters(r.db.Model(&GatewayUsageLog{}), q).
+			Select("inbound_endpoint as endpoint, COUNT(DISTINCT request_id) as requests").
+			Where("inbound_endpoint <> ''").
+			Group("inbound_endpoint").
+			Order("requests DESC").
+			Limit(20).
+			Scan(&endpoints).Error
+	}
 
 	totalTokens := row.TotalInputTokens + row.TotalOutputTokens + row.TotalCacheCreationTokens + row.TotalCacheReadTokens
 	rpm, tpm := r.performanceRPMAndTPM(q)
@@ -1462,6 +2735,7 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 		TotalActualCost:          row.TotalActualCost,
 		TotalUpstreamCost:        row.TotalUpstreamCost,
 		WinnerCost:               row.WinnerCost,
+		VirtualCacheSubsidyCost:  row.VirtualCacheSubsidyCost,
 		ExtraAttemptCost:         row.ExtraAttemptCost,
 		AverageDurationMS:        row.AvgDurationMS,
 		RPM:                      rpm,
@@ -1472,6 +2746,46 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 
 // ListModels 聚合使用记录中的 requested_model，供筛选下拉。
 // 沿用组/密钥/时间筛选；忽略 model / result / request_id（避免自过滤）。
+func gatewayStatsCacheKey(q GatewayUsageQuery) gatewayStatsQueryKey {
+	key := gatewayStatsQueryKey{
+		gatewayGroupID: q.GatewayGroupID,
+		gatewayKeyID:   q.GatewayKeyID,
+		channelID:      q.ChannelID,
+		includeEndpoints: q.IncludeEndpoints,
+		model:          strings.TrimSpace(q.Model),
+		requestID:      strings.TrimSpace(q.RequestID),
+		resultMode:     strings.ToLower(strings.TrimSpace(q.ResultMode)),
+	}
+	if q.From != nil {
+		key.fromSet = true
+		key.fromUnixNano = q.From.UnixNano()
+	}
+	if q.To != nil {
+		key.toSet = true
+		key.toUnixNano = q.To.UnixNano()
+	}
+	if q.SuccessOnly != nil {
+		key.successSet = true
+		key.successOnly = *q.SuccessOnly
+	}
+	if q.RequestType != nil {
+		key.requestTypeSet = true
+		key.requestType = *q.RequestType
+	}
+	return key
+}
+
+func cloneGatewayUsageStats(value *GatewayUsageStats) *GatewayUsageStats {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	if value.Endpoints != nil {
+		clone.Endpoints = append([]GatewayEndpointStat(nil), value.Endpoints...)
+	}
+	return &clone
+}
+
 func (r *GatewayUsageLogs) ListModels(q GatewayUsageQuery) ([]GatewayUsageModelOption, error) {
 	q.Model = ""
 	q.RequestID = ""
@@ -1529,7 +2843,15 @@ func (r *GatewayUsageLogs) performanceRPMAndTPM(q GatewayUsageQuery) (rpm, tpm i
 }
 
 // ModelPriceOverrides 价格覆盖表。
-type ModelPriceOverrides struct{ db *gorm.DB }
+type ModelPriceOverrides struct {
+	db            *gorm.DB
+	mu            sync.RWMutex
+	cache         map[string]ModelPriceOverride
+	cacheLoaded   bool
+	cacheLoadedAt time.Time
+}
+
+const modelPriceOverrideCacheTTL = 30 * time.Second
 
 // NewModelPriceOverrides 构造模型价目覆盖仓储。
 func NewModelPriceOverrides(db *gorm.DB) *ModelPriceOverrides {
@@ -1546,11 +2868,52 @@ func (r *ModelPriceOverrides) List() ([]ModelPriceOverride, error) {
 }
 
 func (r *ModelPriceOverrides) FindByModel(name string) (*ModelPriceOverride, error) {
-	var item ModelPriceOverride
-	if err := r.db.Where("model_name = ?", name).First(&item).Error; err != nil {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	if err := r.ensureCache(); err != nil {
 		return nil, err
 	}
+	r.mu.RLock()
+	item, ok := r.cache[name]
+	if !ok {
+		item, ok = r.cache[strings.ToLower(name)]
+	}
+	r.mu.RUnlock()
+	if !ok {
+		return nil, gorm.ErrRecordNotFound
+	}
 	return &item, nil
+}
+
+func (r *ModelPriceOverrides) ensureCache() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cacheLoaded && time.Since(r.cacheLoadedAt) < modelPriceOverrideCacheTTL {
+		return nil
+	}
+	list, err := r.List()
+	if err != nil {
+		return err
+	}
+	cache := make(map[string]ModelPriceOverride, len(list)*2)
+	for _, item := range list {
+		cache[item.ModelName] = item
+		cache[strings.ToLower(strings.TrimSpace(item.ModelName))] = item
+	}
+	r.cache = cache
+	r.cacheLoaded = true
+	r.cacheLoadedAt = time.Now()
+	return nil
+}
+
+func (r *ModelPriceOverrides) invalidateCache() {
+	r.mu.Lock()
+	r.cacheLoaded = false
+	r.cache = nil
+	r.cacheLoadedAt = time.Time{}
+	r.mu.Unlock()
 }
 
 // Upsert 按模型名插入或更新价目覆盖。
@@ -1563,12 +2926,20 @@ func (r *ModelPriceOverrides) Upsert(item *ModelPriceOverride) error {
 			item.CreatedAt = existing.CreatedAt
 		}
 	}
-	return r.db.Save(item).Error
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.invalidateCache()
+	}
+	return err
 }
 
 // Delete 按主键删除。
 func (r *ModelPriceOverrides) Delete(id uint) error {
-	return r.db.Delete(&ModelPriceOverride{}, id).Error
+	err := r.db.Delete(&ModelPriceOverride{}, id).Error
+	if err == nil {
+		r.invalidateCache()
+	}
+	return err
 }
 
 // ListEnabledMap 返回启用中的价目覆盖 map。

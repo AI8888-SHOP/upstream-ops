@@ -166,6 +166,7 @@ type CreateInput struct {
 	GroupMultiplier        *float64
 	GroupMultiplierMode    string
 	MonitorEnabled         bool
+	ConcurrencyLimit       int
 	OnlyCreatedKeyGroupsEnabled bool
 }
 
@@ -210,6 +211,7 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 		GroupMultiplier:        normalizeMultiplier(in.GroupMultiplier),
 		GroupMultiplierMode:    connector.NormalizeGroupMultiplierMode(in.GroupMultiplierMode),
 		MonitorEnabled:         in.MonitorEnabled,
+		ConcurrencyLimit:       normalizeConcurrencyLimit(in.ConcurrencyLimit),
 		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
 	}
 	if mode == storage.CredentialModeToken {
@@ -243,6 +245,7 @@ type UpdateInput struct {
 	GroupMultiplier        *float64
 	GroupMultiplierMode    *string
 	MonitorEnabled         *bool
+	ConcurrencyLimit       *int
 	OnlyCreatedKeyGroupsEnabled *bool
 }
 
@@ -360,6 +363,9 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	}
 	if in.MonitorEnabled != nil {
 		c.MonitorEnabled = *in.MonitorEnabled
+	}
+	if in.ConcurrencyLimit != nil {
+		c.ConcurrencyLimit = normalizeConcurrencyLimit(*in.ConcurrencyLimit)
 	}
 	if in.OnlyCreatedKeyGroupsEnabled != nil {
 		c.OnlyCreatedKeyGroupsEnabled = *in.OnlyCreatedKeyGroupsEnabled
@@ -1134,6 +1140,16 @@ func (s *Service) ListAPIKeys(ctx context.Context, channelID uint, query connect
 	}
 	_ = s.Channels.SetLastError(c.ID, "")
 	return page, nil
+}
+
+func normalizeConcurrencyLimit(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 4096 {
+		return 4096
+	}
+	return v
 }
 
 func (s *Service) ListAPIKeyGroups(ctx context.Context, channelID uint) ([]connector.APIKeyGroup, error) {

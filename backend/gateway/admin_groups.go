@@ -68,9 +68,17 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		hedgeAttempts = *in.HedgeMaxAttempts
 	}
 	hedgeDelay, hedgeParallel, hedgeAttempts = a.clampGroupHedgePolicy(hedgeDelay, hedgeParallel, hedgeAttempts)
+	hedgeVirtualCache := false
+	if in.HedgeVirtualCacheEnabled != nil {
+		hedgeVirtualCache = *in.HedgeVirtualCacheEnabled
+	}
 	validationEnabled := gwDefaults.ResponseValidation.Enabled
 	if in.ResponseValidationEnabled != nil {
 		validationEnabled = *in.ResponseValidationEnabled
+	}
+	validationVirtualCache := false
+	if in.ResponseValidationVirtualCacheEnabled != nil {
+		validationVirtualCache = *in.ResponseValidationVirtualCacheEnabled
 	}
 	validationMode := gwDefaults.ResponseValidation.StreamMode
 	if in.ResponseValidationStreamMode != nil {
@@ -88,36 +96,48 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.RateResortEnabled != nil {
 		rateResort = *in.RateResortEnabled
 	}
+	maxBillingRate := 0.0
+	if in.MaxBillingRateMultiplier != nil {
+		maxBillingRate = normalizeMaxBillingRateMultiplier(*in.MaxBillingRateMultiplier)
+	}
+	loadBalanceRouteCount := 1
+	if in.LoadBalanceRouteCount != nil {
+		loadBalanceRouteCount = normalizeLoadBalanceRouteCount(*in.LoadBalanceRouteCount)
+	}
 	pos, err := a.Groups.NextPosition()
 	if err != nil {
 		return nil, err
 	}
 	item := &storage.GatewayGroup{
-		Name:                 name,
-		Description:          strings.TrimSpace(in.Description),
-		Position:             pos,
-		Status:               storage.GatewayGroupStatusActive,
-		RateSortDirection:    dir,
-		RateResortEnabled:    rateResort,
-		ModelMappingJSON:     strings.TrimSpace(in.ModelMappingJSON),
-		ModelsJSON:           strings.TrimSpace(in.ModelsJSON),
-		ModelsMode:           mode,
-		RetryEnabled:         retryEnabled,
-		RetryCount:           retryCount,
-		FailoverEnabled:      failoverEnabled,
-		FailoverMax:          failoverMax,
-		FailoverOn4xx:        failoverOn4xx,
-		CooldownSeconds:      cooldown,
-		FirstTokenTimeoutSec: ftTimeout,
-		HedgeEnabled:         hedgeEnabled,
-		HedgeDelaySeconds:    hedgeDelay,
-		HedgeMaxParallel:     hedgeParallel,
-		HedgeMaxAttempts:     hedgeAttempts,
+		Name:                              name,
+		Description:                       strings.TrimSpace(in.Description),
+		Position:                          pos,
+		Status:                            storage.GatewayGroupStatusActive,
+		RateSortDirection:                 dir,
+		RateResortEnabled:                 rateResort,
+		MaxBillingRateMultiplier:          maxBillingRate,
+		LoadBalanceRouteCount:             loadBalanceRouteCount,
+		ModelMappingJSON:                  strings.TrimSpace(in.ModelMappingJSON),
+		ModelsJSON:                        strings.TrimSpace(in.ModelsJSON),
+		ModelsMode:                        mode,
+		RetryEnabled:                      retryEnabled,
+		RetryCount:                        retryCount,
+		FailoverEnabled:                   failoverEnabled,
+		FailoverMax:                       failoverMax,
+		FailoverOn4xx:                     failoverOn4xx,
+		CooldownSeconds:                   cooldown,
+		FirstTokenTimeoutSec:              ftTimeout,
+		HedgeEnabled:                      hedgeEnabled,
+		HedgeDelaySeconds:                 hedgeDelay,
+		HedgeMaxParallel:                  hedgeParallel,
+		HedgeMaxAttempts:                  hedgeAttempts,
+		HedgeVirtualCacheEnabled:          hedgeVirtualCache,
 		ResponseValidationEnabled:         validationEnabled,
+		ResponseValidationVirtualCacheEnabled: validationVirtualCache,
 		ResponseValidationStreamMode:      validationMode,
 		ResponseValidationPrefixBytes:     prefixBytes,
 		ResponseValidationPrefixTimeoutMS: prefixTimeoutMS,
-		UserAgent:            strings.TrimSpace(in.UserAgent),
+		UserAgent:                         strings.TrimSpace(in.UserAgent),
 	}
 	if err := a.Groups.Create(item); err != nil {
 		return nil, err
@@ -126,6 +146,68 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 }
 
 // UpdateGroup 更新网关分组。
+// CloneGroup creates an independent copy of a gateway group and generates a
+// fresh client secret for every gateway key. The storage clone runs as one
+// transaction; plaintext secrets remain in memory only long enough to attach
+// them to the one-time response.
+func (a *AdminService) CloneGroup(id uint, in CloneGroupInput) (*CloneGroupResult, error) {
+	if a == nil || a.Service == nil || a.Groups == nil || a.Keys == nil {
+		return nil, errors.New("gateway group service unavailable")
+	}
+	if _, err := a.Groups.FindByID(id); err != nil {
+		return nil, err
+	}
+	sourceKeys, err := a.Keys.ListByGroupID(id)
+	if err != nil {
+		return nil, err
+	}
+	if len(sourceKeys) > 0 && a.Cipher == nil {
+		return nil, errors.New("gateway key cipher unavailable")
+	}
+
+	templates := make([]storage.GatewayGroupCloneKey, 0, len(sourceKeys))
+	secretsBySourceID := make(map[uint]string, len(sourceKeys))
+	for _, sourceKey := range sourceKeys {
+		secret, err := GenerateAPIKey(0)
+		if err != nil {
+			return nil, err
+		}
+		cipherText, err := a.Cipher.Encrypt(secret)
+		if err != nil {
+			return nil, err
+		}
+		templates = append(templates, storage.GatewayGroupCloneKey{
+			SourceID:  sourceKey.ID,
+			KeyHash:   HashAPIKey(secret),
+			KeyPrefix: KeyPrefix(secret),
+			KeyCipher: cipherText,
+		})
+		secretsBySourceID[sourceKey.ID] = secret
+	}
+
+	cloned, err := a.Groups.Clone(id, in.Name, templates)
+	if err != nil {
+		return nil, err
+	}
+	result := &CloneGroupResult{
+		Group: &cloned.Group,
+		Keys:  make([]CloneGroupKeyResult, 0, len(cloned.Keys)),
+	}
+	for i, key := range cloned.Keys {
+		var secret string
+		if i < len(cloned.KeySourceIDs) {
+			secret = secretsBySourceID[cloned.KeySourceIDs[i]]
+		}
+		result.Keys = append(result.Keys, CloneGroupKeyResult{Key: key, Secret: secret})
+	}
+	// The destination has no runtime state yet, but invalidate any stale cache
+	// entries in case a caller reuses a group ID after a failed/deleted clone.
+	a.invalidateModelsCache(cloned.Group.ID)
+	a.InvalidateResponseValidator(cloned.Group.ID)
+	a.resetLoadBalanceGroup(cloned.Group.ID)
+	return result, nil
+}
+
 func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.GatewayGroup, error) {
 	item, err := a.Groups.FindByID(id)
 	if err != nil {
@@ -162,6 +244,15 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	if in.RateResortEnabled != nil {
 		rateResortTurnedOn = *in.RateResortEnabled && !item.RateResortEnabled
 		item.RateResortEnabled = *in.RateResortEnabled
+	}
+	rateLimitChanged := false
+	if in.MaxBillingRateMultiplier != nil {
+		next := normalizeMaxBillingRateMultiplier(*in.MaxBillingRateMultiplier)
+		rateLimitChanged = next != normalizeMaxBillingRateMultiplier(item.MaxBillingRateMultiplier)
+		item.MaxBillingRateMultiplier = next
+	}
+	if in.LoadBalanceRouteCount != nil {
+		item.LoadBalanceRouteCount = normalizeLoadBalanceRouteCount(*in.LoadBalanceRouteCount)
 	}
 	if in.ModelMappingJSON != nil {
 		item.ModelMappingJSON = strings.TrimSpace(*in.ModelMappingJSON)
@@ -202,6 +293,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	if in.HedgeEnabled != nil {
 		item.HedgeEnabled = *in.HedgeEnabled
 	}
+	if in.HedgeVirtualCacheEnabled != nil {
+		item.HedgeVirtualCacheEnabled = *in.HedgeVirtualCacheEnabled
+	}
 	hd, hp, ha := item.HedgeDelaySeconds, item.HedgeMaxParallel, item.HedgeMaxAttempts
 	if in.HedgeDelaySeconds != nil {
 		hd = *in.HedgeDelaySeconds
@@ -215,6 +309,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	item.HedgeDelaySeconds, item.HedgeMaxParallel, item.HedgeMaxAttempts = a.clampGroupHedgePolicy(hd, hp, ha)
 	if in.ResponseValidationEnabled != nil {
 		item.ResponseValidationEnabled = *in.ResponseValidationEnabled
+	}
+	if in.ResponseValidationVirtualCacheEnabled != nil {
+		item.ResponseValidationVirtualCacheEnabled = *in.ResponseValidationVirtualCacheEnabled
 	}
 	validationMode := item.ResponseValidationStreamMode
 	if in.ResponseValidationStreamMode != nil {
@@ -242,14 +339,26 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 			a.Log.Warn("reorder routes after group update", "group_id", id, "err", err)
 		}
 	}
+	if rateLimitChanged {
+		if err := a.applyRateLimitForGroup(id); err != nil && a.Log != nil {
+			a.Log.Warn("apply gateway group multiplier limit", "group_id", id, "err", err)
+		}
+	}
 	a.invalidateModelsCache(id)
+	a.InvalidateResponseValidator(id)
+	a.resetLoadBalanceGroup(id)
 	return item, nil
 }
 
 // DeleteGroup 删除分组。
 func (a *AdminService) DeleteGroup(id uint) error {
 	a.invalidateModelsCache(id)
-	return a.Groups.Delete(id)
+	a.resetLoadBalanceGroup(id)
+	if err := a.Groups.Delete(id); err != nil {
+		return err
+	}
+	a.InvalidateResponseValidator(id)
+	return nil
 }
 
 // ListGroups 列出分组。

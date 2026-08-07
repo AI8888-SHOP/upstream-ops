@@ -81,6 +81,7 @@ UpstreamOps 主要解决这些痛点：
 - 故障转移：网络错误、429、5xx 临时暂停并顺延；组可开「4xx 顺延」；支持组级重试次数、最大切换次数、冷却秒数。
 - **首字超时**（可选）：在仍有可顺延路由时，对首字节等待限时，加速切换到下一条路由。
 - **并发兜底（Hedge，可选，默认关闭）**：主请求超过组级延迟仍无有效结果时，按上限并发启动其它路由；首个通过响应校验的 attempt 获胜并取消仍在运行的 loser。`maxParallel` 包含主请求，`maxAttempts` 限制总尝试数；图片/视频生成和 Realtime 请求自动排除。
+- **并发兜底虚拟缓存（可选，默认关闭）**：真实发生重叠 hedge 且成功响应交付后，可将 winner 的新鲜输入按缓存读取 token 计入用户侧结算。用户只按折后 winner 金额扣费；所有 attempt 的原始上游成本和额外成本仍保留用于核算，图片/视频生成和 Realtime 请求不会获得该补贴。
 - **响应正则校验（可选，默认关闭）**：按优先级检查 `assistant_text`、`raw_body` 或 `error_message`，支持模型和协议过滤；命中后拒绝当前 attempt 并直接切换其它路由。非流式检查完整响应，流式在提交前检查可配置前缀。
 - User-Agent：路由级 `passthrough` / `group` / `custom`；管理侧拉模型、探测会回落默认 UA。
 - 使用记录对齐 sub2api 字段：endpoint、协议、tokens（含缓存读写分桶）、费用、延迟、首字延迟、attempt 类型/状态、winner、响应规则与上游错误详情；提供列表、stats、模型筛选项与清理。
@@ -249,7 +250,7 @@ UpstreamOps 主要解决这些痛点：
 - 余额同步 cron。
 - 倍率同步 cron。
 - 并发数量。
-- 监控日志、余额快照、通知日志保留天数。
+- 监控日志、余额快照、通知日志、网关使用记录和公告保留天数。
 - 上游公告保留天数。
 - 倍率变化通知合并策略。
 - 倍率变化最小推送百分比。
@@ -342,7 +343,7 @@ IMAGE_TAG=latest
 生产环境建议锁定具体版本，例如：
 
 ```env
-IMAGE_TAG=v0.0.11
+IMAGE_TAG=v0.0.20
 ```
 
 ## MySQL 部署
@@ -363,6 +364,76 @@ MYSQL_PASSWORD=请替换为数据库密码
 MYSQL_ROOT_PASSWORD=请替换为 root 密码
 MYSQL_PORT=33069
 ```
+
+## 高负载部署与旧版一键升级
+
+当 `gateway_usage_logs` 持续增长（例如超过 5 万条或数据库文件超过约 128 MB）时，SQLite 的单写入连接会让统计查询和结算互相排队。程序启动时会在日志中提示升级；推荐使用 PostgreSQL 保存主数据，Redis 只作为可选的短期缓存，不承载费用、配额或结算真相。
+
+### 普通旧版本一键升级（Docker）
+
+普通升级默认使用 `ghcr.io/ai8888-shop/upstream-ops`。如果使用 fork 或私有镜像，可在运行目录的 `.env` 中设置 `IMAGE_REPOSITORY` 覆盖。升级成功后会在第一个 Compose 文件旁生成 `docker-compose.upstream-ops-image.yml`，并把它持久化到 `COMPOSE_FILE`，后续直接执行 `docker compose up` 也不会回退到旧的固定镜像。
+
+如果只升级镜像、保留现有数据库，请在包含 `docker-compose.yml`、`.env` 和 `data/` 的目录执行：
+
+```bash
+chmod +x scripts/upgrade.sh
+TARGET_TAG=v0.0.20 ./scripts/upgrade.sh
+```
+
+Windows PowerShell：
+
+```powershell
+.\scripts\upgrade.ps1 -TargetTag v0.0.20
+```
+
+脚本会备份 `data/` 与 `.env`、为旧镜像建立不可变的本地回滚标签、拉取目标版本、等待容器健康检查，并在成功后把目标 `IMAGE_TAG` 持久化到 `.env`；启动或健康检查失败时自动恢复旧镜像。非默认 compose 文件、服务名或端口可通过 `COMPOSE_FILE`、`SERVICE`、`HEALTH_URL`、`HEALTH_TIMEOUT_SECONDS` 覆盖。请在新版本完成请求、重试、计费核对后再清理 `backups/` 和回滚镜像标签。
+
+### SQLite 迁移到 PostgreSQL
+
+升级前先为 PostgreSQL 准备一个新的空数据库和独立账号，并在 `.env` 中设置：
+
+```env
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
+DATABASE_USER=upstreamops
+DATABASE_PASSWORD=请替换为数据库密码
+DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
+# PostgreSQL 与 upstream-ops 不在同一个网络时填写；外部网络必须已存在
+DATABASE_NETWORK_NAME=sub2api-localtest_default
+DATABASE_NETWORK_EXTERNAL=true
+```
+
+Linux/macOS 在项目目录执行：
+
+```bash
+chmod +x scripts/upgrade-to-postgres.sh
+./scripts/upgrade-to-postgres.sh
+```
+
+Windows PowerShell 执行：
+
+```powershell
+.\scripts\upgrade-to-postgres.ps1
+```
+
+脚本会停止应用、完整备份 `data/` 和 `.env`、拒绝写入非空目标库、逐表校验迁移行数，然后用 `docker-compose.postgres.yml` 启动并等待 `/healthz` 变为 healthy；成功后会把 PostgreSQL 连接参数和 `DATABASE_DRIVER=postgres` 持久化到 `.env`，后续普通重启不会切回 SQLite。迁移或新容器健康检查失败会自动恢复旧 SQLite 容器；备份目录保留用于人工回滚。PostgreSQL 位于另一个 Docker 网络时，设置 `DATABASE_NETWORK_NAME` + `DATABASE_NETWORK_EXTERNAL=true`（或临时设置 `MIGRATION_NETWORK`），脚本会同时把应用和迁移容器加入该网络。不要把数据库密码写入命令行或仓库。
+迁移前会把 SQLite 主文件及 `-wal`、`-shm` 等旁车文件复制到可写的临时快照，再交给迁移容器；成功、失败和回滚都会清理快照。迁移默认超时 30 分钟，可通过 `MIGRATION_TIMEOUT_SECONDS`（PowerShell 使用 `-MigrationTimeoutSeconds`）调整。
+
+也可以直接运行镜像内的迁移工具：
+
+```bash
+export DATABASE_PASSWORD="${DATABASE_PASSWORD:?set DATABASE_PASSWORD first}"
+docker run --rm --entrypoint /usr/local/bin/upstream-ops-migrate \
+  -v "$PWD/data:/app/data:ro" \
+  -e DATABASE_PASSWORD \
+  ghcr.io/ai8888-shop/upstream-ops:latest \
+  -source /app/data/upstream-ops.db -target-host "$DATABASE_HOST" \
+  -target-port 5432 -target-user "$DATABASE_USER" -target-name "$DATABASE_NAME"
+```
+
+旧版 SQLite 部署可直接执行上面的脚本完成一键升级；脚本默认使用同仓库 `latest` 镜像内的 `upstream-ops-migrate`，不会误用不含迁移工具的旧版镜像。私有仓库或固定版本可设置 `IMAGE`（PowerShell 使用 `-Image`）或 `MIGRATION_IMAGE_TAG`（PowerShell 使用 `-MigrationImageTag`）。迁移完成后保留原 SQLite 备份至少一个结算周期，确认 `/healthz`、网关请求、usage 统计和配额扣费均正常，再清理旧文件。非 Docker 部署可从 GitHub Release 下载同版本的 `upstream-ops-migrate` 二进制后执行等价迁移。
+指定 `TARGET_TAG` 时，迁移工具和新应用会使用同一个目标镜像；未指定时由 `MIGRATION_IMAGE_TAG`（默认 `latest`）同时决定两者。
 
 ## 环境变量
 
@@ -964,10 +1035,12 @@ x-api-key: sk-...
 
 - 默认可顺延：无响应、429、5xx；组开启「4xx 顺延」时全部 4xx 也可顺延。
 - 失败路由可写入临时不可调度截止时间（冷却秒数，默认来自 `gateway.tempPauseSeconds` / 组配置）。
+- 自动冷却按“路由 + 最终上游模型”隔离：某个模型失败不会暂停同一渠道的其它模型；映射到同一最终上游模型的别名共享冷却。管理端“清除暂停”会清除该路由的全部模型冷却。
 - 组级：`retry_count`、`failover_max`、`cooldown_seconds`。
 - **首字超时**：配置后，仅当「本请求仍可切换到其它路由」时启用；最后一条可试路由会关闭首字掐断，避免无意义超时。
 - **并发兜底（默认关闭）**：主 attempt 立即开始；超过 `hedge_delay_seconds` 仍没有通过校验的响应时，按延迟阶梯启动其它路由。`hedge_max_parallel` 包含主请求，`hedge_max_attempts` 是整个请求可启动的 attempt 总上限。第一个通过校验的响应获胜，其余未完成请求会被取消。
 - 图片生成、视频生成与 Realtime/WebSocket 请求始终按原有顺序策略执行，不启用并发兜底；仅把图片作为输入的多模态文本请求不在排除范围内。
+- 开启网关组 `hedge_virtual_cache_enabled` 后，只有确实启动了重叠 hedge 且 winner 成功交付时，才把 winner 的新鲜输入虚拟为缓存读取并降低用户实收；原始 `actual_cost`、所有 loser/额外 attempt 成本和结算差额都会单独保留，失败、顺序重试、媒体请求不会触发。
 - **响应正则校验（默认关闭）**：规则按数值从小到大的优先级匹配，使用 Go RE2 语法。检查目标可选 `assistant_text`（协议转换后的助手可见文本）、`raw_body` 或 `error_message`；模型/协议过滤留空表示全部，也支持 `*` / `?` 通配。
 - 非流式响应会在交付客户端前检查完整响应。命中后将当前 attempt 记为 `regex_reject` / `rejected`，直接换其它路由，不在同一路由重试。
 - 流式响应采用固定的 `prefix` 模式：最多缓存 `response_validation_prefix_bytes` 或等待 `response_validation_prefix_timeout_ms`，在首次提交客户端前检查。提交后不能再安全切换；后续才出现的匹配只记录为 post-commit 审计事件。
@@ -1479,6 +1552,7 @@ data: {“event”:”progress”,”message”:”...”,”step”:1,”total�
 - 上游同步日志跟随监控日志保留天数清理。
 - 余额快照保留 90 天。
 - 通知日志保留 90 天。
+- 网关使用记录和费用明细保留 90 天。
 - 上游公告按”公告保留天数”清理，0 表示不清理。
 - 倍率变化日志默认不清理。
 
@@ -1569,6 +1643,12 @@ http://127.0.0.1:8418
 ### 余额低告警重复太少
 
 检查系统设置中的“余额低告警冷却时间”。冷却状态会写入数据库，重启后仍然生效。
+
+### 网关组倍率上限
+
+编辑网关组时可设置 `max_billing_rate_multiplier`。`0` 表示关闭限制；限制开启后，系统使用与调度和计费完全相同的有效计费倍率，自动排除超过上限的监控渠道路由和直连 Provider 路由。
+
+自动停用状态独立于路由的手动 `enabled` 字段：不会改写用户手动禁用状态，也不会因为倍率恢复而重新启用手动关闭的路由。倍率恢复到上限以内后，系统会清除自动停用标记；倍率扫描、保存路由或修改 Provider 默认倍率时都会重新评估。
 
 ## License
 

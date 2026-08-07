@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -98,32 +99,238 @@ func RewriteModelInBody(body []byte, upstreamModel string) []byte {
 	return out
 }
 
+type requestThinking struct {
+	Type string `json:"type"`
+}
+
+type requestBodyInfo struct {
+	Model           string `json:"model"`
+	Stream          bool   `json:"stream"`
+	ServiceTier     string `json:"service_tier"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	Reasoning       *struct {
+		Effort string `json:"effort"`
+	} `json:"reasoning"`
+	OutputConfig *struct {
+		Effort string `json:"effort"`
+	} `json:"output_config"`
+	Thinking *requestThinking `json:"thinking"`
+
+	SessionID          string `json:"session_id"`
+	SessionIDCamel     string `json:"sessionId"`
+	ConversationID     string `json:"conversation_id"`
+	ConversationIDCamel string `json:"conversationId"`
+	ThreadID           string `json:"thread_id"`
+	ThreadIDCamel      string `json:"threadId"`
+	PromptCacheKey     string `json:"prompt_cache_key"`
+	PromptCacheKeyCamel string `json:"promptCacheKey"`
+	PreviousResponseID string `json:"previous_response_id"`
+	PreviousResponseIDCamel string `json:"previousResponseId"`
+
+	ResponseModalities      []string `json:"response_modalities"`
+	ResponseModalitiesCamel []string `json:"responseModalities"`
+	OutputModalities        []string `json:"output_modalities"`
+	OutputModalitiesCamel   []string `json:"outputModalities"`
+	Modalities              []string `json:"modalities"`
+	ResponseMIMEType        string   `json:"response_mime_type"`
+	ResponseMIMETypeCamel   string   `json:"responseMimeType"`
+	OutputMIMEType          string   `json:"output_mime_type"`
+	OutputMIMETypeCamel     string   `json:"outputMimeType"`
+	ImageGeneration         json.RawMessage `json:"image_generation"`
+	ImageGenerationCamel    json.RawMessage `json:"imageGeneration"`
+	VideoGeneration         json.RawMessage `json:"video_generation"`
+	VideoGenerationCamel    json.RawMessage `json:"videoGeneration"`
+	Task                     string          `json:"task"`
+	Operation                string          `json:"operation"`
+	Tools                    []struct {
+		Type string `json:"type"`
+	} `json:"tools"`
+}
+
+type requestAnalysis struct {
+	Model           string
+	Stream          bool
+	ServiceTier     string
+	ReasoningEffort string
+	ThinkingEnabled bool
+	MediaGeneration bool
+	AffinityID      string
+	Parsed          bool
+}
+
+func parseRequestBodyInfo(body []byte) (requestBodyInfo, bool) {
+	var info requestBodyInfo
+	if len(body) == 0 {
+		return requestBodyInfo{}, false
+	}
+	// Keep the common request shape on the compact typed fast path. A single
+	// optional field is occasionally sent with a provider-specific JSON type;
+	// do not discard the model/stream fields just because that field cannot be
+	// assigned to the narrow compatibility envelope above.
+	if err := json.Unmarshal(body, &info); err == nil {
+		return info, true
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return requestBodyInfo{}, false
+	}
+	decode := func(key string, dst any) {
+		if value, ok := raw[key]; ok {
+			_ = json.Unmarshal(value, dst)
+		}
+	}
+	decodeString := func(key string, dst *string) {
+		if value, ok := raw[key]; ok {
+			if err := json.Unmarshal(value, dst); err == nil {
+				return
+			}
+			var number json.Number
+			if err := json.Unmarshal(value, &number); err == nil {
+				*dst = number.String()
+			}
+		}
+	}
+	decodeString("model", &info.Model)
+	decode("stream", &info.Stream)
+	decodeString("service_tier", &info.ServiceTier)
+	decodeString("reasoning_effort", &info.ReasoningEffort)
+	decode("reasoning", &info.Reasoning)
+	decode("output_config", &info.OutputConfig)
+	decode("thinking", &info.Thinking)
+	decodeString("session_id", &info.SessionID)
+	decodeString("sessionId", &info.SessionIDCamel)
+	decodeString("conversation_id", &info.ConversationID)
+	decodeString("conversationId", &info.ConversationIDCamel)
+	decodeString("thread_id", &info.ThreadID)
+	decodeString("threadId", &info.ThreadIDCamel)
+	decodeString("prompt_cache_key", &info.PromptCacheKey)
+	decodeString("promptCacheKey", &info.PromptCacheKeyCamel)
+	decodeString("previous_response_id", &info.PreviousResponseID)
+	decodeString("previousResponseId", &info.PreviousResponseIDCamel)
+	decode("response_modalities", &info.ResponseModalities)
+	decode("responseModalities", &info.ResponseModalitiesCamel)
+	decode("output_modalities", &info.OutputModalities)
+	decode("outputModalities", &info.OutputModalitiesCamel)
+	decode("modalities", &info.Modalities)
+	decodeString("response_mime_type", &info.ResponseMIMEType)
+	decodeString("responseMimeType", &info.ResponseMIMETypeCamel)
+	decodeString("output_mime_type", &info.OutputMIMEType)
+	decodeString("outputMimeType", &info.OutputMIMETypeCamel)
+	decode("image_generation", &info.ImageGeneration)
+	decode("imageGeneration", &info.ImageGenerationCamel)
+	decode("video_generation", &info.VideoGeneration)
+	decode("videoGeneration", &info.VideoGenerationCamel)
+	decodeString("task", &info.Task)
+	decodeString("operation", &info.Operation)
+	decode("tools", &info.Tools)
+	return info, true
+}
+
+func analyzeRequestBody(body []byte) requestAnalysis {
+	info, ok := parseRequestBodyInfo(body)
+	if !ok {
+		return requestAnalysis{}
+	}
+	serviceTier, reasoningEffort := requestMetaFromInfo(info)
+	return requestAnalysis{
+		Model:           strings.TrimSpace(info.Model),
+		Stream:          info.Stream,
+		ServiceTier:     serviceTier,
+		ReasoningEffort: reasoningEffort,
+		ThinkingEnabled: bodyThinkingEnabled(info.Thinking),
+		MediaGeneration: requestInfoGeneratesMedia(info),
+		AffinityID:      requestInfoAffinityID(info),
+		Parsed:          true,
+	}
+}
+
+// ExtractRequestInfo parses the request envelope once for the forwarding hot
+// path. Large conversation arrays are skipped by encoding/json because they are
+// not fields on requestBodyInfo.
+func ExtractRequestInfo(body []byte) (model string, stream bool, serviceTier, reasoningEffort string, thinkingEnabled bool) {
+	analysis := analyzeRequestBody(body)
+	if !analysis.Parsed {
+		return "", false, "", "", false
+	}
+	model = analysis.Model
+	stream = analysis.Stream
+	serviceTier = analysis.ServiceTier
+	reasoningEffort = analysis.ReasoningEffort
+	thinkingEnabled = analysis.ThinkingEnabled
+	return
+}
+
+func requestInfoAffinityID(info requestBodyInfo) string {
+	for _, value := range []string{
+		info.SessionID, info.SessionIDCamel,
+		info.ConversationID, info.ConversationIDCamel,
+		info.ThreadID, info.ThreadIDCamel,
+		info.PromptCacheKey, info.PromptCacheKeyCamel,
+		info.PreviousResponseID, info.PreviousResponseIDCamel,
+	} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func requestInfoGeneratesMedia(info requestBodyInfo) bool {
+	if mediaGenerationModel(info.Model) {
+		return true
+	}
+	for _, modalities := range [][]string{
+		info.ResponseModalities, info.ResponseModalitiesCamel,
+		info.OutputModalities, info.OutputModalitiesCamel, info.Modalities,
+	} {
+		for _, modality := range modalities {
+			switch strings.ToLower(strings.TrimSpace(modality)) {
+			case "image", "video":
+				return true
+			}
+		}
+	}
+	for _, mimeType := range []string{
+		info.ResponseMIMEType, info.ResponseMIMETypeCamel,
+		info.OutputMIMEType, info.OutputMIMETypeCamel,
+	} {
+		if mediaMIMEType(mimeType) {
+			return true
+		}
+	}
+	for _, option := range []json.RawMessage{
+		info.ImageGeneration, info.ImageGenerationCamel,
+		info.VideoGeneration, info.VideoGenerationCamel,
+	} {
+		trimmed := bytes.TrimSpace(option)
+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) && !bytes.Equal(trimmed, []byte("false")) {
+			return true
+		}
+	}
+	if mediaGenerationType(info.Task) || mediaGenerationType(info.Operation) {
+		return true
+	}
+	for _, tool := range info.Tools {
+		if mediaGenerationType(tool.Type) {
+			return true
+		}
+	}
+	return false
+}
+
 // ExtractModelFromBody 从 JSON 请求体取 model。
 func ExtractModelFromBody(body []byte) string {
-	if len(body) == 0 {
+	info, ok := parseRequestBodyInfo(body)
+	if !ok {
 		return ""
 	}
-	var obj struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(obj.Model)
+	return strings.TrimSpace(info.Model)
 }
 
 // ExtractStreamFlag 从请求体判断是否 stream。
 func ExtractStreamFlag(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	var obj struct {
-		Stream bool `json:"stream"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return false
-	}
-	return obj.Stream
+	info, ok := parseRequestBodyInfo(body)
+	return ok && info.Stream
 }
 
 // ExtractMetaFromBody 提取 service_tier / reasoning_effort（尽力而为）。
@@ -135,48 +342,36 @@ func ExtractStreamFlag(body []byte) bool {
 //  5. 国产 thinking 开启但无档位时默认 "high"（见 ApplyThinkingEnabledEffortFallback；
 //     此处仅用 body.model 做初判，路由映射后的上游模型在转发路径再补一次）
 func ExtractMetaFromBody(body []byte) (serviceTier, reasoningEffort string) {
-	if len(body) == 0 {
+	info, ok := parseRequestBodyInfo(body)
+	if !ok {
 		return "", ""
 	}
-	var obj struct {
-		Model           string `json:"model"`
-		ServiceTier     string `json:"service_tier"`
-		ReasoningEffort string `json:"reasoning_effort"`
-		Reasoning       *struct {
-			Effort string `json:"effort"`
-		} `json:"reasoning"`
-		OutputConfig *struct {
-			Effort string `json:"effort"`
-		} `json:"output_config"`
-		Thinking *struct {
-			Type string `json:"type"`
-		} `json:"thinking"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return "", ""
-	}
-	serviceTier = strings.TrimSpace(obj.ServiceTier)
+	return requestMetaFromInfo(info)
+}
 
-	if obj.Reasoning != nil {
-		if e := normalizeOpenAIReasoningEffort(obj.Reasoning.Effort); e != "" {
+func requestMetaFromInfo(info requestBodyInfo) (serviceTier, reasoningEffort string) {
+	serviceTier = strings.TrimSpace(info.ServiceTier)
+
+	if info.Reasoning != nil {
+		if e := normalizeOpenAIReasoningEffort(info.Reasoning.Effort); e != "" {
 			return serviceTier, e
 		}
 	}
-	if e := normalizeOpenAIReasoningEffort(obj.ReasoningEffort); e != "" {
+	if e := normalizeOpenAIReasoningEffort(info.ReasoningEffort); e != "" {
 		return serviceTier, e
 	}
-	if obj.OutputConfig != nil {
-		if e := normalizeClaudeOutputEffort(obj.OutputConfig.Effort); e != "" {
+	if info.OutputConfig != nil {
+		if e := normalizeClaudeOutputEffort(info.OutputConfig.Effort); e != "" {
 			return serviceTier, e
 		}
 	}
-	if e := deriveReasoningEffortFromModel(obj.Model); e != "" {
+	if e := deriveReasoningEffortFromModel(info.Model); e != "" {
 		return serviceTier, e
 	}
 	// 初判：thinking 已开且 body.model 属于国产 passback 族 → high
 	// （映射后的上游模型在 attempt 侧再走一遍 ApplyThinkingEnabledEffortFallback）
-	if bodyThinkingEnabled(obj.Thinking) {
-		if e := defaultEffortForThinkingEnabled(obj.Model); e != "" {
+	if bodyThinkingEnabled(info.Thinking) {
+		if e := defaultEffortForThinkingEnabled(info.Model); e != "" {
 			return serviceTier, e
 		}
 	}
@@ -186,23 +381,11 @@ func ExtractMetaFromBody(body []byte) (serviceTier, reasoningEffort string) {
 // bodyHasThinkingEnabled 检测入站 body 是否开启 thinking（Anthropic / 国产兼容）。
 // 对齐 sub2api：thinking.type 为 enabled 或 adaptive。
 func bodyHasThinkingEnabled(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	var obj struct {
-		Thinking *struct {
-			Type string `json:"type"`
-		} `json:"thinking"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return false
-	}
-	return bodyThinkingEnabled(obj.Thinking)
+	info, ok := parseRequestBodyInfo(body)
+	return ok && bodyThinkingEnabled(info.Thinking)
 }
 
-func bodyThinkingEnabled(thinking *struct {
-	Type string `json:"type"`
-}) bool {
+func bodyThinkingEnabled(thinking *requestThinking) bool {
 	if thinking == nil {
 		return false
 	}

@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bejix/upstream-ops/backend/storage"
 )
 
 func TestRunHedgeTerminalFailureStopsWithoutWinner(t *testing.T) {
@@ -77,6 +79,9 @@ func TestRunHedgeDelayedFallbackWinsAndCancelsPrimary(t *testing.T) {
 	if result.Winner == nil || result.Winner.Info.Number != 2 || result.Value != 2 {
 		t.Fatalf("winner=%+v value=%d, want attempt 2", result.Winner, result.Value)
 	}
+	if len(result.Attempts) != 2 || !result.Attempts[1].Info.Concurrent {
+		t.Fatalf("attempts=%+v, want an overlapping auxiliary hedge", result.Attempts)
+	}
 	select {
 	case <-primaryCanceled:
 	case <-time.After(time.Second):
@@ -84,6 +89,28 @@ func TestRunHedgeDelayedFallbackWinsAndCancelsPrimary(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("calls=%d, want 2", calls.Load())
+	}
+}
+
+func TestRunHedgeDoesNotMarkFastSequentialFallbackAsConcurrent(t *testing.T) {
+	result, err := runHedge(
+		context.Background(),
+		true,
+		hedgePolicy{Enabled: true, Delay: time.Hour, MaxParallel: 2, MaxAttempts: 2},
+		func(context.Context, hedgeAttemptInfo) (int, error) {
+			return 0, errors.New("fast failure")
+		},
+		nil,
+		hedgeHooks[int]{},
+	)
+	if !errors.Is(err, errHedgeExhausted) {
+		t.Fatalf("err=%v, want exhausted", err)
+	}
+	if len(result.Attempts) != 2 {
+		t.Fatalf("attempts=%d, want 2", len(result.Attempts))
+	}
+	if result.Attempts[1].Info.Kind != attemptKindHedge || result.Attempts[1].Info.Concurrent {
+		t.Fatalf("fallback info=%+v, want hedge kind without overlap", result.Attempts[1].Info)
 	}
 }
 
@@ -153,9 +180,9 @@ func TestRunHedgeNeverExceedsMaxParallel(t *testing.T) {
 }
 
 func TestRunHedgeWaitsForCanceledLoserCleanup(t *testing.T) {
-	originalCleanup := hedgeCleanupTimeout
-	hedgeCleanupTimeout = time.Second
-	t.Cleanup(func() { hedgeCleanupTimeout = originalCleanup })
+	originalCleanup := hedgeWinnerCleanupTimeout
+	hedgeWinnerCleanupTimeout = time.Second
+	t.Cleanup(func() { hedgeWinnerCleanupTimeout = originalCleanup })
 	loserFinished := make(chan struct{})
 	result, err := runHedge(
 		context.Background(),
@@ -186,6 +213,39 @@ func TestRunHedgeWaitsForCanceledLoserCleanup(t *testing.T) {
 	}
 }
 
+func TestRunHedgeBoundsWinnerCleanupDelay(t *testing.T) {
+	originalCleanup := hedgeWinnerCleanupTimeout
+	hedgeWinnerCleanupTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { hedgeWinnerCleanupTimeout = originalCleanup })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	started := time.Now()
+	result, err := runHedge(
+		context.Background(),
+		true,
+		hedgePolicy{Enabled: true, Delay: time.Millisecond, MaxParallel: 2, MaxAttempts: 2},
+		func(ctx context.Context, info hedgeAttemptInfo) (int, error) {
+			if info.Number == 2 {
+				return 2, nil
+			}
+			<-ctx.Done()
+			<-release
+			return 0, ctx.Err()
+		},
+		func(value int) (bool, error) { return value == 2, nil },
+		hedgeHooks[int]{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("winner cleanup blocked for %s", elapsed)
+	}
+	if len(result.Attempts) != 2 || result.Attempts[0].Outcome != hedgeOutcomeLost {
+		t.Fatalf("attempts=%+v, want a synthetic lost loser", result.Attempts)
+	}
+}
+
 func TestHedgeEligibleExcludesGeneratedMediaAndRealtime(t *testing.T) {
 	cases := []hedgeRequest{
 		{Path: "/v1/images/generations", Model: "gpt-4o"},
@@ -206,5 +266,37 @@ func TestHedgeEligibleExcludesGeneratedMediaAndRealtime(t *testing.T) {
 	}
 	if !hedgeEligible(ordinaryMultimodal) {
 		t.Fatal("ordinary image-input text request should remain hedge eligible")
+	}
+}
+
+func TestHedgeEligibleUsesPreanalyzedMediaFlag(t *testing.T) {
+	if hedgeEligible(hedgeRequest{
+		Path: "/v1/responses", Body: []byte(`not-json`),
+		BodyMediaAnalyzed: true, BodyGeneratesMedia: true,
+	}) {
+		t.Fatal("preanalyzed media-generation request should not hedge")
+	}
+	if !hedgeEligible(hedgeRequest{
+		Path: "/v1/responses", Body: []byte(`not-json`),
+		BodyMediaAnalyzed: true, BodyGeneratesMedia: false,
+	}) {
+		t.Fatal("preanalyzed text request should remain hedge eligible")
+	}
+}
+
+func TestMappedRouteContainsMediaModel(t *testing.T) {
+	routes := []storage.GatewayRoute{
+		{ModelMappingJSON: `{"friendly-text-model":"gpt-image-1"}`},
+	}
+	if !mappedRouteContainsMediaModel(routes, "friendly-text-model", nil) {
+		t.Fatal("mapped image-generation model must disable concurrent hedging")
+	}
+	routes[0].ModelMappingJSON = `{"friendly-text-model":"sora-2"}`
+	if !mappedRouteContainsMediaModel(routes, "friendly-text-model", nil) {
+		t.Fatal("mapped video-generation model must disable concurrent hedging")
+	}
+	routes[0].ModelMappingJSON = `{"friendly-text-model":"gpt-5.6-terra"}`
+	if mappedRouteContainsMediaModel(routes, "friendly-text-model", nil) {
+		t.Fatal("mapped text model unexpectedly disabled concurrent hedging")
 	}
 }

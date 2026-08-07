@@ -113,9 +113,13 @@ func (a *AdminService) pullRouteModels(ctx context.Context, group *storage.Gatew
 		ChannelID:  route.SourceChannelID,
 		ProviderID: route.GatewayProviderID,
 	}
-	if !route.Enabled {
+	if !route.Enabled || route.RateLimitAutoDisabled {
 		rr.Skipped = true
-		rr.SkipReason = "路由已禁用"
+		if route.RateLimitAutoDisabled {
+			rr.SkipReason = "route exceeds gateway group multiplier limit"
+		} else {
+			rr.SkipReason = "路由已禁用"
+		}
 		rr.Label = fmt.Sprintf("route#%d", route.ID)
 		return routeModelPull{rr: rr}
 	}
@@ -141,14 +145,18 @@ func (a *AdminService) pullRouteModels(ctx context.Context, group *storage.Gatew
 		if rr.Label == "" {
 			rr.Label = fmt.Sprintf("直连 #%d", route.GatewayProviderID)
 		}
-		// 用 provider base + key 拉 /v1/models
-		pseudo := &storage.Channel{
-			ID:      0,
-			Name:    rr.Label,
-			SiteURL: target.BaseURL,
+		if target.Provider == nil {
+			rr.Error = "直连渠道不存在"
+			return routeModelPull{rr: rr}
 		}
+		// 直连渠道使用自身鉴权、额外 Header 与代理配置拉模型，再应用可用模型策略。
 		var fetchErr error
-		models, fetchErr = a.fetchUpstreamModels(ctx, pseudo, target.APIKey, ua)
+		models, fetchErr = a.fetchProviderModels(ctx, target.Provider, target.APIKey, ua)
+		if fetchErr != nil {
+			rr.Error = fetchErr.Error()
+			return routeModelPull{rr: rr}
+		}
+		models, fetchErr = FilterProviderModels(target.Provider, models)
 		if fetchErr != nil {
 			rr.Error = fetchErr.Error()
 			return routeModelPull{rr: rr}
@@ -299,7 +307,7 @@ func (a *AdminService) TestGroupModel(ctx context.Context, groupID uint, in Test
 				continue
 			}
 			// 单测时允许已暂停路由，便于手动验证
-			if !r.Enabled {
+			if !r.Enabled || r.RateLimitAutoDisabled {
 				return nil, errors.New("route is disabled")
 			}
 			if r.NormalizeSourceKind() == storage.GatewayRouteSourceMonitor &&

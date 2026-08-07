@@ -11,6 +11,7 @@ package gateway
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ const (
 	attemptKindRetry    = "retry"
 	attemptKindFailover = "failover"
 	attemptKindHedge    = "hedge"
+	attemptKindRecovery = storage.GatewayAttemptKindRecovery
 )
 
 // ChannelAPI 上游密钥管理能力（由 channel.Service 实现）。
@@ -58,6 +60,16 @@ type Service struct {
 	// Runtime 数据面；嵌入 *Service 共享依赖。
 	Runtime *Runtime
 
+	upstreamConcurrencyMu sync.Mutex
+	upstreamConcurrency   *upstreamConcurrencyRegistry
+	// httpTransports is keyed by the effective proxy URL. A blank key is the
+	// direct/environment-proxy transport. Clients remain cheap per-request,
+	// while their transports retain idle connections across attempts.
+	httpTransportsMu sync.Mutex
+	httpTransports   map[string]*http.Transport
+	loadBalanceMu         sync.RWMutex
+	loadBalanceStates     map[loadBalancePoolKey]*loadBalancePoolState
+
 	mu          sync.RWMutex
 	proxyConfig config.ProxyConfig
 	upstream    config.UpstreamConfig
@@ -66,9 +78,20 @@ type Service struct {
 	modelsCacheMu sync.Mutex
 	modelsCache   map[uint]modelsCacheEntry // keyed by group id
 
+	// responseValidatorCache stores immutable, compiled response rules by group.
+	// The cache is invalidated by response-rule CRUD and group policy changes.
+	responseValidatorCacheMu sync.RWMutex
+	responseValidatorCache   map[uint]responseValidatorCacheEntry
+
 	// 源分组列表缓存（ListAPIKeyGroups 远程调用昂贵；列表接口不再实时拉，运行时/保存仍可复用缓存）
 	channelGroupsCacheMu sync.Mutex
 	channelGroupsCache   map[uint]channelGroupsCacheEntry // keyed by channel id
+
+	// routeAffinities keeps short-lived session-to-route bindings so a cooled
+	// route can receive one controlled recovery probe for its own conversation.
+	routeAffinityMu sync.Mutex
+	routeAffinities map[routeAffinityKey]routeAffinityEntry
+	routeAffinityLastCleanup time.Time
 }
 
 type modelsCacheEntry struct {
@@ -106,7 +129,12 @@ func NewService(
 		Log:                log,
 		gatewayCfg:         config.GatewayConfig{}.WithDefaults(),
 		modelsCache:        map[uint]modelsCacheEntry{},
+		responseValidatorCache: map[uint]responseValidatorCacheEntry{},
 		channelGroupsCache: map[uint]channelGroupsCacheEntry{},
+		routeAffinities:    map[routeAffinityKey]routeAffinityEntry{},
+		upstreamConcurrency: newUpstreamConcurrencyRegistry(),
+		httpTransports:     map[string]*http.Transport{},
+		loadBalanceStates:   map[loadBalancePoolKey]*loadBalancePoolState{},
 	}
 	s.Admin = &AdminService{Service: s}
 	s.Runtime = &Runtime{Service: s}
@@ -122,6 +150,7 @@ func (s *Service) SetProviders(p *storage.GatewayProviders) {
 // A setter keeps NewService source-compatible with existing integrations and tests.
 func (s *Service) SetResponseRules(rules *storage.GatewayResponseRules) {
 	s.ResponseRules = rules
+	s.InvalidateAllResponseValidators()
 }
 
 // ListDefaultPrices 返回内置模型价目（管理端只读）。
@@ -133,9 +162,35 @@ func (s *Service) ListDefaultPrices(query string) []DefaultPriceItem {
 }
 
 func (s *Service) UpdateProxyConfig(cfg config.ProxyConfig) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	previous := effectiveProxyURL(s.proxyConfig)
+	changed := previous != effectiveProxyURL(cfg)
 	s.proxyConfig = cfg
+	s.mu.Unlock()
+	if changed {
+		s.invalidateHTTPTransports()
+	}
+}
+
+func effectiveProxyURL(cfg config.ProxyConfig) string {
+	proxy, err := cfg.ActiveURL()
+	if err != nil {
+		return ""
+	}
+	return proxy
+}
+
+// CloseIdleConnections releases pooled sockets without interrupting active
+// requests. It is safe to call during shutdown or before replacing runtime
+// dependencies.
+func (s *Service) CloseIdleConnections() {
+	if s == nil {
+		return
+	}
+	s.invalidateHTTPTransports()
 }
 
 func (s *Service) UpdateUpstreamConfig(cfg config.UpstreamConfig) {

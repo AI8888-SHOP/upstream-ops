@@ -91,6 +91,13 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 			if err != nil {
 				continue
 			}
+			var models []string
+			if target.Provider != nil {
+				models, err = rt.fetchProviderModels(c.Request.Context(), target.Provider, target.APIKey, rt.resolveAdminUserAgent(group, &route))
+				if err == nil {
+					models, err = FilterProviderModels(target.Provider, models)
+				}
+			} else {
 			ch := target.Channel
 			if ch == nil {
 				label := ""
@@ -103,7 +110,8 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 				}
 			}
 			// 拉模型：组+路由 UA，空则默认 UA（与模型测试一致；转发仍透传客户端）
-			models, err := rt.fetchUpstreamModels(c.Request.Context(), ch, target.APIKey, rt.resolveAdminUserAgent(group, &route))
+			models, err = rt.fetchUpstreamModels(c.Request.Context(), ch, target.APIKey, rt.resolveAdminUserAgent(group, &route))
+			}
 			if err != nil {
 				continue
 			}
@@ -145,6 +153,11 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 // userAgent 为组+路由解析结果；空则回落默认 UA（无客户端可透传）。
 
 func (rt *Runtime) fetchUpstreamModels(ctx context.Context, ch *storage.Channel, apiKey, userAgent string) ([]string, error) {
+	release, err := rt.acquireUpstreamConcurrency(ctx, &upstreamTarget{Channel: ch})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	client := rt.httpClientForChannel(ch)
 	client.Timeout = 30 * time.Second
 	url := strings.TrimRight(ch.SiteURL, "/") + "/v1/models"
@@ -209,8 +222,17 @@ func (rt *Runtime) HandleCountTokens(c *gin.Context) {
 	}
 	// 尝试转发到第一条可用路由的 /v1/messages/count_tokens
 	routes, _ := rt.Routes.ListByGroupID(auth.Group.ID)
+	requestedModel := ExtractModelFromBody(body)
+	groupMapping := ParseModelMapping(auth.Group.ModelMappingJSON)
+	if filtered, filterErr := rt.filterRoutesForRequestedModel(routes, requestedModel, groupMapping); filterErr == nil {
+		routes = filtered
+	} else {
+		rt.writeGatewayError(c, protocolAnthropic, http.StatusInternalServerError, "api_error", filterErr.Error())
+		return
+	}
+	routes = bindModelCooldownAliases(routes, requestedModel, groupMapping)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
-	cands := SortRoutes(routes, groupsByChannel, auth.Group.RateSortDirection, time.Now(), nil)
+	cands := SortRoutesForModel(routes, groupsByChannel, auth.Group.RateSortDirection, time.Now(), nil, requestedModel)
 	for _, cand := range cands {
 		route := cand.Route
 		target, rerr := rt.resolveUpstreamTarget(&route)

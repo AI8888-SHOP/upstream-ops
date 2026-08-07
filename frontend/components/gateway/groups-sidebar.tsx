@@ -1,5 +1,5 @@
 import { useRef, useState } from "react"
-import { GripVertical, Loader2, Pencil, Plus, Trash2 } from "lucide-react"
+import { Copy, GripVertical, Loader2, Pencil, Plus, Trash2 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -13,6 +13,7 @@ type GroupsSidebarProps = {
   busy: boolean
   onSelect: (id: number) => void
   onCreate: () => void
+  onClone: (id: number) => void | Promise<void>
   onEdit: (g: GatewayGroup) => void
   onDelete: (id: number) => void
   /** 拖拽重排后按新顺序提交 ids */
@@ -26,6 +27,7 @@ export function GroupsSidebar({
   busy,
   onSelect,
   onCreate,
+  onClone,
   onEdit,
   onDelete,
   onReorder,
@@ -155,6 +157,17 @@ export function GroupsSidebar({
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-7"
+                    title="复制网关组"
+                    disabled={busy}
+                    onClick={() => void onClone(g.id)}
+                  >
+                    <Copy className="size-3.5" />
+                  </Button>
                   <Button
                     type="button"
                     size="icon"

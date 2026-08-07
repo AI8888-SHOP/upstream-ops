@@ -727,6 +727,47 @@ export function GroupFormDialog({
           </div>
 
           <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
+            <Label>最大计费倍率</Label>
+            <Input
+              type="number"
+              min={0}
+              step="0.0001"
+              value={groupForm.max_billing_rate_multiplier}
+              onChange={(e) =>
+                setGroupForm({
+                  ...groupForm,
+                  max_billing_rate_multiplier: e.target.value,
+                })
+              }
+              placeholder="0"
+            />
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              0 表示关闭。路由有效倍率超过此值时自动停用调度；倍率恢复后自动恢复，用户手动禁用状态不变。
+            </p>
+          </div>
+
+          <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
+            <Label>负载均衡渠道数</Label>
+            <Input
+              type="number"
+              min={1}
+              max={64}
+              step={1}
+              value={groupForm.load_balance_route_count}
+              onChange={(e) =>
+                setGroupForm({
+                  ...groupForm,
+                  load_balance_route_count: e.target.value,
+                })
+              }
+            />
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              普通请求会在当前优先级最高的 X 个不同渠道之间分流；同一会话仍优先沿用原渠道。设为
+              1 可保持原有调度方式。此项不是并发兜底，每个请求仍只选择一个首选渠道。
+            </p>
+          </div>
+
+          <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
             <Label>User-Agent</Label>
             <Input
               value={groupForm.user_agent}
@@ -944,6 +985,22 @@ export function GroupFormDialog({
                   />
                 </div>
               </div>
+              <div className="flex items-center justify-between gap-2 border-t border-border/60 pt-3">
+                <div className="min-w-0 flex-1">
+                  <Label>并发兜底虚拟缓存</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    并发兜底获胜时，将用户侧输入按缓存读取计费；所有上游 attempt 与真实成本仍保留。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  disabled={!groupForm.hedge_enabled}
+                  checked={groupForm.hedge_virtual_cache_enabled}
+                  onCheckedChange={(v) =>
+                    setGroupForm({ ...groupForm, hedge_virtual_cache_enabled: v })
+                  }
+                />
+              </div>
               <p className="rounded-md border border-amber-200/80 bg-amber-50/80 px-2 py-1.5 text-[11px] leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
                 网关配额仅结算获胜请求，但所有 attempt 及可能产生的额外上游成本都会保留在使用记录中。
               </p>
@@ -961,6 +1018,22 @@ export function GroupFormDialog({
                   checked={groupForm.response_validation_enabled}
                   onCheckedChange={(v) =>
                     setGroupForm({ ...groupForm, response_validation_enabled: v })
+                  }
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2 border-t border-border/60 pt-3">
+                <div className="min-w-0 flex-1">
+                  <Label>正则顺延虚拟缓存</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    响应在提交前命中规则并切换其它渠道时，将获胜响应的输入按缓存读取计费。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  disabled={!groupForm.response_validation_enabled}
+                  checked={groupForm.response_validation_virtual_cache_enabled}
+                  onCheckedChange={(v) =>
+                    setGroupForm({ ...groupForm, response_validation_virtual_cache_enabled: v })
                   }
                 />
               </div>

@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils"
 import type {
   GatewayEnsureKeysResult,
   GatewayGroup,
+  GatewayGroupCloneResult,
   GatewayKey,
   GatewayKeyCreateResult,
   GatewayModelListItem,
@@ -103,6 +104,11 @@ export function GatewayPage() {
   const [keys, setKeys] = useState<GatewayKey[]>([])
   /** key id → 明文密钥（列表内联展示/复制） */
   const [keySecrets, setKeySecrets] = useState<Record<number, string>>({})
+  /** 克隆接口返回的新密钥；自动 reveal 失败时仍保留这次响应中的明文。 */
+  const pendingCloneSecretsRef = useRef<{
+    groupID: number
+    secrets: Record<number, string>
+  } | null>(null)
   const [keysRefreshing, setKeysRefreshing] = useState(false)
   const [keyDialogOpen, setKeyDialogOpen] = useState(false)
   const [editingKey, setEditingKey] = useState<GatewayKey | null>(null)
@@ -301,7 +307,13 @@ export function GatewayPage() {
    * 顶部「刷新」与切换组共用；seq 用于丢弃过期响应。
    */
   const reloadGroupDetail = useCallback(
-    async (group: GatewayGroup, opts?: { showLoading?: boolean }) => {
+    async (
+      group: GatewayGroup,
+      opts?: {
+        showLoading?: boolean
+        fallbackKeySecrets?: Record<number, string>
+      },
+    ) => {
       const seq = ++loadSeqRef.current
       if (opts?.showLoading !== false) setGroupLoading(true)
       applyGroupConfigLocal(group)
@@ -315,6 +327,9 @@ export function GatewayPage() {
       setModelTestDialogResults([])
       await Promise.all([loadKeys(group.id, seq), loadRoutes(group.id, seq)])
       if (seq === loadSeqRef.current) {
+        if (opts?.fallbackKeySecrets && Object.keys(opts.fallbackKeySecrets).length > 0) {
+          setKeySecrets((prev) => ({ ...opts.fallbackKeySecrets, ...prev }))
+        }
         setGroupLoading(false)
       }
     },
@@ -414,6 +429,9 @@ export function GatewayPage() {
           page: String(pageNum),
           page_size: String(size),
         })
+        // The page renders aggregate stats separately; avoid a duplicate full
+        // SUM(actual_cost) scan in the list endpoint.
+        qs.set("include_sum", "0")
         const gid = opts?.groupID
         if (gid != null && gid !== "" && gid !== "all" && Number(gid) > 0) {
           qs.set("group_id", String(gid))
@@ -437,9 +455,11 @@ export function GatewayPage() {
           const iso = usageTimeToRFC3339(opts.to)
           if (iso) qs.set("to", iso)
         }
+        const statsQS = new URLSearchParams(qs)
+        statsQS.set("include_endpoints", "0")
         const [page, stats] = await Promise.all([
           apiFetch<GatewayUsagePage>(`/gateway/usage?${qs}`),
-          apiFetch<GatewayUsageStats>(`/gateway/usage/stats?${qs}`),
+          apiFetch<GatewayUsageStats>(`/gateway/usage/stats?${statsQS}`),
         ])
         if (seq !== usageSeqRef.current) return
         setUsage(page)
@@ -682,7 +702,14 @@ export function GatewayPage() {
       setModelItems([])
       return
     }
-    void reloadGroupDetail(selectedGroup)
+    const pendingClone = pendingCloneSecretsRef.current
+    const fallbackKeySecrets =
+      pendingClone?.groupID === selectedGroup.id ? pendingClone.secrets : undefined
+    if (fallbackKeySecrets) pendingCloneSecretsRef.current = null
+    void reloadGroupDetail(
+      selectedGroup,
+      fallbackKeySecrets ? { fallbackKeySecrets } : undefined,
+    )
     // 仅在切换组时重载密钥/路由；使用记录独立，不受网关组影响
   }, [selectedGroup?.id, reloadGroupDetail])
 
@@ -703,8 +730,11 @@ export function GatewayPage() {
       hedge_max_attempts: String(
         hedgeDefaults?.maxAttempts ?? formDefaults.hedge_max_attempts,
       ),
+      hedge_virtual_cache_enabled: formDefaults.hedge_virtual_cache_enabled,
       response_validation_enabled:
         validationDefaults?.enabled ?? formDefaults.response_validation_enabled,
+      response_validation_virtual_cache_enabled:
+        formDefaults.response_validation_virtual_cache_enabled,
       response_validation_prefix_bytes: String(
         validationDefaults?.prefixBytes ??
           formDefaults.response_validation_prefix_bytes,
@@ -724,6 +754,8 @@ export function GatewayPage() {
       description: g.description ?? "",
       status: g.status === "disabled" ? "disabled" : "active",
       rate_resort_enabled: !!g.rate_resort_enabled,
+      max_billing_rate_multiplier: String(g.max_billing_rate_multiplier ?? 0),
+      load_balance_route_count: String(g.load_balance_route_count ?? 1),
       retry_enabled: g.retry_enabled !== false,
       retry_count: String(g.retry_count ?? 0),
       failover_enabled: g.failover_enabled !== false,
@@ -735,7 +767,10 @@ export function GatewayPage() {
       hedge_delay_seconds: String(g.hedge_delay_seconds ?? 10),
       hedge_max_parallel: String(g.hedge_max_parallel ?? 2),
       hedge_max_attempts: String(g.hedge_max_attempts ?? 4),
+      hedge_virtual_cache_enabled: !!g.hedge_virtual_cache_enabled,
       response_validation_enabled: !!g.response_validation_enabled,
+      response_validation_virtual_cache_enabled:
+        !!g.response_validation_virtual_cache_enabled,
       response_validation_prefix_bytes: String(
         g.response_validation_prefix_bytes ?? 8192,
       ),
@@ -783,8 +818,19 @@ export function GatewayPage() {
       100,
       Math.min(30000, Math.floor(Number(groupForm.response_validation_prefix_timeout_ms) || 2000)),
     )
+    const maxBillingRateInput = Number(groupForm.max_billing_rate_multiplier)
+    const maxBillingRateMultiplier =
+      Number.isFinite(maxBillingRateInput) && maxBillingRateInput > 0
+        ? Math.min(1_000_000, maxBillingRateInput)
+        : 0
+    const loadBalanceRouteCount = Math.max(
+      1,
+      Math.min(64, Math.floor(Number(groupForm.load_balance_route_count) || 1)),
+    )
     const policy = {
       rate_resort_enabled: groupForm.rate_resort_enabled,
+      max_billing_rate_multiplier: maxBillingRateMultiplier,
+      load_balance_route_count: loadBalanceRouteCount,
       retry_enabled: groupForm.retry_enabled,
       retry_count: retryCount,
       failover_enabled: groupForm.failover_enabled,
@@ -796,7 +842,10 @@ export function GatewayPage() {
       hedge_delay_seconds: hedgeDelaySeconds,
       hedge_max_parallel: hedgeMaxParallel,
       hedge_max_attempts: hedgeMaxAttempts,
+      hedge_virtual_cache_enabled: groupForm.hedge_virtual_cache_enabled,
       response_validation_enabled: groupForm.response_validation_enabled,
+      response_validation_virtual_cache_enabled:
+        groupForm.response_validation_virtual_cache_enabled,
       response_validation_stream_mode: "prefix",
       response_validation_prefix_bytes: prefixBytes,
       response_validation_prefix_timeout_ms: prefixTimeoutMS,
@@ -848,6 +897,45 @@ export function GatewayPage() {
       await loadGroups()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "删除失败")
+    }
+  }
+
+  async function cloneGroup(id: number) {
+    const source = groups.find((g) => g.id === id)
+    if (!source) return
+    const ok = await confirm({
+      title: "复制网关组",
+      description:
+        `将复制“${source.name}”的组策略、路由、模型映射和响应规则。组内客户端密钥会生成新的密钥，原组不受影响。`,
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      const result = await apiFetch<GatewayGroupCloneResult>(
+        `/gateway/groups/${id}/clone`,
+        { method: "POST", body: JSON.stringify({}) },
+      )
+      const clonedSecrets = Object.fromEntries(
+        (result.keys ?? [])
+          .filter((item) => item.key?.id && item.secret)
+          .map((item) => [item.key.id, item.secret]),
+      ) as Record<number, string>
+      pendingCloneSecretsRef.current = {
+        groupID: result.group.id,
+        secrets: clonedSecrets,
+      }
+      await loadGroups()
+      setSelectedGroupID(result.group.id)
+      const keyCount = result.keys?.length ?? 0
+      toast.success(
+        keyCount > 0
+          ? `已复制为“${result.group.name}”，并生成 ${keyCount} 把新客户端密钥`
+          : `已复制为“${result.group.name}”`,
+      )
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "复制网关组失败")
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -1467,6 +1555,7 @@ export function GatewayPage() {
               busy={busy}
               onSelect={setSelectedGroupID}
               onCreate={openCreateGroup}
+              onClone={(id) => void cloneGroup(id)}
               onEdit={openEditGroup}
               onDelete={(id) => void deleteGroup(id)}
               onReorder={(ids) => void reorderGroups(ids)}

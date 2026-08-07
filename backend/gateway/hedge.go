@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bejix/upstream-ops/backend/storage"
 )
 
 const (
@@ -17,7 +19,10 @@ const (
 	maxHedgeAttempts        = 64
 )
 
-var hedgeCleanupTimeout = 5 * time.Second
+var (
+	hedgeCleanupTimeout       = 5 * time.Second
+	hedgeWinnerCleanupTimeout = 100 * time.Millisecond
+)
 
 var (
 	errHedgeExhausted = errors.New("hedge attempts exhausted without an accepted response")
@@ -82,12 +87,14 @@ func (p hedgePolicy) normalized() hedgePolicy {
 }
 
 type hedgeRequest struct {
-	Path     string
-	Model    string
-	Header   http.Header
-	Body     []byte
-	Stream   bool
-	Realtime bool
+	Path                    string
+	Model                   string
+	Header                  http.Header
+	Body                    []byte
+	Stream                  bool
+	Realtime                bool
+	BodyMediaAnalyzed       bool
+	BodyGeneratesMedia      bool
 }
 
 // hedgeEligible excludes operations that can create image/video assets and
@@ -108,6 +115,9 @@ func hedgeEligible(req hedgeRequest) bool {
 	}
 	if mediaGenerationModel(req.Model) {
 		return false
+	}
+	if req.BodyMediaAnalyzed {
+		return !req.BodyGeneratesMedia
 	}
 	if len(req.Body) == 0 {
 		return true
@@ -220,10 +230,27 @@ func mediaGenerationModel(value string) bool {
 	return false
 }
 
+func mappedRouteContainsMediaModel(routes []storage.GatewayRoute, requested string, groupMapping ModelMap) bool {
+	if mediaGenerationModel(requested) {
+		return true
+	}
+	for _, route := range routes {
+		upstream, _ := ResolveModel(requested, ParseModelMapping(route.ModelMappingJSON), groupMapping)
+		if mediaGenerationModel(upstream) {
+			return true
+		}
+	}
+	return false
+}
+
 type hedgeAttemptInfo struct {
 	Number    int
 	Kind      string
 	StartedAt time.Time
+	// Concurrent is true only when this auxiliary attempt was launched while
+	// another attempt was still active. A sequential retry can still use the
+	// hedge scheduler's attempt kind, but it must not receive hedge-only credit.
+	Concurrent bool
 }
 
 type hedgeAttemptOutcome string
@@ -302,7 +329,10 @@ func runHedge[T any](ctx context.Context, eligible bool, policy hedgePolicy, run
 
 	launch := func() {
 		started++
-		info := hedgeAttemptInfo{Number: started, Kind: attemptKindHedge, StartedAt: time.Now()}
+		info := hedgeAttemptInfo{
+			Number: started, Kind: attemptKindHedge, StartedAt: time.Now(),
+			Concurrent: len(active) > 0,
+		}
 		if started == 1 {
 			info.Kind = attemptKindPrimary
 		}
@@ -322,7 +352,7 @@ func runHedge[T any](ctx context.Context, eligible bool, policy hedgePolicy, run
 	for {
 		if err := ctx.Err(); err != nil {
 			cancel()
-			collectActiveHedgeAttempts(active, completions, completed, validate, hooks, false)
+			collectActiveHedgeAttempts(active, completions, completed, validate, hooks, false, hedgeCleanupTimeout)
 			result.Attempts = orderedHedgeAttempts(completed)
 			result.FinishedAt = time.Now()
 			return result, errors.Join(errHedgeCanceled, err)
@@ -378,7 +408,7 @@ func runHedge[T any](ctx context.Context, eligible bool, policy hedgePolicy, run
 			}
 			if terminal {
 				cancel()
-				collectActiveHedgeAttempts(active, completions, completed, validate, hooks, false)
+				collectActiveHedgeAttempts(active, completions, completed, validate, hooks, false, hedgeCleanupTimeout)
 				result.Attempts = orderedHedgeAttempts(completed)
 				result.FinishedAt = time.Now()
 				return result, terminalErr.err
@@ -394,7 +424,11 @@ func runHedge[T any](ctx context.Context, eligible bool, policy hedgePolicy, run
 				if hooks.OnWinner != nil {
 					hooks.OnWinner(attempt)
 				}
-				collectActiveHedgeAttempts(active, completions, completed, validate, hooks, true)
+				// The winner has already been exposed to downstream. Give canceled
+				// losers only a short grace period to publish their final audit data;
+				// a cancellation-resistant upstream must not hold the successful HTTP
+				// response open for the full failure-cleanup timeout.
+				collectActiveHedgeAttempts(active, completions, completed, validate, hooks, true, hedgeWinnerCleanupTimeout)
 				result.Attempts = orderedHedgeAttempts(completed)
 				result.FinishedAt = time.Now()
 				return result, nil
@@ -471,11 +505,15 @@ func collectActiveHedgeAttempts[T any](
 	validate hedgeValidateFunc[T],
 	hooks hedgeHooks[T],
 	winnerChosen bool,
+	timeout time.Duration,
 ) {
 	if len(active) == 0 {
 		return
 	}
-	timer := time.NewTimer(hedgeCleanupTimeout)
+	if timeout <= 0 {
+		timeout = time.Millisecond
+	}
+	timer := time.NewTimer(timeout)
 	defer stopHedgeTimer(timer)
 	for len(active) > 0 {
 		select {

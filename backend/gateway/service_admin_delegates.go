@@ -13,6 +13,13 @@ func (s *Service) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, error
 }
 
 // UpdateGroup 更新网关分组。
+// CloneGroup creates a complete independent gateway group and returns newly
+// generated client secrets once for the management response.
+func (s *Service) CloneGroup(id uint, in CloneGroupInput) (*CloneGroupResult, error) {
+	return s.admin().CloneGroup(id, in)
+}
+
+// UpdateGroup updates a gateway group.
 func (s *Service) UpdateGroup(id uint, in UpdateGroupInput) (*storage.GatewayGroup, error) {
 	return s.admin().UpdateGroup(id, in)
 }
@@ -80,6 +87,11 @@ func (s *Service) CreateProvider(in CreateProviderInput) (*storage.GatewayProvid
 // UpdateProvider 更新直连渠道。
 func (s *Service) UpdateProvider(id uint, in UpdateProviderInput) (*storage.GatewayProvider, error) {
 	return s.admin().UpdateProvider(id, in)
+}
+
+// PreviewProviderModels 拉取直连渠道实时模型并返回当前选择。
+func (s *Service) PreviewProviderModels(ctx context.Context, id uint) (*ProviderModelsPreview, error) {
+	return s.admin().PreviewProviderModels(ctx, id)
 }
 
 // DeleteProvider 删除直连渠道。

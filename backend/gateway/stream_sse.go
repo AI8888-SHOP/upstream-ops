@@ -2,6 +2,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,20 +13,104 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const maxResponsesLifecycleBufferBytes = 1 << 20
+
 func (rt *Runtime) parseSSEEventLines(lines []string) (eventName, data string) {
-	var dataParts []string
+	eventName, data, _ = rt.parseSSEEventLinesWithPayload(lines)
+	return eventName, data
+}
+
+// parseSSEEventLinesWithPayload parses an event and determines whether it has
+// a non-comment SSE field in one pass. Most events have one data line, so keep
+// that line directly and allocate a builder only for the uncommon multiline
+// form.
+func (rt *Runtime) parseSSEEventLinesWithPayload(lines []string) (eventName, data string, hasPayload bool) {
+	var firstData string
+	var dataBuilder strings.Builder
+	dataSeen := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, ":") {
+			continue
+		}
+		hasPayload = true
 		if strings.HasPrefix(trimmed, "event:") {
 			eventName = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
 			continue
 		}
 		if strings.HasPrefix(trimmed, "data:") {
-			dataParts = append(dataParts, strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+			part := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if !dataSeen {
+				firstData = part
+				dataSeen = true
+				continue
+			}
+			if dataBuilder.Len() == 0 {
+				dataBuilder.Grow(len(firstData) + len(part) + 1)
+				dataBuilder.WriteString(firstData)
+			}
+			dataBuilder.WriteByte('\n')
+			dataBuilder.WriteString(part)
 		}
 	}
-	data = strings.Join(dataParts, "\n")
-	return eventName, data
+	if dataBuilder.Len() > 0 {
+		data = dataBuilder.String()
+	} else {
+		data = firstData
+	}
+	return eventName, data, hasPayload
+}
+
+// responsesSSEEventIsLifecycle reports metadata-only Responses events. They
+// describe request state but do not contain client-visible model output.
+func responsesSSEEventIsLifecycle(eventName, data string) bool {
+	lifecycle, _ := classifyResponsesSSEEvent(eventName, data)
+	return lifecycle
+}
+
+// classifyResponsesSSEEvent derives lifecycle and terminal state from one
+// lightweight pass over the event envelope. Some providers send a lifecycle
+// event name while the nested response status is already terminal, so keep the
+// two flags independent.
+func classifyResponsesSSEEvent(eventName, data string) (lifecycle, terminal bool) {
+	eventType := []byte(strings.TrimSpace(eventName))
+	payload := bytes.TrimSpace([]byte(data))
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return false, true
+	}
+	if len(payload) > 0 {
+		if payloadType := responsesPayloadTypeBytes(payload); len(payloadType) > 0 {
+			eventType = payloadType
+		}
+	}
+	lifecycle = isResponsesLifecycleEventBytes(eventType)
+	terminal = isResponsesTerminalEventBytes(eventType)
+	if terminal || len(payload) == 0 {
+		return lifecycle, terminal
+	}
+	if bytes.Contains(payload, []byte(`"error"`)) {
+		if _, ok := partialJSONRootMember(payload, "error"); ok {
+			return lifecycle, true
+		}
+	}
+	if !bytes.Contains(payload, []byte(`"response"`)) {
+		return lifecycle, false
+	}
+	response, ok := partialJSONRootMember(payload, "response")
+	if !ok {
+		return lifecycle, false
+	}
+	statusValue, ok := partialJSONRootMember(response, "status")
+	if !ok {
+		return lifecycle, false
+	}
+	parser := partialJSONParser{data: statusValue}
+	status, _ := parser.parseString()
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "done", "failed", "incomplete", "error", "canceled", "cancelled":
+		terminal = true
+	}
+	return lifecycle, terminal
 }
 
 // sseEventHasPayload 判断 SSE 事件是否包含可提交的有效载荷（非纯注释）。
@@ -72,13 +157,20 @@ func (rt *Runtime) sseFrameIsTerminal(frame []byte) bool {
 	if strings.Contains(s, "event: response.completed") || strings.Contains(s, "event:response.completed") ||
 		strings.Contains(s, "event: response.done") || strings.Contains(s, "event:response.done") ||
 		strings.Contains(s, "event: response.failed") || strings.Contains(s, "event:response.failed") ||
-		strings.Contains(s, "event: response.incomplete") || strings.Contains(s, "event:response.incomplete") {
+		strings.Contains(s, "event: response.incomplete") || strings.Contains(s, "event:response.incomplete") ||
+		strings.Contains(s, "event: response.error") || strings.Contains(s, "event:response.error") ||
+		strings.Contains(s, "event: response.canceled") || strings.Contains(s, "event:response.canceled") ||
+		strings.Contains(s, "event: response.cancelled") || strings.Contains(s, "event:response.cancelled") {
 		return true
 	}
 	if strings.Contains(s, `"type":"response.completed"`) || strings.Contains(s, `"type": "response.completed"`) ||
 		strings.Contains(s, `"type":"response.done"`) || strings.Contains(s, `"type": "response.done"`) ||
 		strings.Contains(s, `"type":"response.failed"`) || strings.Contains(s, `"type": "response.failed"`) ||
-		strings.Contains(s, `"type":"response.incomplete"`) || strings.Contains(s, `"type": "response.incomplete"`) {
+		strings.Contains(s, `"type":"response.incomplete"`) || strings.Contains(s, `"type": "response.incomplete"`) ||
+		strings.Contains(s, `"type":"response.error"`) || strings.Contains(s, `"type": "response.error"`) ||
+		strings.Contains(s, `"type":"response.canceled"`) || strings.Contains(s, `"type": "response.canceled"`) ||
+		strings.Contains(s, `"type":"response.cancelled"`) || strings.Contains(s, `"type": "response.cancelled"`) ||
+		strings.Contains(s, `"type":"error"`) || strings.Contains(s, `"type": "error"`) {
 		return true
 	}
 	return false
@@ -181,6 +273,9 @@ func (rt *Runtime) mergeStreamUsage(dst *UsageTokens, data string, kind protocol
 	if dst == nil || data == "" {
 		return
 	}
+	if !mayContainUsageFields(data, kind) {
+		return
+	}
 	var u UsageTokens
 	if protocol.NormalizeKind(kind) == protocol.KindAnthropic {
 		u = ParseAnthropicUsage([]byte(data))
@@ -207,6 +302,89 @@ func (rt *Runtime) mergeStreamUsage(dst *UsageTokens, data string, kind protocol
 		*dst = mergeUsagePreferNewer(*dst, u)
 	}
 }
+
+// mayContainUsageFields is intentionally a cheap substring prefilter. Most
+// SSE chunks are ordinary content deltas and do not contain usage at all;
+// avoiding json.Unmarshal for those chunks removes a large amount of
+// allocation and CPU from the streaming hot path. The actual parsers remain
+// authoritative.
+func mayContainUsageFields(data string, kind protocolKind) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, marker := range usageFieldMarkers {
+		if strings.Contains(data, marker) {
+			return true
+		}
+	}
+	// JSON permits escaped object keys. Falling through to the authoritative
+	// parser preserves accounting for payloads such as us\u0061ge even though
+	// the cheap literal markers cannot recognize the decoded field name.
+	if strings.Contains(data, `\u`) {
+		return true
+	}
+	// Some providers emit bare numeric token fields without JSON quoting in a
+	// pre-parsed adapter. Keep the conservative fallback for non-JSON data.
+	return protocol.NormalizeKind(kind) == protocol.KindAnthropic && strings.Contains(data, anthropicInputTokensMarker)
+}
+
+// mayContainUsageFieldsBytes is the allocation-free variant used by the
+// virtual-cache SSE transformer. Keep the string form above for parsers that
+// already have a string payload, while the forwarding hot path can inspect
+// the original event bytes before converting them to a string.
+func mayContainUsageFieldsBytes(data []byte, kind protocolKind) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, marker := range usageFieldMarkerBytes {
+		if bytes.Contains(data, marker) {
+			return true
+		}
+	}
+	if bytes.Contains(data, []byte(`\u`)) {
+		return true
+	}
+	return protocol.NormalizeKind(kind) == protocol.KindAnthropic && bytes.Contains(data, []byte(anthropicInputTokensMarker))
+}
+
+// Keep these byte slices package-global.  This function runs for every SSE
+// event; constructing a marker slice on each call would turn a cheap filter
+// into an allocation-heavy hot path.
+var usageFieldMarkers = []string{
+	`"usage"`,
+	`"prompt_tokens"`,
+	`"completion_tokens"`,
+	`"input_tokens"`,
+	`"output_tokens"`,
+	`"prompt_cache_hit_tokens"`,
+	`"cache_hit_tokens"`,
+	`"cache_read_input_tokens"`,
+	`"cached_tokens"`,
+	`"cache_read`,
+	`"cache_creation`,
+	`"cache_write`,
+	`"image_tokens"`,
+	`"reasoning_tokens"`,
+}
+
+var usageFieldMarkerBytes = [][]byte{
+	[]byte(`"usage"`),
+	[]byte(`"prompt_tokens"`),
+	[]byte(`"completion_tokens"`),
+	[]byte(`"input_tokens"`),
+	[]byte(`"output_tokens"`),
+	[]byte(`"prompt_cache_hit_tokens"`),
+	[]byte(`"cache_hit_tokens"`),
+	[]byte(`"cache_read_input_tokens"`),
+	[]byte(`"cached_tokens"`),
+	[]byte(`"cache_read`),
+	[]byte(`"cache_creation`),
+	[]byte(`"cache_write`),
+	[]byte(`"image_tokens"`),
+	[]byte(`"reasoning_tokens"`),
+}
+
+var anthropicInputTokensMarker = "input_tokens"
 
 func (rt *Runtime) finalizeStreamTokens(live UsageTokens, raw []byte, kind protocolKind) UsageTokens {
 	if usageNonEmpty(live) {

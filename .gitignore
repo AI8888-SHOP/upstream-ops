@@ -51,6 +51,7 @@ Thumbs.db
 # Docker volumes
 data/
 postgres-data/
+backups/
 
 # Claude / AI tooling
 .claude/

@@ -8,14 +8,31 @@ import (
 )
 
 // Channels 渠道仓库。
-type Channels struct{ db *gorm.DB }
+type Channels struct {
+	db         *gorm.DB
+	readCaches *storageReadCaches
+}
 
-func NewChannels(db *gorm.DB) *Channels { return &Channels{db: db} }
+func NewChannels(db *gorm.DB) *Channels {
+	return &Channels{db: db, readCaches: readCachesForDB(db)}
+}
 
-func (r *Channels) Create(c *Channel) error { return r.db.Create(c).Error }
-func (r *Channels) Update(c *Channel) error { return r.db.Save(c).Error }
+func (r *Channels) Create(c *Channel) error {
+	err := r.db.Create(c).Error
+	if err == nil {
+		r.readCaches.channels.invalidate(c.ID)
+	}
+	return err
+}
+func (r *Channels) Update(c *Channel) error {
+	err := r.db.Save(c).Error
+	if err == nil {
+		r.readCaches.channels.invalidate(c.ID)
+	}
+	return err
+}
 func (r *Channels) Delete(id uint) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var channel Channel
 		if err := tx.Select("id", "name").First(&channel, id).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -48,13 +65,21 @@ func (r *Channels) Delete(id uint) error {
 		}
 		return tx.Delete(&Channel{}, id).Error
 	})
+	if err == nil {
+		r.readCaches.channels.invalidate(id)
+	}
+	return err
 }
 func (r *Channels) FindByID(id uint) (*Channel, error) {
-	var c Channel
-	if err := r.db.First(&c, id).Error; err != nil {
+	item, err := r.readCaches.channels.load(id, func() (Channel, error) {
+		var c Channel
+		err := r.db.First(&c, id).Error
+		return c, err
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
-	return &c, nil
+	return &item, nil
 }
 func (r *Channels) List() ([]Channel, error) {
 	var list []Channel
@@ -92,19 +117,31 @@ func (r *Channels) ListMonitorEnabled() ([]Channel, error) {
 	return list, nil
 }
 func (r *Channels) UpdateBalance(id uint, balance float64, at any, lastErr string) error {
-	return r.db.Model(&Channel{}).Where("id = ?", id).Updates(map[string]any{
+	err := r.db.Model(&Channel{}).Where("id = ?", id).Updates(map[string]any{
 		"last_balance":    balance,
 		"last_balance_at": at,
 		"last_error":      lastErr,
 	}).Error
+	if err == nil {
+		r.readCaches.channels.invalidate(id)
+	}
+	return err
 }
 
 func (r *Channels) UpdateCosts(id uint, todayCost float64, totalCost float64) error {
-	return r.db.Model(&Channel{}).Where("id = ?", id).Updates(map[string]any{
+	err := r.db.Model(&Channel{}).Where("id = ?", id).Updates(map[string]any{
 		"today_cost": todayCost,
 		"total_cost": totalCost,
 	}).Error
+	if err == nil {
+		r.readCaches.channels.invalidate(id)
+	}
+	return err
 }
 func (r *Channels) SetLastError(id uint, msg string) error {
-	return r.db.Model(&Channel{}).Where("id = ?", id).Update("last_error", msg).Error
+	err := r.db.Model(&Channel{}).Where("id = ?", id).Update("last_error", msg).Error
+	if err == nil {
+		r.readCaches.channels.invalidate(id)
+	}
+	return err
 }

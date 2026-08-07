@@ -355,7 +355,7 @@ export function UsagePanel({
       {
         label: "额外成本",
         value: money(usageStats.extra_attempt_cost ?? 0),
-        hint: "loser/拒绝 attempt",
+        hint: `attempt ${money(Math.max(0, (usageStats.extra_attempt_cost ?? 0) - (usageStats.virtual_cache_subsidy_cost ?? 0)))} + virtual cache ${money(usageStats.virtual_cache_subsidy_cost ?? 0)}`,
       },
       {
         label: "平均耗时",

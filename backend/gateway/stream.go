@@ -13,7 +13,89 @@ const (
 	defaultStreamKeepalive   = 15 * time.Second
 	defaultStreamIdleTimeout = 120 * time.Second
 	maxSSELineSize           = 8 << 20 // 8 MiB
+	// Keep the first useful event and terminal frames immediate, while
+	// coalescing ordinary token frames in a small bounded window. This avoids
+	// a syscall and scheduler wakeup for every token on long-lived streams.
+	streamFlushInterval = 8 * time.Millisecond
+	streamFlushBytes    = 16 << 10
 )
+
+type streamFlushState struct {
+	bytes     int
+	lastFlush time.Time
+	timer     *time.Timer
+	armed     bool
+}
+
+func (s *streamFlushState) add(frames [][]byte) {
+	if s == nil {
+		return
+	}
+	for _, frame := range frames {
+		s.bytes += len(frame)
+	}
+}
+
+func (s *streamFlushState) shouldFlush(now time.Time) bool {
+	if s == nil || s.bytes <= 0 {
+		return false
+	}
+	if s.bytes >= streamFlushBytes || s.lastFlush.IsZero() {
+		return true
+	}
+	return now.Sub(s.lastFlush) >= streamFlushInterval
+}
+
+func (s *streamFlushState) channel() <-chan time.Time {
+	if s == nil || s.bytes <= 0 {
+		return nil
+	}
+	delay := streamFlushInterval
+	if !s.lastFlush.IsZero() {
+		delay = time.Until(s.lastFlush.Add(streamFlushInterval))
+		if delay < 0 {
+			delay = 0
+		}
+	}
+	if s.timer == nil {
+		s.timer = time.NewTimer(delay)
+	} else if !s.armed {
+		s.timer.Reset(delay)
+	}
+	s.armed = true
+	return s.timer.C
+}
+
+func (s *streamFlushState) reset(now time.Time) {
+	if s == nil {
+		return
+	}
+	s.bytes = 0
+	s.lastFlush = now
+	if s.timer != nil {
+		if !s.timer.Stop() {
+			select {
+			case <-s.timer.C:
+			default:
+			}
+		}
+		s.armed = false
+	}
+}
+
+func (s *streamFlushState) stop() {
+	if s == nil || s.timer == nil {
+		return
+	}
+	if !s.timer.Stop() {
+		select {
+		case <-s.timer.C:
+		default:
+		}
+	}
+	s.armed = false
+	s.timer = nil
+}
 
 // streamAttemptResult 单次流式转发结果。
 // Committed=true 表示已向客户端写出有效 SSE，禁止 retry/failover。

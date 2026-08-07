@@ -3,6 +3,8 @@ package config
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/bejix/upstream-ops/backend/storage"
 )
 
 func TestLoadAppliesUpstreamDefaults(t *testing.T) {
@@ -15,6 +17,20 @@ func TestLoadAppliesUpstreamDefaults(t *testing.T) {
 	}
 	if cfg.Upstream.UserAgent != DefaultUpstreamUserAgent {
 		t.Fatalf("user agent = %q", cfg.Upstream.UserAgent)
+	}
+	if cfg.Scheduler.Retention.GatewayUsageLogsDays != 90 {
+		t.Fatalf("gateway usage retention = %d", cfg.Scheduler.Retention.GatewayUsageLogsDays)
+	}
+}
+
+func TestDatabaseConfigUsesDriverSpecificDefaultPort(t *testing.T) {
+	postgres := (DatabaseConfig{Driver: string(storage.DBDriverPostgres)}).ToStorageConfig()
+	if postgres.Port != 5432 {
+		t.Fatalf("postgres default port = %d, want 5432", postgres.Port)
+	}
+	mysql := (DatabaseConfig{Driver: string(storage.DBDriverMySQL)}).ToStorageConfig()
+	if mysql.Port != 3306 {
+		t.Fatalf("mysql default port = %d, want 3306", mysql.Port)
 	}
 }
 

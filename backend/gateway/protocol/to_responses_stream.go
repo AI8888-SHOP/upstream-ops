@@ -37,11 +37,13 @@ type AnthropicToResponsesStream struct {
 	// 已完成的 output items（completed 事件用）
 	finished []any
 
-	inputTokens  int
-	outputTokens int
-	cacheRead    int
-	cacheCreate  int
-	stopReason   string
+	inputTokens   int
+	outputTokens  int
+	cacheRead     int
+	cacheCreate   int
+	cacheCreate5m int
+	cacheCreate1h int
+	stopReason    string
 }
 
 func NewAnthropicToResponsesStream(model string) *AnthropicToResponsesStream {
@@ -109,15 +111,7 @@ func (s *AnthropicToResponsesStream) handleMessageStart(payload map[string]any) 
 			s.Model = m
 		}
 		if u, ok := msg["usage"].(map[string]any); ok {
-			if v, ok := asInt(u["input_tokens"]); ok {
-				s.inputTokens = v
-			}
-			if v, ok := asInt(u["cache_read_input_tokens"]); ok {
-				s.cacheRead = v
-			}
-			if v, ok := asInt(u["cache_creation_input_tokens"]); ok {
-				s.cacheCreate = v
-			}
+			s.ingestUsage(u)
 		}
 	}
 	return s.ensureCreated()
@@ -318,18 +312,7 @@ func (s *AnthropicToResponsesStream) handleBlockStop() [][]byte {
 
 func (s *AnthropicToResponsesStream) handleMessageDelta(payload map[string]any) [][]byte {
 	if u, ok := payload["usage"].(map[string]any); ok {
-		if v, ok := asInt(u["output_tokens"]); ok {
-			s.outputTokens = v
-		}
-		if v, ok := asInt(u["input_tokens"]); ok && v > 0 {
-			s.inputTokens = v
-		}
-		if v, ok := asInt(u["cache_read_input_tokens"]); ok {
-			s.cacheRead = v
-		}
-		if v, ok := asInt(u["cache_creation_input_tokens"]); ok {
-			s.cacheCreate = v
-		}
+		s.ingestUsage(u)
 	}
 	if d, ok := payload["delta"].(map[string]any); ok {
 		if sr, ok := d["stop_reason"].(string); ok {
@@ -337,6 +320,41 @@ func (s *AnthropicToResponsesStream) handleMessageDelta(payload map[string]any) 
 		}
 	}
 	return nil
+}
+
+func (s *AnthropicToResponsesStream) ingestUsage(usage map[string]any) {
+	if s == nil || usage == nil {
+		return
+	}
+	if value, ok := asInt(usage["input_tokens"]); ok {
+		s.inputTokens = value
+	}
+	if value, ok := asInt(usage["output_tokens"]); ok {
+		s.outputTokens = value
+	}
+	if hasUsageField(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens") {
+		s.cacheRead = firstPositiveUsageInt(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens")
+	}
+	fiveMinute, oneHour := anthropicCacheCreationBreakdown(usage)
+	if hasUsageField(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens") || fiveMinute > 0 || oneHour > 0 {
+		s.cacheCreate = firstPositiveUsageInt(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens")
+		if s.cacheCreate == 0 {
+			s.cacheCreate = fiveMinute + oneHour
+		}
+	}
+	if fiveMinute > 0 || oneHour > 0 {
+		s.cacheCreate5m = fiveMinute
+		s.cacheCreate1h = oneHour
+	}
+}
+
+func hasUsageField(usage map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if _, exists := usage[key]; exists {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *AnthropicToResponsesStream) handleMessageStop() [][]byte {
@@ -445,18 +463,17 @@ func (s *AnthropicToResponsesStream) emitCompleted(status string) [][]byte {
 	}
 	s.completedSent = true
 	s.done = true
-	totalIn := s.inputTokens + s.cacheRead + s.cacheCreate
-	usage := map[string]any{
-		"input_tokens":  totalIn,
-		"output_tokens": s.outputTokens,
-		"total_tokens":  totalIn + s.outputTokens,
+	anthropicUsage := map[string]any{
+		"input_tokens": s.inputTokens, "output_tokens": s.outputTokens,
+		"cache_read_input_tokens": s.cacheRead, "cache_creation_input_tokens": s.cacheCreate,
 	}
-	if s.cacheRead > 0 {
-		usage["input_tokens_details"] = map[string]any{"cached_tokens": s.cacheRead}
+	if s.cacheCreate5m > 0 || s.cacheCreate1h > 0 {
+		anthropicUsage["cache_creation"] = map[string]any{
+			"ephemeral_5m_input_tokens": s.cacheCreate5m,
+			"ephemeral_1h_input_tokens": s.cacheCreate1h,
+		}
 	}
-	if s.cacheCreate > 0 {
-		usage["cache_creation_input_tokens"] = s.cacheCreate
-	}
+	usage := openAIUsageToResponses(anthropicUsageToOpenAI(anthropicUsage))
 	output := s.finished
 	if output == nil {
 		output = []any{}
@@ -911,15 +928,7 @@ func (s *ChatToResponsesStream) emitCompleted(status string) [][]byte {
 	s.completedSent = true
 	usage := map[string]any{}
 	if s.usage != nil {
-		if v, ok := asInt(s.usage["prompt_tokens"]); ok {
-			usage["input_tokens"] = v
-		}
-		if v, ok := asInt(s.usage["completion_tokens"]); ok {
-			usage["output_tokens"] = v
-		}
-		in, _ := asInt(usage["input_tokens"])
-		out, _ := asInt(usage["output_tokens"])
-		usage["total_tokens"] = in + out
+		usage = openAIUsageToResponses(s.usage)
 	}
 	output := s.finished
 	if output == nil {

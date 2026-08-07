@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"sync"
 
 	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 )
@@ -16,6 +17,68 @@ const (
 	protocolAnthropic = protocol.KindAnthropic
 )
 
+type preparedUpstreamRequestKey struct {
+	inbound       protocolKind
+	upstream      protocolKind
+	requestedModel string
+	upstreamModel  string
+	stream         bool
+	inboundPath    string
+}
+
+type preparedUpstreamRequest struct {
+	body      []byte
+	path      string
+	converted bool
+	err       error
+}
+
+// upstreamRequestPrepareCache is request-scoped. Retry and hedge attempts
+// commonly share the same protocol/model tuple, so the expensive JSON rewrite
+// or protocol conversion only needs to run once for that tuple.
+type upstreamRequestPrepareCache struct {
+	mu      sync.Mutex
+	entries map[preparedUpstreamRequestKey]preparedUpstreamRequest
+}
+
+func (cache *upstreamRequestPrepareCache) prepare(
+	svc *Service,
+	body []byte,
+	inbound, upstream protocolKind,
+	requestedModel, upstreamModel string,
+	stream bool,
+	inboundPath string,
+) (fwd []byte, upstreamPath string, converted bool, err error) {
+	if cache == nil {
+		return svc.prepareUpstreamRequestKnownModel(
+			body, inbound, upstream, requestedModel, upstreamModel, stream, inboundPath,
+		)
+	}
+	key := preparedUpstreamRequestKey{
+		inbound:        protocol.NormalizeKind(inbound),
+		upstream:       protocol.NormalizeKind(upstream),
+		requestedModel: strings.TrimSpace(requestedModel),
+		upstreamModel:  strings.TrimSpace(upstreamModel),
+		stream:         stream,
+		inboundPath:    strings.TrimSpace(inboundPath),
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cached, ok := cache.entries[key]; ok {
+		return cached.body, cached.path, cached.converted, cached.err
+	}
+	fwd, upstreamPath, converted, err = svc.prepareUpstreamRequestKnownModel(
+		body, inbound, upstream, requestedModel, upstreamModel, stream, inboundPath,
+	)
+	if cache.entries == nil {
+		cache.entries = make(map[preparedUpstreamRequestKey]preparedUpstreamRequest)
+	}
+	cache.entries[key] = preparedUpstreamRequest{
+		body: fwd, path: upstreamPath, converted: converted, err: err,
+	}
+	return fwd, upstreamPath, converted, err
+}
+
 func (svc *Service) prepareUpstreamRequest(
 	body []byte,
 	inbound, upstream protocolKind,
@@ -23,10 +86,23 @@ func (svc *Service) prepareUpstreamRequest(
 	stream bool,
 	inboundPath string,
 ) (fwd []byte, upstreamPath string, converted bool, err error) {
+	return svc.prepareUpstreamRequestKnownModel(body, inbound, upstream, ExtractModelFromBody(body), model, stream, inboundPath)
+}
+
+func (svc *Service) prepareUpstreamRequestKnownModel(
+	body []byte,
+	inbound, upstream protocolKind,
+	requestedModel, model string,
+	stream bool,
+	inboundPath string,
+) (fwd []byte, upstreamPath string, converted bool, err error) {
 	in := protocol.NormalizeKind(inbound)
 	up := protocol.NormalizeKind(upstream)
 	upstreamPath = protocol.PathFor(up, inboundPath)
-	fwd = RewriteModelInBody(body, model)
+	fwd = body
+	if strings.TrimSpace(requestedModel) != strings.TrimSpace(model) {
+		fwd = RewriteModelInBody(body, model)
+	}
 	if !protocol.NeedsBodyConvert(in, up) {
 		// 同形态：仍可能需要改 path（例如入站 chat、上游 responses 不走这里）
 		if protocol.IsOpenAIFamily(in) && protocol.IsOpenAIFamily(up) &&

@@ -25,6 +25,8 @@ export type GroupFormState = {
   description: string
   status: "active" | "disabled"
   rate_resort_enabled: boolean
+  max_billing_rate_multiplier: string
+  load_balance_route_count: string
   retry_enabled: boolean
   retry_count: string
   failover_enabled: boolean
@@ -37,7 +39,9 @@ export type GroupFormState = {
   hedge_delay_seconds: string
   hedge_max_parallel: string
   hedge_max_attempts: string
+  hedge_virtual_cache_enabled: boolean
   response_validation_enabled: boolean
+  response_validation_virtual_cache_enabled: boolean
   response_validation_prefix_bytes: string
   response_validation_prefix_timeout_ms: string
   /** 组级统一 User-Agent；路由选「组」时使用 */
@@ -287,7 +291,7 @@ export function resolveModelSources(
       continue
     }
     for (const r of matched) {
-      if (r.enabled === false) continue
+      if (r.enabled === false || r.rate_limit_auto_disabled) continue
       push({
         route_id: r.id,
         channel_id: cid,
@@ -346,7 +350,8 @@ export function routeAccountRate(
   groups: RateSnapshot[],
 ): number {
   if (route.rate_convert_mode === "custom") {
-    return Number(route.rate_convert_value) || 0
+    const custom = Number(route.rate_convert_value)
+    return Number.isFinite(custom) ? custom : 0
   }
   const sourceRatio = findSourceGroupRatio(
     groups,
@@ -380,11 +385,22 @@ export function routeEffectiveRate(
     }
     const pid = Number(route.gateway_provider_id) || 0
     const p = providers.find((x) => x.id === pid)
-    return p?.default_billing_rate && p.default_billing_rate > 0
-      ? p.default_billing_rate
+    const providerRate = Number(p?.default_billing_rate)
+    return Number.isFinite(providerRate) && providerRate > 0
+      ? providerRate
       : 1
   }
   return routeAccountRate(route, groups)
+}
+
+function compareRouteRates(a: unknown, b: unknown, direction: number) {
+  const rateA = Number(a)
+  const rateB = Number(b)
+  const finiteA = Number.isFinite(rateA)
+  const finiteB = Number.isFinite(rateB)
+  if (finiteA !== finiteB) return finiteA ? -1 : 1
+  if (!finiteA) return 0
+  return (rateA - rateB) * direction
 }
 
 /**
@@ -409,7 +425,7 @@ export function sortGatewayRouteRows(
       }
     })
     .sort((a, b) => {
-      const rateDiff = (a.rate - b.rate) * dir
+      const rateDiff = compareRouteRates(a.rate, b.rate, dir)
       if (rateDiff !== 0) return rateDiff
       const wa = Number(a.route.weight) || 1
       const wb = Number(b.route.weight) || 1
@@ -491,6 +507,8 @@ export const emptyGroupForm = (): GroupFormState => ({
   description: "",
   status: "active",
   rate_resort_enabled: false,
+  max_billing_rate_multiplier: "0",
+  load_balance_route_count: "1",
   retry_enabled: true,
   retry_count: "0",
   failover_enabled: true,
@@ -502,7 +520,9 @@ export const emptyGroupForm = (): GroupFormState => ({
   hedge_delay_seconds: "10",
   hedge_max_parallel: "2",
   hedge_max_attempts: "4",
+  hedge_virtual_cache_enabled: false,
   response_validation_enabled: false,
+  response_validation_virtual_cache_enabled: false,
   response_validation_prefix_bytes: "8192",
   response_validation_prefix_timeout_ms: "2000",
   user_agent: "",

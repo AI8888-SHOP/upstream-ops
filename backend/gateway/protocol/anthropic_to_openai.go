@@ -112,7 +112,7 @@ func AnthropicToOpenAIRequest(body []byte, model string, stream bool) ([]byte, e
 				"function": map[string]any{
 					"name":        tm["name"],
 					"description": tm["description"],
-					"parameters":   tm["input_schema"],
+					"parameters":  tm["input_schema"],
 				},
 			})
 		}
@@ -175,16 +175,7 @@ func OpenAIToAnthropicResponse(body []byte, model string) ([]byte, error) {
 	}
 	usage := map[string]any{}
 	if u, ok := in["usage"].(map[string]any); ok {
-		inTok, _ := asInt(u["prompt_tokens"])
-		outTok, _ := asInt(u["completion_tokens"])
-		usage["input_tokens"] = inTok
-		usage["output_tokens"] = outTok
-		if v, ok := asInt(u["cache_creation_input_tokens"]); ok {
-			usage["cache_creation_input_tokens"] = v
-		}
-		if v, ok := asInt(u["cache_read_input_tokens"]); ok {
-			usage["cache_read_input_tokens"] = v
-		}
+		usage = openAIUsageToAnthropic(u)
 	}
 	out := map[string]any{
 		"id":          id,

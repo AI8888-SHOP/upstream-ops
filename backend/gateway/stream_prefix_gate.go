@@ -8,10 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/gin-gonic/gin"
 )
 
-var errStreamGateLost = errors.New("stream attempt lost before downstream commit")
+var (
+	errStreamGateLost        = errors.New("stream attempt lost before downstream commit")
+	errStreamGateBufferLimit = errors.New("stream pre-commit buffer limit exceeded")
+)
 
 func streamWriterActuallyCommitted(c *gin.Context) bool {
 	if c == nil || c.Writer == nil {
@@ -41,9 +45,11 @@ type streamPrefixGateWriter struct {
 	winner    bool
 	committed bool
 	commitErr error
+	finished  bool
 	rejection validationResult
 	lateMatch validationResult
 	timer     *timeTimer
+	virtualCache *virtualCacheSSETransformer
 }
 
 // timeTimer keeps the production implementation testable without exposing a
@@ -101,17 +107,37 @@ func (g *streamPrefixGateWriter) Write(payload []byte) (int, error) {
 		if result := g.validator.Consume(payload); result.IsRejected() && result.PostCommit && !g.lateMatch.IsRejected() {
 			g.lateMatch = result
 		}
+		out := payload
+		if g.virtualCache != nil {
+			out = g.virtualCache.Transform(payload, false)
+		}
 		downstream := g.downstream
 		g.mu.Unlock()
-		return downstream.Write(payload)
+		if len(out) > 0 {
+			if _, err := downstream.Write(out); err != nil {
+				return 0, err
+			}
+		}
+		return len(payload), nil
 	}
 
 	if g.size < 0 {
 		g.size = 0
 	}
 	g.size += len(payload)
-	g.buffer = append(g.buffer, payload...)
+	responsesPrefixHeld := g.validator.holdsResponsesPrefix()
+	bufferWouldOverflow := responsesPrefixHeld && len(g.buffer)+len(payload) > maxResponsesPreCommitBytes
+	if bufferWouldOverflow {
+		g.stopTimerLocked()
+		g.mu.Unlock()
+		return 0, errStreamGateBufferLimit
+	}
 	result := g.validator.Consume(payload)
+	if g.validator.responsesPreCommitOverflow() {
+		g.stopTimerLocked()
+		g.mu.Unlock()
+		return 0, errStreamGateBufferLimit
+	}
 	if result.IsRejected() && !result.PostCommit {
 		g.rejection = result
 		g.stopTimerLocked()
@@ -122,6 +148,7 @@ func (g *streamPrefixGateWriter) Write(payload []byte) (int, error) {
 	if result.IsRejected() && result.PostCommit && !g.lateMatch.IsRejected() {
 		g.lateMatch = result
 	}
+	g.buffer = append(g.buffer, payload...)
 	if result.IsAccepted() || g.validator.prefixReady {
 		g.stopTimerLocked()
 		g.signalReadyLocked(acceptedValidation())
@@ -194,6 +221,15 @@ func (g *streamPrefixGateWriter) Unwrap() http.ResponseWriter {
 
 func (g *streamPrefixGateWriter) Ready() <-chan validationResult { return g.ready }
 
+func (g *streamPrefixGateWriter) EnableVirtualCache(kind protocol.Kind) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.committed || g.virtualCache != nil {
+		return
+	}
+	g.virtualCache = newVirtualCacheSSETransformer(kind)
+}
+
 func (g *streamPrefixGateWriter) Win() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -215,8 +251,12 @@ func (g *streamPrefixGateWriter) Win() error {
 		g.downstream.Header()[key] = copied
 	}
 	g.downstream.WriteHeader(g.status)
-	if len(g.buffer) > 0 {
-		_, g.commitErr = g.downstream.Write(g.buffer)
+	buffer := g.buffer
+	if g.virtualCache != nil {
+		buffer = g.virtualCache.Transform(buffer, g.finished)
+	}
+	if len(buffer) > 0 {
+		_, g.commitErr = g.downstream.Write(buffer)
 	}
 	if g.commitErr == nil {
 		g.downstream.Flush()
@@ -243,10 +283,22 @@ func (g *streamPrefixGateWriter) Lose() {
 func (g *streamPrefixGateWriter) Finish() validationResult {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.finished = true
+	if g.committed && g.virtualCache != nil && g.commitErr == nil {
+		if tail := g.virtualCache.Transform(nil, true); len(tail) > 0 {
+			_, g.commitErr = g.downstream.Write(tail)
+			if g.commitErr == nil {
+				g.downstream.Flush()
+			}
+		}
+	}
 	if g.rejection.IsRejected() {
 		return g.rejection
 	}
 	if g.committed {
+		if late := g.validator.AuditPostCommit(); late.IsRejected() {
+			g.lateMatch = late
+		}
 		if g.lateMatch.IsRejected() {
 			return g.lateMatch
 		}
@@ -255,6 +307,9 @@ func (g *streamPrefixGateWriter) Finish() validationResult {
 	result := g.validator.Finalize()
 	if result.IsRejected() {
 		g.rejection = result
+	}
+	if late := g.validator.AuditPostCommit(); late.IsRejected() {
+		g.lateMatch = late
 	}
 	g.stopTimerLocked()
 	g.signalReadyLocked(result)
@@ -265,6 +320,18 @@ func (g *streamPrefixGateWriter) DownstreamCommitted() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.committed
+}
+
+func (g *streamPrefixGateWriter) CommitError() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.commitErr
+}
+
+func (g *streamPrefixGateWriter) VirtualCacheApplied() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.virtualCache != nil && g.virtualCache.Applied()
 }
 
 func (g *streamPrefixGateWriter) Rejection() validationResult {

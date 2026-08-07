@@ -101,13 +101,15 @@ func parseUsageMapSub2API(u map[string]any) UsageTokens {
 	return out
 }
 
-// openAICacheReadTokensFromUsage 对齐 sub2api：
-// nested Exists 即返回（含 0）；否则再看扁平正数字段。
+// openAICacheReadTokensFromUsage follows Sub2API's nested-field order while
+// ignoring stale zero aliases for upstream cost accounting.
 func openAICacheReadTokensFromUsage(u map[string]any) int {
 	for _, key := range []string{"input_tokens_details", "prompt_tokens_details"} {
 		if d, ok := u[key].(map[string]any); ok {
 			if _, exists := d["cached_tokens"]; exists {
-				return max0(mapInt(d, "cached_tokens"))
+				if value := max0(mapInt(d, "cached_tokens")); value > 0 {
+					return value
+				}
 			}
 		}
 	}
@@ -121,22 +123,35 @@ func openAICacheReadTokensFromUsage(u map[string]any) int {
 }
 
 func openAICacheCreationTokensFromUsage(u map[string]any) int {
-	for _, key := range []string{"input_tokens_details", "prompt_tokens_details"} {
-		if d, ok := u[key].(map[string]any); ok {
-			if _, exists := d["cache_write_tokens"]; exists {
-				return max0(mapInt(d, "cache_write_tokens"))
-			}
-			if _, exists := d["cache_creation_tokens"]; exists {
-				return max0(mapInt(d, "cache_creation_tokens"))
+	// Keep the nested priority aligned with Sub2API's gjson parser, but ignore
+	// stale zero aliases so local cost accounting can retain a positive
+	// compatibility bucket that the response rewrite will expose downstream.
+	for _, nested := range [][2]string{
+		{"input_tokens_details", "cache_write_tokens"},
+		{"prompt_tokens_details", "cache_write_tokens"},
+		{"input_tokens_details", "cache_creation_tokens"},
+		{"prompt_tokens_details", "cache_creation_tokens"},
+	} {
+		details, _ := u[nested[0]].(map[string]any)
+		if _, exists := details[nested[1]]; exists {
+			if value := max0(mapInt(details, nested[1])); value > 0 {
+				return value
 			}
 		}
 	}
-	return firstPositiveInt(u,
+	if value := firstPositiveInt(u,
 		"cache_write_tokens",
 		"cache_creation_input_tokens",
 		"cache_write_input_tokens",
 		"cache_creation_tokens",
-	)
+	); value > 0 {
+		return value
+	}
+	// Some compatible providers expose only the Anthropic-style cache
+	// creation duration buckets. Keep them out of fresh input, and let the
+	// downstream response rewriter synthesize a Sub2API-compatible total.
+	return firstPositiveInt(u, "cache_creation_5m_input_tokens", "cache_creation_5m_tokens") +
+		firstPositiveInt(u, "cache_creation_1h_input_tokens", "cache_creation_1h_tokens")
 }
 
 func max0(n int) int {

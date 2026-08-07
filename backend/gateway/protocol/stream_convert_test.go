@@ -147,6 +147,36 @@ func TestChatToResponsesStream_Incremental(t *testing.T) {
 	}
 }
 
+func TestStreamUsageConversionsPreserveCacheAliases(t *testing.T) {
+	chat := NewChatToResponsesStream("m")
+	chatFrames := chat.FeedData(`{"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"input_tokens":100,"output_tokens":4,"input_tokens_details":{"cached_tokens":0},"cache_read_input_tokens":20,"cache_write_tokens":10}}`)
+	chatFrames = append(chatFrames, chat.Close()...)
+	chatBody := string(JoinSSEFrames(chatFrames))
+	for _, want := range []string{`"input_tokens":100`, `"cached_tokens":20`, `"cache_write_tokens":10`} {
+		if !strings.Contains(chatBody, want) {
+			t.Fatalf("chat -> responses lost %s: %s", want, chatBody)
+		}
+	}
+
+	responses := NewResponsesToAnthropicStream("m")
+	frames := responses.Feed("response.completed", `{"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":100,"output_tokens":4,"input_tokens_details":{"cached_tokens":20},"cache_write_tokens":10}}}`)
+	responsesBody := string(JoinSSEFrames(frames))
+	for _, want := range []string{`"input_tokens":70`, `"cache_read_input_tokens":20`, `"cache_creation_input_tokens":10`} {
+		if !strings.Contains(responsesBody, want) {
+			t.Fatalf("responses -> anthropic lost %s: %s", want, responsesBody)
+		}
+	}
+
+	anthropic := NewAnthropicToResponsesStream("m")
+	anthropic.Feed("message_start", `{"type":"message_start","message":{"id":"m1","usage":{"input_tokens":70,"cache_read_input_tokens":20,"cache_creation_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":6}}}}`)
+	anthropicBody := string(JoinSSEFrames(anthropic.Feed("message_stop", `{"type":"message_stop"}`)))
+	for _, want := range []string{`"input_tokens":100`, `"cached_tokens":20`, `"ephemeral_5m_input_tokens":4`, `"ephemeral_1h_input_tokens":6`} {
+		if !strings.Contains(anthropicBody, want) {
+			t.Fatalf("anthropic -> responses lost %s: %s", want, anthropicBody)
+		}
+	}
+}
+
 func TestSupportsIncrementalStream(t *testing.T) {
 	if !SupportsIncrementalStream(KindOpenAIChat, KindOpenAIChat, false) {
 		t.Fatal("passthrough should be incremental")
@@ -176,9 +206,9 @@ func TestResponsesToAnthropicStream_IncrementalText(t *testing.T) {
 		}
 	}
 	write(conv.Feed("response.created", `{"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}`))
-	// message_start 应已写出
-	if !strings.Contains(out.String(), "message_start") {
-		t.Fatalf("want message_start early: %s", out.String())
+	// Lifecycle metadata is held until the first substantive frame.
+	if out.Len() != 0 {
+		t.Fatalf("lifecycle metadata must not create client-visible output: %s", out.String())
 	}
 	write(conv.Feed("response.output_text.delta", `{"type":"response.output_text.delta","delta":"Hel"}`))
 	write(conv.Feed("response.output_text.delta", `{"type":"response.output_text.delta","delta":"lo"}`))
@@ -195,6 +225,30 @@ func TestResponsesToAnthropicStream_IncrementalText(t *testing.T) {
 	idxHel := strings.Index(s, "Hel")
 	if idxStart < 0 || idxHel < 0 || idxStart > idxHel {
 		t.Fatalf("message_start should precede text: %s", s)
+	}
+}
+
+func TestResponsesToAnthropicStream_FailedPreservesError(t *testing.T) {
+	conv := NewResponsesToAnthropicStream("m")
+	if frames := conv.Feed("response.created", `{"type":"response.created","response":{"id":"r1","status":"in_progress"}}`); len(frames) != 0 {
+		t.Fatalf("created frames=%q, want none", JoinSSEFrames(frames))
+	}
+	frames := conv.Feed("response.failed", `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later."}}}`)
+	body := string(JoinSSEFrames(frames))
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, "Our servers are currently overloaded") {
+		t.Fatalf("failed response was not preserved as an Anthropic error: %s", body)
+	}
+	if strings.Contains(body, "message_stop") {
+		t.Fatalf("failed response was converted to a normal stop: %s", body)
+	}
+}
+
+func TestResponsesToAnthropicStream_FailedEnvelopeUsesRootError(t *testing.T) {
+	conv := NewResponsesToAnthropicStream("m")
+	frames := conv.Feed("", `{"response":{"id":"r1","status":"failed"},"error":{"code":"server_error","message":"Selected model is at capacity. Please try a different model."}}`)
+	body := string(JoinSSEFrames(frames))
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, "Selected model is at capacity") {
+		t.Fatalf("root failure was not preserved as an Anthropic error: %s", body)
 	}
 }
 
@@ -250,6 +304,30 @@ func TestResponsesToOpenAIStream_IncrementalText(t *testing.T) {
 	}
 	if !strings.Contains(s, "data: [DONE]") {
 		t.Fatalf("missing DONE: %s", s)
+	}
+}
+
+func TestResponsesToOpenAIStream_FailedPreservesError(t *testing.T) {
+	conv := NewResponsesToOpenAIStream("m")
+	if frames := conv.Feed("response.created", `{"type":"response.created","response":{"id":"r1","status":"in_progress"}}`); len(frames) != 0 {
+		t.Fatalf("created frames=%q, want none", JoinSSEFrames(frames))
+	}
+	frames := conv.Feed("response.failed", `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"Selected model is at capacity. Please try a different model."}}}`)
+	body := string(JoinSSEFrames(frames))
+	if !strings.Contains(body, `"error"`) || !strings.Contains(body, "Selected model is at capacity") {
+		t.Fatalf("failed response was not preserved as an OpenAI error: %s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("missing terminal marker: %s", body)
+	}
+}
+
+func TestResponsesToOpenAIStream_FailedEnvelopeUsesRootError(t *testing.T) {
+	conv := NewResponsesToOpenAIStream("m")
+	frames := conv.Feed("", `{"response":{"id":"r1","status":"failed"},"error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later."}}`)
+	body := string(JoinSSEFrames(frames))
+	if !strings.Contains(body, `"error"`) || !strings.Contains(body, "Our servers are currently overloaded") {
+		t.Fatalf("root failure was not preserved as an OpenAI error: %s", body)
 	}
 }
 

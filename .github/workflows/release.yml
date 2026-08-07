@@ -85,6 +85,7 @@ jobs:
           if [[ "$GOOS" == 'windows' ]]; then suffix='.exe'; fi
           mkdir -p out
           go build -trimpath -ldflags='-s -w' -o "out/upstream-ops${suffix}" ./cmd/server
+          go build -trimpath -ldflags='-s -w' -o "out/upstream-ops-migrate${suffix}" ./cmd/migrate
           cp README.md README.zh.md out/
           if [[ "$GOOS" == 'windows' ]]; then
             (cd out && zip -9 "../upstream-ops-${GOOS}-${GOARCH}.zip" ./*)
@@ -103,11 +104,34 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     runs-on: ubuntu-latest
     steps:
+      # The release is also the distribution channel for operators who are
+      # still running an older Docker checkout.  Keep the upgrade helpers in
+      # a small, versioned package so they do not have to clone the repository
+      # or manually copy files before the first upgrade.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: upstream-ops-*
           path: release-assets
           merge-multiple: true
+      - name: Build upgrade kit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          kit="upstream-ops-upgrade-kit-${RELEASE_TAG}"
+          mkdir -p "$kit/scripts" "$kit/docs"
+          cp scripts/upgrade.sh scripts/upgrade.ps1 \
+            scripts/upgrade-to-postgres.sh scripts/upgrade-to-postgres.ps1 \
+            "$kit/scripts/"
+          chmod +x "$kit/scripts/"*.sh
+          cp docker-compose.yml docker-compose.postgres.yml docker-compose.mysql.yml .env.example \
+            README.md README.zh.md "$kit/"
+          cp docs/UPGRADE.md "$kit/UPGRADE.md"
+          cp docs/UPGRADE.md "$kit/docs/UPGRADE.md"
+          tar -C "$(dirname "$kit")" -czf "release-assets/${kit}.tar.gz" "$(basename "$kit")"
+          (cd "$kit" && zip -9 -r "../release-assets/${kit}.zip" .)
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}

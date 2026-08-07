@@ -1,7 +1,11 @@
 package storage
 
 import (
+	"fmt"
+	"net/url"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -9,6 +13,36 @@ import (
 
 	"gorm.io/gorm"
 )
+
+func TestPostgresDSNNormalizesIPv6AndSetsTimeout(t *testing.T) {
+	dsn := (DBConfig{
+		Driver: DBDriverPostgres, Host: "[::1]", User: "user", Password: "p@ss",
+		Name: "upstreamops", ConnectTimeoutSeconds: 7,
+	}).PostgresDSN()
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse postgres dsn: %v", err)
+	}
+	if parsed.Host != "[::1]:5432" {
+		t.Fatalf("postgres host = %q, want [::1]:5432", parsed.Host)
+	}
+	if got := parsed.Query().Get("connect_timeout"); got != "7" {
+		t.Fatalf("connect_timeout = %q, want 7", got)
+	}
+	if got, _ := parsed.User.Password(); got != "p@ss" {
+		t.Fatalf("password = %q, want p@ss", got)
+	}
+}
+
+func TestSQLiteReadOnlyWindowsDriveURI(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows URI syntax")
+	}
+	dsn := (DBConfig{Driver: DBDriverSQLite, Path: `C:\data\upstream-ops.db`, ReadOnly: true}).SQLiteDSN()
+	if !strings.HasPrefix(dsn, "file:///C:/") {
+		t.Fatalf("Windows SQLite DSN = %q, want file:///C:/ prefix", dsn)
+	}
+}
 
 func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -33,6 +67,58 @@ func openTestDB(t *testing.T) *gorm.DB {
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	return db
+}
+
+func TestOpenSQLiteReadOnlyDoesNotWriteDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "readonly.db")
+	db, err := Open(DBConfig{Driver: DBDriverSQLite, Path: path})
+	if err != nil {
+		t.Fatalf("open writable db: %v", err)
+	}
+	if err := db.Exec("CREATE TABLE readonly_probe (id INTEGER PRIMARY KEY, value TEXT)").Error; err != nil {
+		t.Fatalf("create probe: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get writable sql db: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close writable db: %v", err)
+	}
+
+	readOnly, err := Open(DBConfig{Driver: DBDriverSQLite, Path: path, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only db: %v", err)
+	}
+	readOnlySQL, err := readOnly.DB()
+	if err != nil {
+		t.Fatalf("get read-only sql db: %v", err)
+	}
+	t.Cleanup(func() { _ = readOnlySQL.Close() })
+	var count int64
+	if err := readOnly.Table("readonly_probe").Count(&count).Error; err != nil {
+		t.Fatalf("query read-only db: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("probe count = %d, want 0", count)
+	}
+	if err := readOnly.Exec("CREATE TABLE should_fail (id INTEGER PRIMARY KEY)").Error; err == nil {
+		t.Fatal("read-only SQLite unexpectedly accepted a schema write")
+	}
+}
+
+func TestGatewayStatsCacheKeyKeepsUserFiltersDistinct(t *testing.T) {
+	first := gatewayStatsCacheKey(GatewayUsageQuery{Model: "model|request", RequestID: "id"})
+	second := gatewayStatsCacheKey(GatewayUsageQuery{Model: "model", RequestID: "request|id"})
+	if first == second {
+		t.Fatalf("cache keys collided: %#v", first)
+	}
+	from := time.Unix(0, 0)
+	withoutFrom := gatewayStatsCacheKey(GatewayUsageQuery{})
+	withFrom := gatewayStatsCacheKey(GatewayUsageQuery{From: &from})
+	if withoutFrom == withFrom {
+		t.Fatalf("nil and epoch From filters collided: %#v", withFrom)
+	}
 }
 
 func TestAggregateBalanceTrend(t *testing.T) {
@@ -1096,6 +1182,85 @@ func TestGatewayResponseRulesValidateCompileAndScope(t *testing.T) {
 	}
 }
 
+func TestGatewayResponseRulesImportStrategies(t *testing.T) {
+	db := openTestDB(t)
+	groups := NewGatewayGroups(db)
+	group := &GatewayGroup{Name: "rules-import", Status: GatewayGroupStatusActive}
+	if err := groups.Create(group); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	rules := NewGatewayResponseRules(db)
+	if err := rules.Create(&GatewayResponseRule{
+		GatewayGroupID: group.ID,
+		Name:           "capacity",
+		Enabled:        true,
+		Priority:       1,
+		Pattern:        "old",
+		Target:         GatewayResponseRuleTargetAssistantText,
+		ModelsJSON:     "[]",
+		ProtocolsJSON:  "[]",
+	}); err != nil {
+		t.Fatalf("create existing rule: %v", err)
+	}
+	enabled := false
+	bundle := GatewayResponseRuleBundle{
+		Kind:    GatewayResponseRuleBundleKind,
+		Version: GatewayResponseRuleBundleVersion,
+		Rules: []GatewayResponseRuleBundleRule{
+			{Name: "capacity", Enabled: &enabled, Priority: 5, Pattern: "new", Target: GatewayResponseRuleTargetRawBody},
+			{Name: "other", Priority: 8, Pattern: "other", Target: GatewayResponseRuleTargetErrorMessage},
+		},
+	}
+	result, err := rules.Import(group.ID, bundle, GatewayResponseRuleImportReplace)
+	if err != nil {
+		t.Fatalf("replace import: %v", err)
+	}
+	if result.Replaced != 1 || result.Created != 1 || result.Skipped != 0 {
+		t.Fatalf("replace result = %#v", result)
+	}
+	updated, err := rules.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatalf("list after replace: %v", err)
+	}
+	if len(updated) != 2 || updated[0].Pattern != "new" || updated[0].Enabled {
+		t.Fatalf("updated rules = %#v", updated)
+	}
+
+	renameBundle := GatewayResponseRuleBundle{
+		Kind:    GatewayResponseRuleBundleKind,
+		Version: GatewayResponseRuleBundleVersion,
+		Rules:   []GatewayResponseRuleBundleRule{{Name: "capacity", Pattern: "third", Target: GatewayResponseRuleTargetAssistantText}},
+	}
+	rename, err := rules.Import(group.ID, renameBundle, GatewayResponseRuleImportRename)
+	if err != nil {
+		t.Fatalf("rename import: %v", err)
+	}
+	if rename.Renamed != 1 || rename.Created != 1 || len(rename.Items) != 1 || rename.Items[0].Name != "capacity (2)" {
+		t.Fatalf("rename result = %#v", rename)
+	}
+
+	invalid := GatewayResponseRuleBundle{
+		Kind:    GatewayResponseRuleBundleKind,
+		Version: GatewayResponseRuleBundleVersion,
+		Rules: []GatewayResponseRuleBundleRule{
+			{Name: "valid-before-invalid", Pattern: "ok", Target: GatewayResponseRuleTargetAssistantText},
+			{Name: "bad", Pattern: "[", Target: GatewayResponseRuleTargetAssistantText},
+		},
+	}
+	if _, err := rules.Import(group.ID, invalid, GatewayResponseRuleImportSkip); err == nil {
+		t.Fatal("invalid bundle was accepted")
+	}
+	updated, err = rules.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatalf("list after invalid import: %v", err)
+	}
+	for _, item := range updated {
+		if item.Name == "valid-before-invalid" {
+			t.Fatal("invalid bundle partially committed")
+		}
+	}
+}
+
 func TestGatewayGroupsDeleteRemovesResponseRules(t *testing.T) {
 	db := openTestDB(t)
 	groups := NewGatewayGroups(db)
@@ -1187,6 +1352,485 @@ func TestGatewayUsageFinalizeRequestChargesWinnerOnce(t *testing.T) {
 	}
 	if settlementCount != 1 {
 		t.Fatalf("settlement count = %d, want 1", settlementCount)
+	}
+}
+
+func TestGatewayUsageFinalizeVirtualCacheKeepsRawCostAndChargesBilledCost(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "virtual-cache-key", KeyHash: "virtual-cache-hash", KeyPrefix: "sk-vc-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	usage := &GatewayUsageLog{
+		GatewayKeyID: key.ID,
+		RequestID:    "virtual-cache-request",
+		Attempt:      1,
+		AttemptKind:  GatewayAttemptKindPrimary,
+		BillingMode:  "token",
+		InputTokens:  100,
+		ActualCost:   1.25,
+		Success:      true,
+		CreatedAt:    time.Now().UTC(),
+	}
+	logs := NewGatewayUsageLogs(db)
+	if err := logs.Create(usage); err != nil {
+		t.Fatalf("create usage: %v", err)
+	}
+	// The primary winner is eligible only because a concurrent hedge was also
+	// recorded for this request. The loser can retain its raw cost and status.
+	hedge := &GatewayUsageLog{
+		GatewayKeyID:  key.ID,
+		RequestID:     usage.RequestID,
+		Attempt:       2,
+		AttemptKind:   GatewayAttemptKindHedge,
+		AttemptStatus: GatewayAttemptStatusCanceled,
+		BillingMode:   "token",
+		InputTokens:   100,
+		ActualCost:    1.25,
+		Success:       false,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := logs.Create(hedge); err != nil {
+		t.Fatalf("create hedge usage: %v", err)
+	}
+	first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID:               usage.RequestID,
+		GatewayKeyID:            key.ID,
+		Delivered:               true,
+		WinnerAttempt:           usage.Attempt,
+		WinnerUsageLogID:        usage.ID,
+		BilledCost:              0.50,
+		BilledCostSet:           true,
+		HedgeTriggered:          true,
+		VirtualCacheReadEnabled: true,
+		VirtualCacheReadTokens:  100,
+		VirtualCacheReadCost:    0.01,
+	})
+	if err != nil || !first {
+		t.Fatalf("first virtual finalize = %v, err=%v", first, err)
+	}
+	var gotKey GatewayKey
+	if err := db.First(&gotKey, key.ID).Error; err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if gotKey.QuotaUsed != 0.50 {
+		t.Fatalf("quota_used = %v, want 0.50", gotKey.QuotaUsed)
+	}
+	var gotUsage GatewayUsageLog
+	if err := db.First(&gotUsage, usage.ID).Error; err != nil {
+		t.Fatalf("load usage: %v", err)
+	}
+	if gotUsage.ActualCost != 1.25 {
+		t.Fatalf("actual_cost = %v, want raw 1.25", gotUsage.ActualCost)
+	}
+	if gotUsage.BilledCost != 0.50 || gotUsage.VirtualCacheReadTokens != 100 || gotUsage.VirtualCacheReadCost != 0.01 {
+		t.Fatalf("virtual usage settlement = billed=%v tokens=%d cost=%v", gotUsage.BilledCost, gotUsage.VirtualCacheReadTokens, gotUsage.VirtualCacheReadCost)
+	}
+	var settlement GatewayWinnerSettlement
+	if err := db.First(&settlement, "request_id = ?", usage.RequestID).Error; err != nil {
+		t.Fatalf("load settlement: %v", err)
+	}
+	if settlement.ActualCost != 1.25 || settlement.BilledCost != 0.50 || settlement.VirtualCacheReadTokens != 100 {
+		t.Fatalf("settlement = %#v", settlement)
+	}
+	var finalization GatewayRequestFinalization
+	if err := db.First(&finalization, "request_id = ?", usage.RequestID).Error; err != nil {
+		t.Fatalf("load finalization: %v", err)
+	}
+	if finalization.ActualCost != 1.25 || finalization.BilledCost != 0.50 || finalization.VirtualCacheReadTokens != 100 {
+		t.Fatalf("finalization = %#v", finalization)
+	}
+
+	// A replay cannot overwrite the original settlement or charge the key a
+	// second time, even if a caller supplies different virtual values.
+	second, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID:               usage.RequestID,
+		GatewayKeyID:            key.ID,
+		Delivered:               true,
+		WinnerAttempt:           usage.Attempt,
+		BilledCost:              0.01,
+		BilledCostSet:           true,
+		HedgeTriggered:          true,
+		VirtualCacheReadEnabled: true,
+		VirtualCacheReadTokens:  1,
+		VirtualCacheReadCost:    0.001,
+	})
+	if err != nil || second {
+		t.Fatalf("replayed virtual finalize = %v, err=%v", second, err)
+	}
+	if err := db.First(&gotKey, key.ID).Error; err != nil {
+		t.Fatalf("reload key: %v", err)
+	}
+	if gotKey.QuotaUsed != 0.50 {
+		t.Fatalf("replayed quota_used = %v, want 0.50", gotKey.QuotaUsed)
+	}
+}
+
+func TestGatewayUsageFinalizeVirtualCacheRejectsIneligibleWinner(t *testing.T) {
+	cases := []struct {
+		name    string
+		kind    string
+		billing string
+		image   int
+		tokens  int
+		fresh   int
+	}{
+		{name: "without hedge", kind: GatewayAttemptKindPrimary, billing: "token", tokens: 1, fresh: 1},
+		{name: "retry winner", kind: GatewayAttemptKindRetry, billing: "token", tokens: 1, fresh: 1},
+		{name: "media output", kind: GatewayAttemptKindHedge, billing: "image", image: 1, tokens: 1, fresh: 1},
+		{name: "token cap", kind: GatewayAttemptKindHedge, billing: "token", tokens: 2, fresh: 1},
+		{name: "zero virtual tokens", kind: GatewayAttemptKindHedge, billing: "token", tokens: 0, fresh: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			key := &GatewayKey{Name: "vc-reject-" + tc.name, KeyHash: "vc-reject-hash-" + tc.name, KeyPrefix: "sk-vcr-", KeyCipher: "cipher"}
+			if err := db.Create(key).Error; err != nil {
+				t.Fatalf("create key: %v", err)
+			}
+			usage := &GatewayUsageLog{
+				GatewayKeyID: key.ID, RequestID: "vc-reject-request-" + tc.name,
+				Attempt: 1, AttemptKind: tc.kind, BillingMode: tc.billing,
+				ImageOutputTokens: tc.image, InputTokens: tc.fresh, ActualCost: 1,
+				Success: true, CreatedAt: time.Now().UTC(),
+			}
+			logs := NewGatewayUsageLogs(db)
+			if err := logs.Create(usage); err != nil {
+				t.Fatalf("create usage: %v", err)
+			}
+			_, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+				RequestID: usage.RequestID, GatewayKeyID: key.ID, Delivered: true,
+				WinnerAttempt: 1, WinnerUsageLogID: usage.ID, BilledCost: 0.5,
+				BilledCostSet: true, HedgeTriggered: tc.kind == GatewayAttemptKindHedge,
+				VirtualCacheReadEnabled: true, VirtualCacheReadTokens: tc.tokens,
+			})
+			if err == nil {
+				t.Fatal("ineligible virtual cache settlement unexpectedly succeeded")
+			}
+			var gotKey GatewayKey
+			if err := db.First(&gotKey, key.ID).Error; err != nil {
+				t.Fatalf("load key: %v", err)
+			}
+			if gotKey.QuotaUsed != 0 {
+				t.Fatalf("rejected settlement charged quota_used=%v", gotKey.QuotaUsed)
+			}
+		})
+	}
+}
+
+func TestGatewayUsageFinalizeVirtualCacheRequiresRecordedHedgeAndSuccessfulWinner(t *testing.T) {
+	cases := []struct {
+		name      string
+		success   bool
+		companion bool
+		billing   string
+		endpoint  string
+	}{
+		{name: "missing companion", success: true},
+		{name: "failed winner", success: false, companion: true},
+		{name: "video billing mode", success: true, companion: true, billing: "video"},
+		{name: "video endpoint", success: true, companion: true, endpoint: "/v1/videos/generations"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			key := &GatewayKey{Name: "vc-guard-" + tc.name, KeyHash: "vc-guard-hash-" + tc.name, KeyPrefix: "sk-vcg-", KeyCipher: "cipher"}
+			if err := db.Create(key).Error; err != nil {
+				t.Fatalf("create key: %v", err)
+			}
+			logs := NewGatewayUsageLogs(db)
+			usage := &GatewayUsageLog{
+				GatewayKeyID: key.ID, RequestID: "vc-guard-request-" + tc.name,
+				Attempt: 1, AttemptKind: GatewayAttemptKindPrimary, AttemptStatus: GatewayAttemptStatusAccepted,
+				BillingMode: tc.billing, InboundEndpoint: tc.endpoint, InputTokens: 10, ActualCost: 1,
+				Success: tc.success, CreatedAt: time.Now().UTC(),
+			}
+			if usage.BillingMode == "" {
+				usage.BillingMode = "token"
+			}
+			if err := logs.Create(usage); err != nil {
+				t.Fatalf("create winner usage: %v", err)
+			}
+			if tc.companion {
+				hedge := &GatewayUsageLog{
+					GatewayKeyID: key.ID, RequestID: usage.RequestID,
+					Attempt: 2, AttemptKind: GatewayAttemptKindHedge, AttemptStatus: GatewayAttemptStatusCanceled,
+					BillingMode: "token", InputTokens: 10, ActualCost: 1,
+					CreatedAt: time.Now().UTC(),
+				}
+				if err := logs.Create(hedge); err != nil {
+					t.Fatalf("create hedge usage: %v", err)
+				}
+			}
+			_, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+				RequestID: usage.RequestID, GatewayKeyID: key.ID, Delivered: true,
+				WinnerAttempt: 1, WinnerUsageLogID: usage.ID, BilledCost: 0.5,
+				BilledCostSet: true, HedgeTriggered: true,
+				VirtualCacheReadEnabled: true, VirtualCacheReadTokens: 5,
+			})
+			if err == nil {
+				t.Fatal("ineligible virtual cache settlement unexpectedly succeeded")
+			}
+			var gotKey GatewayKey
+			if err := db.First(&gotKey, key.ID).Error; err != nil {
+				t.Fatalf("load key: %v", err)
+			}
+			if gotKey.QuotaUsed != 0 {
+				t.Fatalf("rejected settlement charged quota_used=%v", gotKey.QuotaUsed)
+			}
+		})
+	}
+}
+
+func TestGatewayUsageFinalizeVirtualCacheAcceptsRegexRejectedConcurrentCompanion(t *testing.T) {
+	cases := []struct {
+		name        string
+		winnerKind  string
+		companionID int
+	}{
+		{name: "primary winner", winnerKind: GatewayAttemptKindPrimary, companionID: 2},
+		{name: "hedge winner", winnerKind: GatewayAttemptKindHedge, companionID: 1},
+	}
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			key := &GatewayKey{
+				Name:      "vc-regex-companion-key-" + fmt.Sprint(index),
+				KeyHash:   "vc-regex-companion-hash-" + fmt.Sprint(index),
+				KeyPrefix: "sk-vcrx-",
+				KeyCipher: "cipher",
+			}
+			if err := db.Create(key).Error; err != nil {
+				t.Fatalf("create key: %v", err)
+			}
+			logs := NewGatewayUsageLogs(db)
+			winner := &GatewayUsageLog{
+				GatewayKeyID: key.ID, RequestID: "vc-regex-companion-request-" + fmt.Sprint(index),
+				Attempt: 1, AttemptKind: tc.winnerKind, AttemptStatus: GatewayAttemptStatusAccepted,
+				BillingMode: "token", InputTokens: 10, ActualCost: 1, Success: true,
+				CreatedAt: time.Now().UTC(),
+			}
+			if tc.winnerKind == GatewayAttemptKindHedge {
+				winner.Attempt = 2
+			}
+			if err := logs.Create(winner); err != nil {
+				t.Fatalf("create winner usage: %v", err)
+			}
+			companion := &GatewayUsageLog{
+				GatewayKeyID: key.ID, RequestID: winner.RequestID,
+				Attempt: tc.companionID, AttemptKind: GatewayAttemptKindRegexReject,
+				AttemptStatus: GatewayAttemptStatusRejected, BillingMode: "token",
+				InputTokens: 10, ActualCost: 1, Success: false, CreatedAt: time.Now().UTC(),
+			}
+			if err := logs.Create(companion); err != nil {
+				t.Fatalf("create regex companion usage: %v", err)
+			}
+			first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+				RequestID: winner.RequestID, GatewayKeyID: key.ID, Delivered: true,
+				WinnerAttempt: winner.Attempt, WinnerUsageLogID: winner.ID,
+				BilledCost: 0.5, BilledCostSet: true, HedgeTriggered: true,
+				VirtualCacheReadEnabled: true, VirtualCacheReadTokens: 5,
+			})
+			if err != nil || !first {
+				t.Fatalf("regex companion virtual finalize = %v, err=%v", first, err)
+			}
+		})
+	}
+}
+
+func TestGatewayUsageFinalizeResponseRuleVirtualCache(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "vc-response-rule-key", KeyHash: "vc-response-rule-hash", KeyPrefix: "sk-vcrr-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	rejected := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: "vc-response-rule-request", RouteID: 11,
+		Attempt: 1, AttemptKind: GatewayAttemptKindRegexReject, AttemptStatus: GatewayAttemptStatusRejected,
+		ValidationPostCommit: false, BillingMode: "token", InputTokens: 50, ActualCost: 1,
+		CreatedAt: time.Now().UTC(),
+	}
+	winner := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: rejected.RequestID, RouteID: 22,
+		Attempt: 2, AttemptKind: GatewayAttemptKindFailover, AttemptStatus: GatewayAttemptStatusAccepted,
+		BillingMode: "token", InputTokens: 50, ActualCost: 1, Success: true,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := logs.Create(rejected); err != nil {
+		t.Fatalf("create rejected usage: %v", err)
+	}
+	if err := logs.Create(winner); err != nil {
+		t.Fatalf("create winner usage: %v", err)
+	}
+	first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: winner.RequestID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: winner.Attempt, WinnerUsageLogID: winner.ID,
+		BilledCost: 0.25, BilledCostSet: true,
+		VirtualCacheReadEnabled: true, VirtualCacheReadTokens: 50, VirtualCacheReadCost: 0.01,
+		VirtualCacheReason: GatewayVirtualCacheReasonResponseRuleFailover,
+	})
+	if err != nil || !first {
+		t.Fatalf("response-rule virtual finalize = %v, err=%v", first, err)
+	}
+	var gotUsage GatewayUsageLog
+	if err := db.First(&gotUsage, winner.ID).Error; err != nil {
+		t.Fatalf("load winner usage: %v", err)
+	}
+	var settlement GatewayWinnerSettlement
+	if err := db.First(&settlement, "request_id = ?", winner.RequestID).Error; err != nil {
+		t.Fatalf("load settlement: %v", err)
+	}
+	var finalization GatewayRequestFinalization
+	if err := db.First(&finalization, "request_id = ?", winner.RequestID).Error; err != nil {
+		t.Fatalf("load finalization: %v", err)
+	}
+	if gotUsage.VirtualCacheReason != GatewayVirtualCacheReasonResponseRuleFailover ||
+		settlement.VirtualCacheReason != GatewayVirtualCacheReasonResponseRuleFailover ||
+		finalization.VirtualCacheReason != GatewayVirtualCacheReasonResponseRuleFailover {
+		t.Fatalf("virtual cache reason was not persisted: usage=%q settlement=%q finalization=%q",
+			gotUsage.VirtualCacheReason, settlement.VirtualCacheReason, finalization.VirtualCacheReason)
+	}
+}
+
+func TestGatewayUsageFinalizeResponseRuleVirtualCacheAllowsHedgeWinner(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "vc-response-rule-hedge-key", KeyHash: "vc-response-rule-hedge-hash", KeyPrefix: "sk-vcrh-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	requestID := "vc-response-rule-hedge-request"
+	rejected := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: requestID, RouteID: 11,
+		Attempt: 1, AttemptKind: GatewayAttemptKindRegexReject, AttemptStatus: GatewayAttemptStatusRejected,
+		ValidationPostCommit: false, BillingMode: "token", InputTokens: 50, ActualCost: 1,
+		CreatedAt: time.Now().UTC(),
+	}
+	winner := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: requestID, RouteID: 22,
+		Attempt: 2, AttemptKind: GatewayAttemptKindHedge, AttemptStatus: GatewayAttemptStatusAccepted,
+		BillingMode: "token", InputTokens: 50, ActualCost: 1, Success: true,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := logs.Create(rejected); err != nil {
+		t.Fatalf("create rejected usage: %v", err)
+	}
+	if err := logs.Create(winner); err != nil {
+		t.Fatalf("create winner usage: %v", err)
+	}
+	first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: requestID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: winner.Attempt, WinnerUsageLogID: winner.ID,
+		BilledCost: 0.25, BilledCostSet: true, HedgeTriggered: true,
+		VirtualCacheReadEnabled: true, VirtualCacheReadTokens: 50, VirtualCacheReadCost: 0.01,
+		VirtualCacheReason: GatewayVirtualCacheReasonResponseRuleFailover,
+	})
+	if err != nil || !first {
+		t.Fatalf("response-rule hedge virtual finalize = %v, err=%v", first, err)
+	}
+	var gotUsage GatewayUsageLog
+	if err := db.First(&gotUsage, winner.ID).Error; err != nil {
+		t.Fatalf("load winner usage: %v", err)
+	}
+	if gotUsage.VirtualCacheReason != GatewayVirtualCacheReasonResponseRuleFailover {
+		t.Fatalf("virtual cache reason=%q, want response-rule failover", gotUsage.VirtualCacheReason)
+	}
+}
+
+func TestGatewayUsageFinalizeResponseRuleVirtualCacheRejectsSameRoute(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "vc-response-rule-same-key", KeyHash: "vc-response-rule-same-hash", KeyPrefix: "sk-vcrs-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	requestID := "vc-response-rule-same-request"
+	for _, usage := range []*GatewayUsageLog{
+		{GatewayKeyID: key.ID, RequestID: requestID, RouteID: 11, Attempt: 1, AttemptKind: GatewayAttemptKindRegexReject, AttemptStatus: GatewayAttemptStatusRejected, BillingMode: "token", InputTokens: 10, ActualCost: 1, CreatedAt: time.Now().UTC()},
+		{GatewayKeyID: key.ID, RequestID: requestID, RouteID: 11, Attempt: 2, AttemptKind: GatewayAttemptKindFailover, AttemptStatus: GatewayAttemptStatusAccepted, BillingMode: "token", InputTokens: 10, ActualCost: 1, Success: true, CreatedAt: time.Now().UTC()},
+	} {
+		if err := logs.Create(usage); err != nil {
+			t.Fatalf("create usage: %v", err)
+		}
+	}
+	_, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: requestID, GatewayKeyID: key.ID, Delivered: true, WinnerAttempt: 2,
+		BilledCost: 0.5, BilledCostSet: true, VirtualCacheReadEnabled: true,
+		VirtualCacheReadTokens: 5, VirtualCacheReason: GatewayVirtualCacheReasonResponseRuleFailover,
+	})
+	if err == nil {
+		t.Fatal("same-route response-rule virtual settlement unexpectedly succeeded")
+	}
+}
+
+func TestGatewayUsageFinalizeRejectsUnboundBilledCostOverride(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "billed-override-key", KeyHash: "billed-override-hash", KeyPrefix: "sk-bco-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	usage := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: "billed-override-request", Attempt: 1,
+		AttemptKind: GatewayAttemptKindPrimary, BillingMode: "token", InputTokens: 1,
+		ActualCost: 1, Success: true, CreatedAt: time.Now().UTC(),
+	}
+	logs := NewGatewayUsageLogs(db)
+	if err := logs.Create(usage); err != nil {
+		t.Fatalf("create usage: %v", err)
+	}
+	_, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: usage.RequestID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: 1, WinnerUsageLogID: usage.ID, BilledCost: 0.01, BilledCostSet: true,
+	})
+	if err == nil {
+		t.Fatal("unbound billed cost override unexpectedly succeeded")
+	}
+	var gotKey GatewayKey
+	if err := db.First(&gotKey, key.ID).Error; err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if gotKey.QuotaUsed != 0 {
+		t.Fatalf("rejected override charged quota_used=%v", gotKey.QuotaUsed)
+	}
+}
+
+func TestGatewayUsageStatsReclassifiesVirtualCacheWithoutAddingTokens(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "virtual-cache-stats-key", KeyHash: "virtual-cache-stats-hash", KeyPrefix: "sk-vcs-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	usage := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: "virtual-cache-stats-request", Attempt: 1,
+		AttemptKind: GatewayAttemptKindPrimary, Winner: true, Success: true,
+		InputTokens: 100, CacheReadTokens: 10, CacheCreationTokens: 5, OutputTokens: 20,
+		VirtualCacheReadTokens: 40, ActualCost: 1.25, BilledCost: 0.75,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := NewGatewayUsageLogs(db).Create(usage); err != nil {
+		t.Fatalf("create usage: %v", err)
+	}
+	loser := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: usage.RequestID, Attempt: 2,
+		AttemptKind: GatewayAttemptKindHedge, AttemptStatus: GatewayAttemptStatusCanceled,
+		ActualCost: 0.25, EstimatedExtraCost: 0.25, CreatedAt: time.Now().UTC(),
+	}
+	if err := NewGatewayUsageLogs(db).Create(loser); err != nil {
+		t.Fatalf("create loser usage: %v", err)
+	}
+	stats, err := NewGatewayUsageLogs(db).Stats(GatewayUsageQuery{})
+	if err != nil {
+		t.Fatalf("usage stats: %v", err)
+	}
+	if stats.TotalInputTokens != 60 || stats.TotalCacheReadTokens != 50 || stats.TotalTokens != 135 {
+		t.Fatalf("token stats = input=%d read=%d total=%d, want 60/50/135", stats.TotalInputTokens, stats.TotalCacheReadTokens, stats.TotalTokens)
+	}
+	if stats.WinnerCost != 0.75 || stats.TotalUpstreamCost != 1.50 {
+		t.Fatalf("cost stats = winner=%v upstream=%v, want 0.75/1.50", stats.WinnerCost, stats.TotalUpstreamCost)
+	}
+	if stats.VirtualCacheSubsidyCost != 0.50 || stats.ExtraAttemptCost != 0.75 {
+		t.Fatalf("extra cost stats = virtual_subsidy=%v extra=%v, want 0.50/0.75", stats.VirtualCacheSubsidyCost, stats.ExtraAttemptCost)
 	}
 }
 
@@ -1485,6 +2129,226 @@ func TestNoteSuccessForPauseErrorClearsAfterStreak(t *testing.T) {
 	}
 }
 
+func TestGatewayRouteModelCooldownIsolated(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	if err := routes.SaveForGroup(12, []GatewayRoute{{SourceChannelID: 21, Weight: 1, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(12)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	routeID := list[0].ID
+	until := time.Now().Add(5 * time.Minute)
+	if err := routes.SetModelTempUnschedulable(routeID, "model-a", until, "a failed", time.Now(), "req-a"); err != nil {
+		t.Fatalf("set model-a cooldown: %v", err)
+	}
+	if err := routes.SetModelTempUnschedulable(routeID, "model-b", until, "b failed", time.Now(), "req-b"); err != nil {
+		t.Fatalf("set model-b cooldown: %v", err)
+	}
+	if err := routes.SetModelTempUnschedulable(routeID, "model-a", until.Add(time.Minute), "a failed again", time.Now(), "req-a2"); err != nil {
+		t.Fatalf("upsert model-a cooldown: %v", err)
+	}
+
+	got, err := routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("find route: %v", err)
+	}
+	if len(got.ModelCooldowns) != 2 {
+		t.Fatalf("model cooldown count=%d, want 2: %+v", len(got.ModelCooldowns), got.ModelCooldowns)
+	}
+	if got.ModelCooldowns["model-a"].TempUnschedulableReason != "a failed again" {
+		t.Fatalf("model-a was not upserted: %+v", got.ModelCooldowns["model-a"])
+	}
+
+	modelACooldown := got.ModelCooldowns["model-a"]
+	if err := routes.NoteSuccessForModelPauseError(
+		routeID, "model-a", modelACooldown.TempUnschedulableAt, modelACooldown.TempUnschedulableRequestID,
+	); err != nil {
+		t.Fatalf("model-a success: %v", err)
+	}
+	got, err = routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("find after model-a success: %v", err)
+	}
+	if got.ModelCooldowns["model-a"].TempUnschedulableUntil != nil {
+		t.Fatal("model-a cooldown should clear immediately after success")
+	}
+	if got.ModelCooldowns["model-b"].TempUnschedulableUntil == nil {
+		t.Fatal("model-b cooldown must remain after model-a success")
+	}
+
+	if err := routes.ClearTempUnschedulable(routeID); err != nil {
+		t.Fatalf("clear route cooldowns: %v", err)
+	}
+	var count int64
+	if err := db.Model(&GatewayRouteModelCooldown{}).Where("route_id = ?", routeID).Count(&count).Error; err != nil {
+		t.Fatalf("count model cooldowns: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("route clear left %d model cooldown rows", count)
+	}
+}
+
+func TestNoteSuccessForModelPauseErrorDoesNotClearNewerFailure(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	if err := routes.SaveForGroup(15, []GatewayRoute{{SourceChannelID: 24, Weight: 1, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(15)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	routeID := list[0].ID
+	oldAt := time.Now().Add(-2 * time.Minute)
+	if err := routes.SetModelTempUnschedulable(
+		routeID, "model-a", time.Now().Add(time.Minute), "old", oldAt, "old-request",
+	); err != nil {
+		t.Fatalf("set old cooldown: %v", err)
+	}
+	oldRoute, err := routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("load old cooldown: %v", err)
+	}
+	observed := oldRoute.ModelCooldowns["model-a"]
+
+	newAt := time.Now().Add(-time.Second)
+	newUntil := time.Now().Add(5 * time.Minute)
+	if err := routes.SetModelTempUnschedulable(
+		routeID, "model-a", newUntil, "new", newAt, "new-request",
+	); err != nil {
+		t.Fatalf("set new cooldown: %v", err)
+	}
+	if err := routes.NoteSuccessForModelPauseError(
+		routeID, "model-a", observed.TempUnschedulableAt, observed.TempUnschedulableRequestID,
+	); err != nil {
+		t.Fatalf("record stale success: %v", err)
+	}
+	got, err := routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("load current cooldown: %v", err)
+	}
+	cooldown := got.ModelCooldowns["model-a"]
+	if cooldown.TempUnschedulableUntil == nil || !cooldown.TempUnschedulableUntil.Equal(newUntil) ||
+		cooldown.TempUnschedulableRequestID != "new-request" || cooldown.RecoverSuccessStreak != 0 {
+		t.Fatalf("stale success changed newer cooldown: %+v", cooldown)
+	}
+}
+
+func TestClearModelTempUnschedulableUntilRetainsDiagnostics(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	if err := routes.SaveForGroup(13, []GatewayRoute{{SourceChannelID: 22, Weight: 1, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(13)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	failedAt := time.Now().Add(-time.Minute)
+	until := time.Now().Add(time.Minute)
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", until, "capacity", failedAt, "request-a"); err != nil {
+		t.Fatalf("set cooldown: %v", err)
+	}
+	if err := routes.ClearModelTempUnschedulableUntil(list[0].ID, "model-a"); err != nil {
+		t.Fatalf("clear cooldown until: %v", err)
+	}
+	got, err := routes.FindByID(list[0].ID)
+	if err != nil {
+		t.Fatalf("find route: %v", err)
+	}
+	cooldown := got.ModelCooldowns["model-a"]
+	if cooldown.TempUnschedulableUntil != nil {
+		t.Fatalf("cooldown until=%v, want nil", cooldown.TempUnschedulableUntil)
+	}
+	if cooldown.TempUnschedulableReason != "capacity" || cooldown.TempUnschedulableRequestID != "request-a" || cooldown.TempUnschedulableAt == nil {
+		t.Fatalf("diagnostics were not retained: %+v", cooldown)
+	}
+}
+
+func TestClearModelTempUnschedulableUntilIfMatchDoesNotClearNewerCooldown(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	if err := routes.SaveForGroup(14, []GatewayRoute{{SourceChannelID: 23, Weight: 1, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(14)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	oldAt := time.Now().Add(-2 * time.Minute)
+	oldUntil := time.Now().Add(time.Minute)
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", oldUntil, "old", oldAt, "old-request"); err != nil {
+		t.Fatalf("set old cooldown: %v", err)
+	}
+	oldSnapshot, err := routes.FindByID(list[0].ID)
+	if err != nil {
+		t.Fatalf("load old cooldown: %v", err)
+	}
+	oldCooldown := oldSnapshot.ModelCooldowns["model-a"]
+	newAt := time.Now().Add(-time.Second)
+	newUntil := time.Now().Add(5 * time.Minute)
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", newUntil, "new", newAt, "new-request"); err != nil {
+		t.Fatalf("set new cooldown: %v", err)
+	}
+	cleared, err := routes.ClearModelTempUnschedulableUntilIfMatch(
+		list[0].ID, "model-a", *oldCooldown.TempUnschedulableUntil,
+		oldCooldown.TempUnschedulableAt, oldCooldown.TempUnschedulableRequestID,
+	)
+	if err != nil {
+		t.Fatalf("stale clear: %v", err)
+	}
+	if cleared {
+		t.Fatal("stale recovery probe cleared a newer cooldown")
+	}
+	got, err := routes.FindByID(list[0].ID)
+	if err != nil {
+		t.Fatalf("find after stale clear: %v", err)
+	}
+	cooldown := got.ModelCooldowns["model-a"]
+	if cooldown.TempUnschedulableUntil == nil || cooldown.TempUnschedulableRequestID != "new-request" {
+		t.Fatalf("new cooldown was lost: %+v", cooldown)
+	}
+	cleared, err = routes.ClearModelTempUnschedulableUntilIfMatch(
+		list[0].ID, "model-a", *cooldown.TempUnschedulableUntil,
+		cooldown.TempUnschedulableAt, cooldown.TempUnschedulableRequestID,
+	)
+	if err != nil || !cleared {
+		t.Fatalf("current clear: cleared=%v err=%v", cleared, err)
+	}
+}
+
+func TestGatewayGroupDeleteRemovesModelCooldowns(t *testing.T) {
+	db := openTestDB(t)
+	groups := NewGatewayGroups(db)
+	routes := NewGatewayRoutes(db)
+	group := &GatewayGroup{Name: "model-cooldown-delete"}
+	if err := groups.Create(group); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := routes.SaveForGroup(group.ID, []GatewayRoute{{SourceChannelID: 31, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(group.ID)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", time.Now().Add(time.Minute), "failed", time.Now(), "req"); err != nil {
+		t.Fatalf("set cooldown: %v", err)
+	}
+	if err := groups.Delete(group.ID); err != nil {
+		t.Fatalf("delete group: %v", err)
+	}
+	var count int64
+	if err := db.Model(&GatewayRouteModelCooldown{}).Where("route_id = ?", list[0].ID).Count(&count).Error; err != nil {
+		t.Fatalf("count orphan cooldowns: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("group delete left %d model cooldown rows", count)
+	}
+}
 
 func TestGatewayUsageListModels(t *testing.T) {
 	db := openTestDB(t)

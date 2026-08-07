@@ -144,7 +144,7 @@ function localDayRangeISO(day = new Date()): { from: string; to: string } {
 /** 网关使用记录聚合统计（默认今日本地时区） */
 export function useGatewayUsageStatsToday() {
   const { from, to } = localDayRangeISO()
-  const qs = new URLSearchParams({ from, to })
+  const qs = new URLSearchParams({ from, to, include_endpoints: "0" })
   return useApi<GatewayUsageStats>(`/gateway/usage/stats?${qs}`)
 }
 

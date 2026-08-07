@@ -63,6 +63,7 @@ export interface Channel {
   group_multiplier?: number | null
   group_multiplier_mode: RechargeMultiplierMode
   monitor_enabled: boolean
+  concurrency_limit: number
   only_created_key_groups_enabled: boolean
   last_balance?: number | null
   last_balance_at?: string | null
@@ -249,6 +250,7 @@ export interface SystemSchedulerRetentionConfig {
   balanceSnapshotsDays: number
   notificationLogsDays: number
   announcementsDays: number
+  gatewayUsageLogsDays: number
 }
 
 export interface SystemSchedulerConfig {
@@ -632,6 +634,10 @@ export interface GatewayGroup {
    * 重写路由顺序与账号计费倍率（对齐上游同步账号）。
    */
   rate_resort_enabled?: boolean
+  /** 0 disables the guard; over-limit routes are excluded from scheduling. */
+  max_billing_rate_multiplier?: number
+  /** Number of highest-priority distinct channels used for normal request load balancing. */
+  load_balance_route_count?: number
   model_mapping?: string
   models_json?: string
   models_mode: GatewayModelsMode
@@ -663,8 +669,11 @@ export interface GatewayGroup {
   hedge_max_parallel?: number
   /** 单个客户端请求允许启动的上游 attempt 总数 */
   hedge_max_attempts?: number
+  hedge_virtual_cache_enabled?: boolean
   /** 是否启用响应内容正则校验 */
   response_validation_enabled?: boolean
+  /** 正则预提交拒绝并切换其它渠道后，将 winner 输入按虚拟缓存读取计费 */
+  response_validation_virtual_cache_enabled?: boolean
   /** 流式校验模式；当前为 prefix */
   response_validation_stream_mode?: "prefix"
   /** 提交流给客户端前最多缓存的字节数 */
@@ -678,6 +687,16 @@ export interface GatewayGroup {
   user_agent?: string
   created_at: string
   updated_at: string
+}
+
+export interface GatewayGroupCloneKeyResult {
+  key: GatewayKey
+  secret: string
+}
+
+export interface GatewayGroupCloneResult {
+  group: GatewayGroup
+  keys: GatewayGroupCloneKeyResult[]
 }
 
 export interface GatewayKey {
@@ -703,12 +722,17 @@ export interface GatewayKeyCreateResult {
 /** monitor = 监控渠道；provider = 直连 BaseURL+Key */
 export type GatewayRouteSourceKind = "monitor" | "provider"
 
+export type GatewayProviderModelPolicy = "all" | "allowlist"
+
 export interface GatewayProvider {
   id: number
   name: string
   base_url: string
   api_key_hint: string
   upstream_protocol: GatewayUpstreamProtocol
+  model_policy?: GatewayProviderModelPolicy
+  allowed_models_json?: string
+  concurrency_limit?: number
   default_billing_rate: number
   auth_style?: string
   enabled: boolean
@@ -737,8 +761,27 @@ export interface GatewayProviderOption {
   base_url: string
   api_key_hint: string
   upstream_protocol: GatewayUpstreamProtocol
+  concurrency_limit?: number
   default_billing_rate: number
   enabled: boolean
+}
+
+export interface GatewayProviderModelsPreview {
+  provider_id: number
+  model_policy: GatewayProviderModelPolicy
+  available: string[]
+  allowed_models: string[]
+}
+
+export interface GatewayRouteModelCooldown {
+  id: number
+  route_id: number
+  model: string
+  temp_unschedulable_until?: string | null
+  temp_unschedulable_reason?: string
+  temp_unschedulable_at?: string | null
+  temp_unschedulable_request_id?: string
+  recover_success_streak?: number
 }
 
 export interface GatewayRoute {
@@ -755,6 +798,8 @@ export interface GatewayRoute {
   rate_convert_value: number
   billing_rate_multiplier: number
   enabled: boolean
+  rate_limit_auto_disabled?: boolean
+  rate_limit_auto_disabled_reason?: string
   model_mapping?: string
   upstream_protocol: GatewayUpstreamProtocol
   concurrency: number
@@ -770,6 +815,7 @@ export interface GatewayRoute {
   temp_unschedulable_at?: string | null
   /** 最近一次触发暂停的网关 request_id（与使用记录关联） */
   temp_unschedulable_request_id?: string
+  model_cooldowns?: Record<string, GatewayRouteModelCooldown>
   created_at: string
   updated_at: string
 }
@@ -902,6 +948,10 @@ export interface GatewayUsageLog {
   output_tokens: number
   cache_creation_tokens: number
   cache_read_tokens: number
+  /** 网关为实际并发 hedge 提供的用户侧虚拟缓存读取 token */
+  virtual_cache_read_tokens?: number
+  /** hedge | response_rule_failover */
+  virtual_cache_reason?: string
   cache_creation_5m_tokens?: number
   cache_creation_1h_tokens?: number
   image_output_tokens?: number
@@ -911,9 +961,12 @@ export interface GatewayUsageLog {
   output_cost: number
   cache_creation_cost: number
   cache_read_cost: number
+  virtual_cache_read_cost?: number
   image_output_cost?: number
   total_cost: number
   actual_cost: number
+  /** winner 终态向网关密钥实际扣除的金额；旧记录为空时回退 actual_cost */
+  billed_cost?: number
   account_stats_cost?: number
   rate_multiplier: number
   billing_rate_multiplier: number
@@ -986,6 +1039,7 @@ export interface GatewayUsageStats {
   total_input_tokens: number
   total_output_tokens: number
   total_cache_creation_tokens: number
+  /** Actual upstream cache reads plus gateway virtual hedge credits. */
   total_cache_read_tokens: number
   total_tokens: number
   total_cost: number
@@ -994,7 +1048,9 @@ export interface GatewayUsageStats {
   total_upstream_cost?: number
   /** 仅 winner 的网关结算成本。 */
   winner_cost?: number
-  /** loser/rejected/canceled attempt 的估算额外成本。 */
+  /** 虚拟缓存 winner 的 upstream actual - billed 补贴。 */
+  virtual_cache_subsidy_cost?: number
+  /** loser/rejected/canceled attempt + 虚拟缓存补贴。 */
   extra_attempt_cost?: number
   average_duration_ms: number
   /** 近 5 分钟平均每分钟请求数 */

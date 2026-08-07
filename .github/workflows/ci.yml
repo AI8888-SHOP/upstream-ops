@@ -29,6 +29,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Verify module files are tidy
+        run: |
+          go mod tidy
+          git diff -- go.mod go.sum
+          git diff --exit-code -- go.mod go.sum
+
       - name: Run tests
         run: go test ./...
 
@@ -72,6 +78,13 @@ jobs:
 
       - name: Build server
         run: go build -trimpath ./cmd/server
+
+      - name: Build migration tool
+        run: go build -trimpath ./cmd/migrate
+
+      - name: Exercise storage tests on Windows
+        if: matrix.os == 'windows-latest'
+        run: go test ./backend/storage/...
 
   frontend:
     name: Frontend checks

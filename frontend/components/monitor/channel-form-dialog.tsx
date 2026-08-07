@@ -73,6 +73,7 @@ interface FormState {
   group_multiplier: string
   group_multiplier_mode: RechargeMultiplierMode
   monitor_enabled: boolean
+  concurrency_limit: string
   only_created_key_groups_enabled: boolean
   turnstile_enabled: boolean
   ignore_announcements: boolean
@@ -105,6 +106,7 @@ function initialState(c?: Channel | null): FormState {
     group_multiplier: c?.group_multiplier != null ? String(c.group_multiplier) : "",
     group_multiplier_mode: groupMultiplierMode,
     monitor_enabled: c?.monitor_enabled ?? true,
+    concurrency_limit: String(c?.concurrency_limit ?? 0),
     only_created_key_groups_enabled: c?.only_created_key_groups_enabled ?? false,
     turnstile_enabled: c?.turnstile_enabled ?? false,
     ignore_announcements: c?.ignore_announcements ?? false,
@@ -168,6 +170,10 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
       const threshold = Number(form.balance_threshold)
       if (!Number.isFinite(threshold) || threshold < 0) {
         throw new Error("余额阈值必须是非负数")
+      }
+      const concurrencyLimit = Number(form.concurrency_limit)
+      if (!Number.isInteger(concurrencyLimit) || concurrencyLimit < 0 || concurrencyLimit > 4096) {
+        throw new Error("并发上限须为 0-4096 的整数")
       }
       const sortOrder = Number(form.sort_order)
       if (!Number.isInteger(sortOrder)) {
@@ -275,6 +281,7 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
           group_multiplier: groupMultiplier,
           group_multiplier_mode: form.group_multiplier_mode,
           monitor_enabled: form.monitor_enabled,
+          concurrency_limit: concurrencyLimit,
           only_created_key_groups_enabled: form.only_created_key_groups_enabled,
           turnstile_enabled: !isTokenMode && form.turnstile_enabled,
           ignore_announcements: form.ignore_announcements,
@@ -307,6 +314,7 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
             group_multiplier: groupMultiplier,
             group_multiplier_mode: form.group_multiplier_mode,
             monitor_enabled: form.monitor_enabled,
+            concurrency_limit: concurrencyLimit,
             only_created_key_groups_enabled: form.only_created_key_groups_enabled,
             turnstile_enabled: !isTokenMode && form.turnstile_enabled,
             ignore_announcements: form.ignore_announcements,
@@ -732,6 +740,21 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
               onCheckedChange={(v) => setForm({ ...form, monitor_enabled: v })}
               disabled={submitting}
             />
+          </div>
+
+          <div className="space-y-1.5 rounded-lg border border-border px-3 py-2">
+            <Label htmlFor="concurrency-limit">并发上限</Label>
+            <Input
+              id="concurrency-limit"
+              type="number"
+              min="0"
+              max="4096"
+              step="1"
+              value={form.concurrency_limit}
+              onChange={(e) => setForm({ ...form, concurrency_limit: e.target.value })}
+              disabled={submitting}
+            />
+            <p className="text-xs text-muted-foreground">0 表示不限制；同一监控渠道跨网关组共享</p>
           </div>
 
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">

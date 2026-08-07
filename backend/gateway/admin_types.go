@@ -11,62 +11,92 @@ type AuthResult struct {
 
 // CreateGroupInput 创建网关分组。
 type CreateGroupInput struct {
-	Name                 string `json:"name"`
-	Description          string `json:"description"`
-	RateSortDirection    string `json:"rate_sort_direction"`
-	RateResortEnabled    *bool  `json:"rate_resort_enabled"`
-	ModelMappingJSON     string `json:"model_mapping"`
-	ModelsJSON           string `json:"models_json"`
-	ModelsMode           string `json:"models_mode"`
-	RetryEnabled         *bool  `json:"retry_enabled"`
-	RetryCount           *int   `json:"retry_count"`
-	FailoverEnabled      *bool  `json:"failover_enabled"`
-	FailoverMax          *int   `json:"failover_max"`
-	FailoverOn4xx        *bool  `json:"failover_on_4xx"`
-	CooldownSeconds      *int   `json:"cooldown_seconds"`
-	FirstTokenTimeoutSec *int   `json:"first_token_timeout_sec"`
-	HedgeEnabled         *bool    `json:"hedge_enabled"`
-	HedgeDelaySeconds    *float64 `json:"hedge_delay_seconds"`
-	HedgeMaxParallel     *int     `json:"hedge_max_parallel"`
-	HedgeMaxAttempts     *int     `json:"hedge_max_attempts"`
-	ResponseValidationEnabled         *bool   `json:"response_validation_enabled"`
-	ResponseValidationStreamMode      *string `json:"response_validation_stream_mode"`
-	ResponseValidationPrefixBytes     *int    `json:"response_validation_prefix_bytes"`
-	ResponseValidationPrefixTimeoutMS *int    `json:"response_validation_prefix_timeout_ms"`
+	Name                              string   `json:"name"`
+	Description                       string   `json:"description"`
+	RateSortDirection                 string   `json:"rate_sort_direction"`
+	RateResortEnabled                 *bool    `json:"rate_resort_enabled"`
+	MaxBillingRateMultiplier          *float64 `json:"max_billing_rate_multiplier"`
+	LoadBalanceRouteCount             *int     `json:"load_balance_route_count"`
+	ModelMappingJSON                  string   `json:"model_mapping"`
+	ModelsJSON                        string   `json:"models_json"`
+	ModelsMode                        string   `json:"models_mode"`
+	RetryEnabled                      *bool    `json:"retry_enabled"`
+	RetryCount                        *int     `json:"retry_count"`
+	FailoverEnabled                   *bool    `json:"failover_enabled"`
+	FailoverMax                       *int     `json:"failover_max"`
+	FailoverOn4xx                     *bool    `json:"failover_on_4xx"`
+	CooldownSeconds                   *int     `json:"cooldown_seconds"`
+	FirstTokenTimeoutSec              *int     `json:"first_token_timeout_sec"`
+	HedgeEnabled                      *bool    `json:"hedge_enabled"`
+	HedgeDelaySeconds                 *float64 `json:"hedge_delay_seconds"`
+	HedgeMaxParallel                  *int     `json:"hedge_max_parallel"`
+	HedgeMaxAttempts                  *int     `json:"hedge_max_attempts"`
+	HedgeVirtualCacheEnabled          *bool    `json:"hedge_virtual_cache_enabled"`
+	ResponseValidationEnabled         *bool    `json:"response_validation_enabled"`
+	ResponseValidationVirtualCacheEnabled *bool `json:"response_validation_virtual_cache_enabled"`
+	ResponseValidationStreamMode      *string  `json:"response_validation_stream_mode"`
+	ResponseValidationPrefixBytes     *int     `json:"response_validation_prefix_bytes"`
+	ResponseValidationPrefixTimeoutMS *int     `json:"response_validation_prefix_timeout_ms"`
 	// UserAgent 组级统一 UA；路由 mode=group 时使用。
 	UserAgent string `json:"user_agent"`
 }
 
 // UpdateGroupInput 更新网关分组（指针字段：nil 表示不改）。
 type UpdateGroupInput struct {
-	Name                 *string `json:"name"`
-	Description          *string `json:"description"`
-	Status               *string `json:"status"`
-	RateSortDirection    *string `json:"rate_sort_direction"`
-	RateResortEnabled    *bool   `json:"rate_resort_enabled"`
-	ModelMappingJSON     *string `json:"model_mapping"`
-	ModelsJSON           *string `json:"models_json"`
-	ModelsMode           *string `json:"models_mode"`
-	RetryEnabled         *bool   `json:"retry_enabled"`
-	RetryCount           *int    `json:"retry_count"`
-	FailoverEnabled      *bool   `json:"failover_enabled"`
-	FailoverMax          *int    `json:"failover_max"`
-	FailoverOn4xx        *bool   `json:"failover_on_4xx"`
-	CooldownSeconds      *int    `json:"cooldown_seconds"`
-	FirstTokenTimeoutSec *int    `json:"first_token_timeout_sec"`
-	HedgeEnabled         *bool    `json:"hedge_enabled"`
-	HedgeDelaySeconds    *float64 `json:"hedge_delay_seconds"`
-	HedgeMaxParallel     *int     `json:"hedge_max_parallel"`
-	HedgeMaxAttempts     *int     `json:"hedge_max_attempts"`
-	ResponseValidationEnabled         *bool   `json:"response_validation_enabled"`
-	ResponseValidationStreamMode      *string `json:"response_validation_stream_mode"`
-	ResponseValidationPrefixBytes     *int    `json:"response_validation_prefix_bytes"`
-	ResponseValidationPrefixTimeoutMS *int    `json:"response_validation_prefix_timeout_ms"`
+	Name                              *string  `json:"name"`
+	Description                       *string  `json:"description"`
+	Status                            *string  `json:"status"`
+	RateSortDirection                 *string  `json:"rate_sort_direction"`
+	RateResortEnabled                 *bool    `json:"rate_resort_enabled"`
+	MaxBillingRateMultiplier          *float64 `json:"max_billing_rate_multiplier"`
+	LoadBalanceRouteCount             *int     `json:"load_balance_route_count"`
+	ModelMappingJSON                  *string  `json:"model_mapping"`
+	ModelsJSON                        *string  `json:"models_json"`
+	ModelsMode                        *string  `json:"models_mode"`
+	RetryEnabled                      *bool    `json:"retry_enabled"`
+	RetryCount                        *int     `json:"retry_count"`
+	FailoverEnabled                   *bool    `json:"failover_enabled"`
+	FailoverMax                       *int     `json:"failover_max"`
+	FailoverOn4xx                     *bool    `json:"failover_on_4xx"`
+	CooldownSeconds                   *int     `json:"cooldown_seconds"`
+	FirstTokenTimeoutSec              *int     `json:"first_token_timeout_sec"`
+	HedgeEnabled                      *bool    `json:"hedge_enabled"`
+	HedgeDelaySeconds                 *float64 `json:"hedge_delay_seconds"`
+	HedgeMaxParallel                  *int     `json:"hedge_max_parallel"`
+	HedgeMaxAttempts                  *int     `json:"hedge_max_attempts"`
+	HedgeVirtualCacheEnabled          *bool    `json:"hedge_virtual_cache_enabled"`
+	ResponseValidationEnabled         *bool    `json:"response_validation_enabled"`
+	ResponseValidationVirtualCacheEnabled *bool `json:"response_validation_virtual_cache_enabled"`
+	ResponseValidationStreamMode      *string  `json:"response_validation_stream_mode"`
+	ResponseValidationPrefixBytes     *int     `json:"response_validation_prefix_bytes"`
+	ResponseValidationPrefixTimeoutMS *int     `json:"response_validation_prefix_timeout_ms"`
 	// UserAgent 空串=清除组级 UA。
 	UserAgent *string `json:"user_agent"`
 }
 
 // CreateKeyInput 创建网关 API Key。
+// CloneGroupInput controls the destination name for a complete gateway-group
+// clone. An empty name defaults to "<source> (copy)"; conflicts are suffixed
+// automatically by the storage transaction.
+type CloneGroupInput struct {
+	Name string `json:"name"`
+}
+
+// CloneGroupKeyResult exposes a newly generated client secret exactly once in
+// the clone response. The persisted key itself never serializes its hash or
+// encrypted credential fields.
+type CloneGroupKeyResult struct {
+	Key    storage.GatewayKey `json:"key"`
+	Secret string             `json:"secret"`
+}
+
+// CloneGroupResult is returned by the clone endpoint. Secrets are only
+// available in this response and are not retained in the database.
+type CloneGroupResult struct {
+	Group *storage.GatewayGroup `json:"group"`
+	Keys  []CloneGroupKeyResult  `json:"keys"`
+}
+
 type CreateKeyInput struct {
 	GroupID         uint    `json:"group_id"`
 	Name            string  `json:"name"`
@@ -100,6 +130,9 @@ type CreateProviderInput struct {
 	BaseURL            string  `json:"base_url"`
 	APIKey             string  `json:"api_key"`
 	UpstreamProtocol   string  `json:"upstream_protocol"`
+	ModelPolicy        string  `json:"model_policy"`
+	AllowedModelsJSON  string  `json:"allowed_models_json"`
+	ConcurrencyLimit   int     `json:"concurrency_limit"`
 	DefaultBillingRate float64 `json:"default_billing_rate"`
 	AuthStyle          string  `json:"auth_style"`
 	Enabled            *bool   `json:"enabled"`
@@ -114,6 +147,9 @@ type UpdateProviderInput struct {
 	BaseURL            *string  `json:"base_url"`
 	APIKey             *string  `json:"api_key"`
 	UpstreamProtocol   *string  `json:"upstream_protocol"`
+	ModelPolicy        *string  `json:"model_policy"`
+	AllowedModelsJSON  *string  `json:"allowed_models_json"`
+	ConcurrencyLimit   *int     `json:"concurrency_limit"`
 	DefaultBillingRate *float64 `json:"default_billing_rate"`
 	AuthStyle          *string  `json:"auth_style"`
 	Enabled            *bool    `json:"enabled"`
@@ -122,22 +158,32 @@ type UpdateProviderInput struct {
 	Notes              *string  `json:"notes"`
 }
 
+// ProviderModelsPreview 返回直连渠道实时模型与当前选择，不包含任何密钥信息。
+type ProviderModelsPreview struct {
+	ProviderID    uint     `json:"provider_id"`
+	ModelPolicy   string   `json:"model_policy"`
+	Available     []string `json:"available"`
+	AllowedModels []string `json:"allowed_models"`
+}
+
 // RouteInput 保存路由时的单条输入。
 type RouteInput struct {
-	ID                    uint    `json:"id"`
-	SourceKind            string  `json:"source_kind"`
-	SourceChannelID       uint    `json:"source_channel_id"`
-	GatewayProviderID     uint    `json:"gateway_provider_id"`
-	SourceGroupID         *int64  `json:"source_group_id"`
-	SourceGroupName       string  `json:"source_group_name"`
-	Weight                int     `json:"weight"`
-	RateConvertMode       string  `json:"rate_convert_mode"`
-	RateConvertValue      float64 `json:"rate_convert_value"`
-	BillingRateMultiplier float64 `json:"billing_rate_multiplier"`
-	Enabled               bool    `json:"enabled"`
-	ModelMappingJSON      string  `json:"model_mapping"`
-	UpstreamProtocol      string  `json:"upstream_protocol"`
-	Concurrency           int     `json:"concurrency"`
+	ID                          uint    `json:"id"`
+	SourceKind                  string  `json:"source_kind"`
+	SourceChannelID             uint    `json:"source_channel_id"`
+	GatewayProviderID           uint    `json:"gateway_provider_id"`
+	SourceGroupID               *int64  `json:"source_group_id"`
+	SourceGroupName             string  `json:"source_group_name"`
+	Weight                      int     `json:"weight"`
+	RateConvertMode             string  `json:"rate_convert_mode"`
+	RateConvertValue            float64 `json:"rate_convert_value"`
+	BillingRateMultiplier       float64 `json:"billing_rate_multiplier"`
+	Enabled                     bool    `json:"enabled"`
+	RateLimitAutoDisabled       bool    `json:"rate_limit_auto_disabled"`
+	RateLimitAutoDisabledReason string  `json:"rate_limit_auto_disabled_reason"`
+	ModelMappingJSON            string  `json:"model_mapping"`
+	UpstreamProtocol            string  `json:"upstream_protocol"`
+	Concurrency                 int     `json:"concurrency"`
 	// UserAgentMode: passthrough | group | custom
 	UserAgentMode   string `json:"user_agent_mode"`
 	UserAgentCustom string `json:"user_agent_custom"`

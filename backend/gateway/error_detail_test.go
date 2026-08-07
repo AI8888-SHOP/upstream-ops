@@ -61,6 +61,29 @@ func TestIsFailoverStatus(t *testing.T) {
 	}
 }
 
+func TestSameRouteRetryabilitySkipsDeterministicErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		info   usageErrorInfo
+		want   bool
+	}{
+		{name: "temporary 429", status: http.StatusTooManyRequests, want: true},
+		{name: "temporary 503", status: http.StatusServiceUnavailable, want: true},
+		{name: "media capability", status: http.StatusForbidden, info: usageErrorInfo{Summary: "HTTP 403: Image generation is not enabled for this group"}, want: false},
+		{name: "balance", status: http.StatusForbidden, info: usageErrorInfo{UpstreamBody: `{"error":"Insufficient account balance"}`}, want: false},
+		{name: "model missing", status: http.StatusNotFound, info: usageErrorInfo{Summary: "model_not_found: no available channel for model gpt-test"}, want: false},
+		{name: "unknown 403", status: http.StatusForbidden, info: usageErrorInfo{Summary: "HTTP 403: temporary policy response"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSameRouteRetryableUpstreamFailure(tt.status, tt.info); got != tt.want {
+				t.Fatalf("retryable=%v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEnrichRouteSourceGroupName(t *testing.T) {
 	gid := int64(31)
 	route := storage.GatewayRoute{SourceChannelID: 15, SourceGroupID: &gid, SourceGroupName: ""}

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bejix/upstream-ops/backend/gateway/protocol"
@@ -16,6 +17,7 @@ import (
 )
 
 var errSkippedRejectedRoute = errors.New("route skipped after response validation rejection")
+var errSkippedNonRetryableRoute = errors.New("route retry skipped after deterministic upstream failure")
 
 type coordinatedForwardRequest struct {
 	c               *gin.Context
@@ -34,6 +36,15 @@ type coordinatedForwardRequest struct {
 	requestID       string
 	firstToken      time.Duration
 	hedgeActive     bool
+	hedgeEligibilityKnown bool
+	virtualCacheEligible  bool
+	// hedgeTriggered is true only when the coordinator actually started an
+	// auxiliary hedge attempt. A hedge-enabled group that completed on its
+	// primary before the delay must not receive a virtual cache credit.
+	hedgeTriggered     bool
+	virtualCacheReason string
+	affinity           routeAffinityContext
+	prepareCache       *upstreamRequestPrepareCache
 }
 
 type coordinatedRoutePlan struct {
@@ -70,15 +81,27 @@ type coordinatedForwardAttempt struct {
 	Terminal     bool
 	Skipped      bool
 	Validation   validationResult
+	Recovery     bool
 
-	Gate         *streamPrefixGateWriter
-	Cancel       context.CancelFunc
-	runnerDone   chan struct{}
-	streamDone   chan streamAttemptResult
-	streamMu     sync.Mutex
-	streamResult streamAttemptResult
-	streamReady  bool
-	gateCommitErr error
+	Gate            *streamPrefixGateWriter
+	Cancel          context.CancelFunc
+	runnerDone      chan struct{}
+	streamDone      chan streamAttemptResult
+	streamMu        sync.Mutex
+	streamResult    streamAttemptResult
+	streamReady     bool
+	gateCommitErr   error
+	upstreamStarted atomic.Bool
+}
+
+func (a *coordinatedForwardAttempt) markUpstreamStarted() {
+	if a != nil {
+		a.upstreamStarted.Store(true)
+	}
+}
+
+func (a *coordinatedForwardAttempt) didStartUpstream() bool {
+	return a != nil && a.upstreamStarted.Load()
 }
 
 func (a *coordinatedForwardAttempt) streamControlSnapshot() (*streamPrefixGateWriter, context.CancelFunc, chan streamAttemptResult, bool) {
@@ -141,21 +164,34 @@ func (a *coordinatedForwardAttempt) awaitStreamResult() streamAttemptResult {
 	return result
 }
 
-func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, validator *responseValidator, request hedgeRequest) (bool, bool) {
+func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, validator *responseValidator, request hedgeRequest) (bool, bool, bool) {
 	validationEnabled := validator != nil && validator.Enabled()
-	hedgeActive := group != nil && group.HedgeEnabled && hedgeEligible(request)
-	return validationEnabled || hedgeActive, hedgeActive
+	virtualCacheEligible := hedgeEligible(request)
+	hedgeActive := group != nil && group.HedgeEnabled && virtualCacheEligible
+	return validationEnabled || hedgeActive, hedgeActive, virtualCacheEligible
 }
 
 func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
+	if req.prepareCache == nil {
+		req.prepareCache = &upstreamRequestPrepareCache{}
+	}
 	groupsByChannel := rt.loadGroupsByChannel(req.c.Request.Context(), req.routes)
-	candidates := SortRoutes(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil)
+	candidates := rt.sortRoutesWithAffinity(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil, &req.affinity, req.requestedModel)
+	candidates = rt.orderLoadBalancedCandidates(candidates, req.group, &req.affinity)
+	if req.affinity.Recovery && req.hedgeActive {
+		// A cooled route must complete its single recovery probe before any
+		// concurrent hedge is launched; fallback resumes after that probe fails.
+		req.hedgeActive = false
+	}
 	if len(candidates) == 0 {
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		rt.writeGatewayError(req.c, req.kind, http.StatusServiceUnavailable, "api_error", "no schedulable routes")
 		return
 	}
 	plan := buildCoordinatedRoutePlan(candidates, req.group, req.hedgeActive, req.validator != nil && req.validator.Enabled())
+	if req.affinity.Recovery {
+		plan = removeRecoveryRouteRetries(plan, req.affinity.RecoveryRouteID)
+	}
 	if len(plan) == 0 {
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		rt.writeGatewayError(req.c, req.kind, http.StatusServiceUnavailable, "api_error", "no attempts available")
@@ -163,8 +199,8 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	}
 
 	policy := hedgePolicy{
-		Enabled: req.hedgeActive,
-		Delay: time.Duration(req.group.HedgeDelaySeconds * float64(time.Second)),
+		Enabled:     req.hedgeActive,
+		Delay:       time.Duration(req.group.HedgeDelaySeconds * float64(time.Second)),
 		MaxParallel: req.group.HedgeMaxParallel,
 		MaxAttempts: len(plan),
 	}
@@ -177,14 +213,25 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 
 	var states sync.Map
 	var excludedRoutes sync.Map
+	var retrySuppressedRoutes sync.Map
 	run := func(ctx context.Context, info hedgeAttemptInfo) (*coordinatedForwardAttempt, error) {
 		entry := plan[info.Number-1]
 		attempt := &coordinatedForwardAttempt{
 			Info: info, Plan: entry, Route: entry.Candidate.Route, StartedAt: time.Now(),
 			runnerDone: make(chan struct{}),
 		}
+		if info.Number == 1 && req.affinity.Recovery && req.affinity.RecoveryRouteID == attempt.Route.ID {
+			attempt.Recovery = true
+		}
 		states.Store(info.Number, attempt)
 		defer close(attempt.runnerDone)
+		if attempt.Plan.TryOnRoute > 0 {
+			if _, suppressed := retrySuppressedRoutes.Load(attempt.Route.ID); suppressed {
+				attempt.Skipped = true
+				attempt.Err = errSkippedNonRetryableRoute
+				return attempt, attempt.Err
+			}
+		}
 		if _, excluded := excludedRoutes.Load(attempt.Route.ID); excluded {
 			attempt.Skipped = true
 			attempt.Err = errSkippedRejectedRoute
@@ -216,6 +263,10 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		} else {
 			_, runErr = rt.runCoordinatedNonStreamAttempt(ctx, &req, attempt, attemptTimeout)
 		}
+		suppressSameRouteRetry := coordinatedAttemptSuppressesSameRouteRetries(attempt)
+		if suppressSameRouteRetry {
+			retrySuppressedRoutes.Store(attempt.Route.ID, struct{}{})
+		}
 		// Response validation is allowed to switch routes even when the legacy
 		// transport failover toggle is off. Ordinary transport/status failures
 		// must retain the original retry/failover semantics, however; make the
@@ -225,7 +276,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 			validation, status, _, terminal := attempt.validationSnapshot()
 			if !validation.IsRejected() {
 				failed := runErr != nil || terminal || status < 200 || status >= 300
-				if failed && !coordinatedSameRouteRetryAllowed(req.group, attempt) {
+				if failed && (suppressSameRouteRetry || !coordinatedSameRouteRetryAllowed(req.group, attempt)) {
 					attempt.setTerminal(true)
 					if runErr == nil {
 						runErr = fmt.Errorf("upstream status %d", status)
@@ -242,8 +293,12 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	hooks := hedgeHooks[*coordinatedForwardAttempt]{
 		OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
 			if result.Value != nil {
+				req.virtualCacheReason = rt.virtualCacheReasonForWinner(&req, result.Value, &states)
 				gate, _, _, _ := result.Value.streamControlSnapshot()
 				if gate != nil {
+					if req.virtualCacheReason != "" {
+						gate.EnableVirtualCache(req.kind)
+					}
 					result.Value.setGateCommitError(gate.Win())
 				}
 			}
@@ -266,6 +321,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	}
 
 	result, runErr := runHedge(req.c.Request.Context(), req.hedgeActive, policy, run, validate, hooks)
+	req.hedgeTriggered = req.virtualCacheReason == storage.GatewayVirtualCacheReasonHedge
 	if result.Winner != nil && result.Winner.Value != nil && req.stream {
 		winner := result.Winner.Value
 		streamResult := winner.awaitStreamResult()
@@ -410,6 +466,7 @@ func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, att
 		return err
 	}
 	attempt.Target = target
+	target.onUpstreamStart = attempt.markUpstreamStarted
 	rt.applyRouteUserAgent(target, req.group, &attempt.Route)
 	groupMapping := ParseModelMapping(req.group.ModelMappingJSON)
 	routeMapping := ParseModelMapping(attempt.Route.ModelMappingJSON)
@@ -434,8 +491,9 @@ func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, att
 		}
 		attempt.UpstreamKind = protocol.KindOpenAIChat
 	}
-	attempt.ForwardBody, attempt.UpstreamPath, attempt.Converted, err = rt.prepareUpstreamRequest(
-		req.body, req.kind, attempt.UpstreamKind, attempt.UpstreamModel, req.stream, req.path,
+	attempt.ForwardBody, attempt.UpstreamPath, attempt.Converted, err = req.prepareCache.prepare(
+		rt.Service, req.body, req.kind, attempt.UpstreamKind,
+		req.requestedModel, attempt.UpstreamModel, req.stream, req.path,
 	)
 	if err != nil {
 		return fmt.Errorf("protocol convert failed: %w", err)
@@ -451,6 +509,9 @@ func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, att
 }
 
 func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coordinatedForwardRequest, attempt *coordinatedForwardAttempt, timeout time.Duration) (*coordinatedForwardAttempt, error) {
+	if attempt.Target != nil {
+		attempt.Target.onUpstreamStart = attempt.markUpstreamStarted
+	}
 	attempt.Status, attempt.Headers, attempt.UpstreamBody, attempt.FirstTokenMS, attempt.Err = rt.forwardOnce(
 		ctx, nil, attempt.Target, attempt.UpstreamPath, req.c.Request.Method, req.c.Request.Header,
 		attempt.ForwardBody, false, attempt.UpstreamKind, timeout,
@@ -484,6 +545,9 @@ func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coor
 }
 
 func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordinatedForwardRequest, attempt *coordinatedForwardAttempt, timeout time.Duration) (*coordinatedForwardAttempt, error) {
+	if attempt.Target != nil {
+		attempt.Target.onUpstreamStart = attempt.markUpstreamStarted
+	}
 	streamValidator := req.validator.NewStreamValidator(string(req.kind), req.requestedModel)
 	gate := newStreamPrefixGateWriter(req.c.Writer, streamValidator)
 	clone := req.c.Copy()
@@ -526,6 +590,16 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 				attempt.UpstreamURL, req.c.Request.Method,
 			)
 		}
+		// Publish transport/error state before Finish can signal a pending gate.
+		// Otherwise a final validation-accepted decision could win a race with a
+		// first-token timeout or a pre-commit buffer failure.
+		attempt.streamMu.Lock()
+		attempt.applyStreamResultLocked(result)
+		attempt.ClientBody = clientBody
+		attempt.Validation = validation
+		attempt.ErrInfo = errInfo
+		attempt.Terminal = terminal
+		attempt.streamMu.Unlock()
 		final := gate.Finish()
 		if final.IsRejected() && !final.PostCommit {
 			result.ValidationRejection = final
@@ -563,6 +637,11 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 		attempt.streamMu.Unlock()
 		if rejected {
 			cancel()
+			// Finish signals the validation decision before the forwarding
+			// goroutine publishes its final stream result. Wait for that result
+			// before the caller inspects attempt state or starts another route.
+			streamResult := attempt.awaitStreamResult()
+			attempt.applyStreamResult(streamResult)
 			return attempt, nil
 		}
 		if attemptErr != nil || rt.isFailoverStatus(status, req.group.FailoverOn4xx) {
@@ -638,12 +717,29 @@ func (a *coordinatedForwardAttempt) validationSnapshot() (validationResult, int,
 	return a.Validation, a.Status, a.Err, a.Terminal
 }
 
+func (a *coordinatedForwardAttempt) retryFailureSnapshot() (validationResult, int, error, bool, usageErrorInfo) {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+	return a.Validation, a.Status, a.Err, a.Terminal, a.ErrInfo
+}
+
+func coordinatedAttemptSuppressesSameRouteRetries(attempt *coordinatedForwardAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	validation, status, attemptErr, terminal, errInfo := attempt.retryFailureSnapshot()
+	if validation.IsRejected() {
+		return false
+	}
+	failed := attemptErr != nil || terminal || status < 200 || status >= 300
+	return failed && !isSameRouteRetryableUpstreamFailure(status, errInfo)
+}
+
 func (rt *Runtime) cleanupCoordinatedStreamLosers(result hedgeRunResult[*coordinatedForwardAttempt], states *sync.Map) {
 	winnerNumber := 0
 	if result.Winner != nil {
 		winnerNumber = result.Winner.Info.Number
 	}
-	deadline := time.Now().Add(hedgeCleanupTimeout)
 	states.Range(func(key, value any) bool {
 		number, _ := key.(int)
 		attempt, _ := value.(*coordinatedForwardAttempt)
@@ -661,18 +757,15 @@ func (rt *Runtime) cleanupCoordinatedStreamLosers(result hedgeRunResult[*coordin
 			// cancellation row if it misses the cleanup deadline.
 			return true
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
 		select {
 		case streamResult := <-streamDone:
-			stopHedgeTimer(timer)
 			attempt.setStreamResult(streamResult)
 			attempt.applyStreamResult(streamResult)
-		case <-timer.C:
-			return false
+		default:
+			// runHedge already gave canceled losers a bounded grace period. Do
+			// not add a second blocking wait after the winner stream has ended;
+			// auditCoordinatedAttempts safely emits a synthetic cancellation row
+			// for a runner that is still unwinding.
 		}
 		return true
 	})
@@ -686,7 +779,9 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 	attempts := make(map[int]*coordinatedForwardAttempt, len(result.Attempts))
 	outcomes := make(map[int]hedgeAttemptOutcome, len(result.Attempts))
 	rejections := make(map[int]error, len(result.Attempts))
+	infos := make(map[int]hedgeAttemptInfo, len(result.Attempts))
 	for _, item := range result.Attempts {
+		infos[item.Info.Number] = item.Info
 		outcomes[item.Info.Number] = item.Outcome
 		rejections[item.Info.Number] = item.Rejection
 		if item.Value != nil {
@@ -734,9 +829,12 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		if attempt == nil {
 			entry := planEntryForAttempt(plan, number)
 			attempt = &coordinatedForwardAttempt{
-				Info: hedgeAttemptInfo{Number: number}, Plan: entry,
+				Info: infos[number], Plan: entry,
 				Route: entry.Candidate.Route, Err: context.Canceled,
 				ErrInfo: usageErrorInfo{Type: "canceled", Summary: "attempt cleanup timed out after cancellation"},
+			}
+			if number == 1 && req.affinity.Recovery && attempt.Route.ID == req.affinity.RecoveryRouteID {
+				attempt.Recovery = true
 			}
 		} else if attempt.runnerDone != nil {
 			select {
@@ -746,10 +844,19 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 				// cancellation record preserves the attempt count without racing the
 				// runner that is still unwinding.
 				entry := planEntryForAttempt(plan, number)
+				liveAttempt := attempt
+				info := infos[number]
+				if info.Number == 0 {
+					info = liveAttempt.Info
+				}
 				attempt = &coordinatedForwardAttempt{
-					Info: hedgeAttemptInfo{Number: number}, Plan: entry,
+					Info: info, Plan: entry,
 					Route: entry.Candidate.Route, Err: context.Canceled,
 					ErrInfo: usageErrorInfo{Type: "canceled", Summary: "attempt cleanup timed out after cancellation"},
+				}
+				attempt.upstreamStarted.Store(liveAttempt.didStartUpstream())
+				if number == 1 && req.affinity.Recovery && attempt.Route.ID == req.affinity.RecoveryRouteID {
+					attempt.Recovery = true
 				}
 			}
 		}
@@ -762,17 +869,17 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		attemptKind := coordinatedAttemptKind(attempt, req.hedgeActive, number)
 		attemptStatus := storage.GatewayAttemptStatusError
 		var (
-			status        int
-			headers       http.Header
-			upstreamBody  []byte
-			tokens        UsageTokens
-			firstTokenMS  *int64
-			durationMS    int64
-			attemptErr    error
-			errInfo       usageErrorInfo
-			validation    validationResult
-			streamResult  streamAttemptResult
-			streamReady   bool
+			status       int
+			headers      http.Header
+			upstreamBody []byte
+			tokens       UsageTokens
+			firstTokenMS *int64
+			durationMS   int64
+			attemptErr   error
+			errInfo      usageErrorInfo
+			validation   validationResult
+			streamResult streamAttemptResult
+			streamReady  bool
 		)
 		if req.stream {
 			attempt.streamMu.Lock()
@@ -834,14 +941,21 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		if isWinner && validation.IsRejected() && validation.PostCommit {
 			attemptStatus = storage.GatewayAttemptStatusAccepted
 		}
+		suppressSameRouteRetry := !validation.IsRejected() && !isSameRouteRetryableUpstreamFailure(status, errInfo)
 		if attemptStatus == storage.GatewayAttemptStatusError && req.group.RetryEnabled &&
-			req.group.CooldownSeconds > 0 && !coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID) {
+			req.group.CooldownSeconds > 0 &&
+			(suppressSameRouteRetry || !coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
 			until := time.Now().Add(time.Duration(req.group.CooldownSeconds) * time.Second)
 			pauseReason := errInfo.Summary
 			if strings.TrimSpace(errInfo.Detail) != "" {
 				pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 			}
-			_ = rt.Routes.SetTempUnschedulable(attempt.Route.ID, until, pauseReason, time.Now(), req.requestID)
+			cooldownErr := rt.Routes.SetModelTempUnschedulable(
+				attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID,
+			)
+			if cooldownErr == nil && storage.NormalizeGatewayModel(attempt.UpstreamModel) != "" {
+				req.affinity.preservePreferredOnCooldown(attempt.Route.ID)
+			}
 			attempt.UsageMeta.CooldownUntil = &until
 		}
 		success := status >= 200 && status < 300 && attemptErr == nil &&
@@ -849,6 +963,20 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		if req.stream && streamReady {
 			onlyClientDisconnect := rt.isClientDisconnectAfterCommit(streamResult.ClientDisconnected, streamResult.StreamErr)
 			success = success && (streamResult.StreamErr == nil || onlyClientDisconnect)
+		}
+		if attempt.Recovery {
+			if success {
+				if !isWinner {
+					rt.noteRouteModelSuccess(&attempt.Route, attempt.UpstreamModel)
+				}
+				rt.finishRouteAffinityProbe(&req.affinity, attempt.Route.ID, true, nil, time.Now())
+				if req.affinity.shouldRememberRoute(attempt.Route.ID) {
+					rt.rememberRouteAffinity(req.affinity.Keys, attempt.Route.ID, time.Now())
+				}
+			} else {
+				blockUntil := req.affinity.recoveryBlockedUntil(attempt.UsageMeta.CooldownUntil, time.Now())
+				rt.finishRouteAffinityProbe(&req.affinity, attempt.Route.ID, false, blockUntil, time.Now())
+			}
 		}
 
 		meta := attempt.UsageMeta
@@ -891,11 +1019,31 @@ func coordinatedPlanHasLaterRoute(plan []coordinatedRoutePlan, number int, route
 	return false
 }
 
+func removeRecoveryRouteRetries(plan []coordinatedRoutePlan, routeID uint) []coordinatedRoutePlan {
+	if routeID == 0 || len(plan) == 0 {
+		return plan
+	}
+	out := plan[:0]
+	for _, entry := range plan {
+		if entry.Candidate.Route.ID == routeID && entry.TryOnRoute > 0 {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func coordinatedAttemptKind(attempt *coordinatedForwardAttempt, hedgeActive bool, number int) string {
+	if attempt != nil && attempt.Recovery && number == 1 {
+		return storage.GatewayAttemptKindRecovery
+	}
 	if number <= 1 {
 		return storage.GatewayAttemptKindPrimary
 	}
-	if hedgeActive {
+	// runHedge marks auxiliary attempts as hedge only in its concurrent
+	// scheduler. When MaxParallel is one it falls back to the sequential
+	// retry ladder, whose attempts must remain retry/failover for accounting.
+	if attempt != nil && attempt.Info.Kind == attemptKindHedge && attempt.Info.Concurrent && attempt.didStartUpstream() {
 		return storage.GatewayAttemptKindHedge
 	}
 	if attempt != nil && attempt.Plan.TryOnRoute > 0 {
@@ -904,15 +1052,112 @@ func coordinatedAttemptKind(attempt *coordinatedForwardAttempt, hedgeActive bool
 	return storage.GatewayAttemptKindFailover
 }
 
+// coordinatedHedgeTriggered reports whether at least one auxiliary attempt
+// overlapped another in-flight attempt. The result may contain a primary
+// winner plus a canceled hedge, which still incurred upstream work and
+// therefore qualifies for the virtual cache settlement. A fast failure or
+// validation rejection that starts the next attempt after the first one has
+// already completed remains sequential and is excluded.
+func coordinatedHedgeTriggered(result hedgeRunResult[*coordinatedForwardAttempt], states *sync.Map) bool {
+	for _, attempt := range result.Attempts {
+		if attempt.Info.Kind != attemptKindHedge || !attempt.Info.Concurrent {
+			continue
+		}
+		value := attempt.Value
+		if value == nil && states != nil {
+			if stored, ok := states.Load(attempt.Info.Number); ok {
+				value, _ = stored.(*coordinatedForwardAttempt)
+			}
+		}
+		if value != nil && value.didStartUpstream() {
+			return true
+		}
+	}
+	return false
+}
+
+func (rt *Runtime) virtualCacheReasonForWinner(req *coordinatedForwardRequest, winner *coordinatedForwardAttempt, states *sync.Map) string {
+	if req == nil || req.group == nil || winner == nil || !winner.didStartUpstream() {
+		return ""
+	}
+	var header http.Header
+	if req.c != nil && req.c.Request != nil {
+		header = req.c.Request.Header
+	}
+	modelForEligibility := strings.TrimSpace(winner.UpstreamModel)
+	if modelForEligibility == "" {
+		modelForEligibility = req.requestedModel
+	}
+	eligible := req.virtualCacheEligible
+	if !req.hedgeEligibilityKnown {
+		eligible = hedgeEligible(hedgeRequest{
+			Path: req.path, Model: modelForEligibility, Header: header,
+			Body: req.body, Stream: req.stream, Realtime: strings.Contains(strings.ToLower(req.path), "realtime"),
+		})
+	}
+	if !eligible || mediaGenerationModel(modelForEligibility) {
+		return ""
+	}
+	if req.group.HedgeVirtualCacheEnabled && states != nil {
+		realConcurrentAttempt := false
+		states.Range(func(_, value any) bool {
+			attempt, _ := value.(*coordinatedForwardAttempt)
+			if attempt != nil && attempt.Info.Kind == attemptKindHedge && attempt.Info.Concurrent && attempt.didStartUpstream() {
+				realConcurrentAttempt = true
+				return false
+			}
+			return true
+		})
+		if realConcurrentAttempt {
+			return storage.GatewayVirtualCacheReasonHedge
+		}
+	}
+	if !req.group.ResponseValidationVirtualCacheEnabled || states == nil {
+		return ""
+	}
+	winnerKind := coordinatedAttemptKind(winner, req.hedgeActive, winner.Info.Number)
+	if winnerKind != storage.GatewayAttemptKindFailover && winnerKind != storage.GatewayAttemptKindHedge {
+		return ""
+	}
+	priorRejectedRoute := false
+	states.Range(func(_, value any) bool {
+		attempt, _ := value.(*coordinatedForwardAttempt)
+		if attempt == nil || attempt.Info.Number >= winner.Info.Number || !attempt.didStartUpstream() || attempt.Route.ID == winner.Route.ID {
+			return true
+		}
+		validation, _, _, _ := attempt.validationSnapshot()
+		if validation.IsRejected() && !validation.PostCommit {
+			priorRejectedRoute = true
+			return false
+		}
+		return true
+	})
+	if priorRejectedRoute {
+		return storage.GatewayVirtualCacheReasonResponseRuleFailover
+	}
+	return ""
+}
+
 func (rt *Runtime) finishCoordinatedNonStream(req *coordinatedForwardRequest, winner *coordinatedForwardAttempt, usageID uint) {
 	if winner == nil {
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		return
 	}
+	settlement := rt.buildVirtualCacheSettlement(req, winner)
+	if settlement.VirtualCacheReadEnabled {
+		if rewritten, changed := rewriteVirtualCacheResponse(winner.ClientBody, req.kind); changed {
+			winner.ClientBody = rewritten
+		} else {
+			settlement = storage.GatewayFinalizeRequestInput{}
+		}
+	}
 	rt.copyResponseHeaders(req.c.Writer.Header(), winner.Headers)
 	if winner.Converted || winner.Status >= 400 {
 		req.c.Writer.Header().Del("Content-Length")
 		req.c.Header("Content-Type", "application/json")
+	}
+	if settlement.VirtualCacheReadEnabled {
+		req.c.Writer.Header().Del("Content-Length")
 	}
 	rt.setGatewayRequestIDHeaders(req.c, req.requestID)
 	status := winner.Status
@@ -925,9 +1170,22 @@ func (rt *Runtime) finishCoordinatedNonStream(req *coordinatedForwardRequest, wi
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		return
 	}
-	_ = rt.Routes.NoteSuccessForPauseError(winner.Route.ID)
-	if err := rt.finalizeUsageWinner(req.requestID, req.key, winner.Info.Number, usageID); err != nil && rt.Log != nil {
-		rt.Log.Error("finalize coordinated gateway winner failed", "request_id", req.requestID, "attempt", winner.Info.Number, "err", err)
+	rt.noteRouteModelSuccess(&winner.Route, winner.UpstreamModel)
+	rt.finishRouteAffinityProbe(&req.affinity, winner.Route.ID, true, nil, time.Now())
+	if req.affinity.shouldRememberRoute(winner.Route.ID) {
+		rt.rememberRouteAffinity(req.affinity.Keys, winner.Route.ID, time.Now())
+	}
+	if err := rt.finalizeUsageWinnerWithSettlement(req.requestID, req.key, winner.Info.Number, usageID, settlement); err != nil {
+		if rt.Log != nil {
+			rt.Log.Error("finalize coordinated gateway winner failed", "request_id", req.requestID, "attempt", winner.Info.Number, "err", err)
+		}
+		// A virtual-cache validation failure must never leave a delivered request
+		// uncharged. Retry the idempotent finalizer without the optional credit.
+		if settlement.VirtualCacheReadEnabled {
+			if fallbackErr := rt.finalizeUsageWinner(req.requestID, req.key, winner.Info.Number, usageID); fallbackErr != nil && rt.Log != nil {
+				rt.Log.Error("fallback coordinated gateway winner finalization failed", "request_id", req.requestID, "attempt", winner.Info.Number, "err", fallbackErr)
+			}
+		}
 	}
 }
 
@@ -943,16 +1201,31 @@ func (rt *Runtime) finishCoordinatedStream(req *coordinatedForwardRequest, winne
 	}
 	streamResult := winner.awaitStreamResult()
 	onlyClientDisconnect := rt.isClientDisconnectAfterCommit(streamResult.ClientDisconnected, streamResult.StreamErr)
-	success := winner.gateCommitError() == nil && gate.DownstreamCommitted() &&
+	success := winner.gateCommitError() == nil && gate.CommitError() == nil && gate.DownstreamCommitted() &&
 		winner.Status >= 200 && winner.Status < 300 &&
 		(streamResult.StreamErr == nil || onlyClientDisconnect)
 	if !success || usageID == 0 {
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		return
 	}
-	_ = rt.Routes.NoteSuccessForPauseError(winner.Route.ID)
-	if err := rt.finalizeUsageWinner(req.requestID, req.key, winner.Info.Number, usageID); err != nil && rt.Log != nil {
-		rt.Log.Error("finalize coordinated stream winner failed", "request_id", req.requestID, "attempt", winner.Info.Number, "err", err)
+	rt.noteRouteModelSuccess(&winner.Route, winner.UpstreamModel)
+	rt.finishRouteAffinityProbe(&req.affinity, winner.Route.ID, true, nil, time.Now())
+	if req.affinity.shouldRememberRoute(winner.Route.ID) {
+		rt.rememberRouteAffinity(req.affinity.Keys, winner.Route.ID, time.Now())
+	}
+	settlement := rt.buildVirtualCacheSettlement(req, winner)
+	if settlement.VirtualCacheReadEnabled && !gate.VirtualCacheApplied() {
+		settlement = storage.GatewayFinalizeRequestInput{}
+	}
+	if err := rt.finalizeUsageWinnerWithSettlement(req.requestID, req.key, winner.Info.Number, usageID, settlement); err != nil {
+		if rt.Log != nil {
+			rt.Log.Error("finalize coordinated stream winner failed", "request_id", req.requestID, "attempt", winner.Info.Number, "err", err)
+		}
+		if settlement.VirtualCacheReadEnabled {
+			if fallbackErr := rt.finalizeUsageWinner(req.requestID, req.key, winner.Info.Number, usageID); fallbackErr != nil && rt.Log != nil {
+				rt.Log.Error("fallback coordinated stream winner finalization failed", "request_id", req.requestID, "attempt", winner.Info.Number, "err", fallbackErr)
+			}
+		}
 	}
 }
 

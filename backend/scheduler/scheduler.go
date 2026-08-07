@@ -21,6 +21,7 @@ type Scheduler struct {
 	cron          *cron.Cron
 	monitor       *monitor.Service
 	monLogs       *storage.MonitorLogs
+	gatewayUsage  *storage.GatewayUsageLogs
 	syncLogs      *storage.UpstreamSyncLogs
 	rates         *storage.Rates
 	notifies      *storage.Notifications
@@ -46,6 +47,7 @@ func New(
 	cfg config.SchedulerConfig,
 	m *monitor.Service,
 	monLogs *storage.MonitorLogs,
+	gatewayUsage *storage.GatewayUsageLogs,
 	syncLogs *storage.UpstreamSyncLogs,
 	rates *storage.Rates,
 	notifies *storage.Notifications,
@@ -63,6 +65,7 @@ func New(
 		cron:          cron.New(cron.WithSeconds()),
 		monitor:       m,
 		monLogs:       monLogs,
+		gatewayUsage:  gatewayUsage,
 		syncLogs:      syncLogs,
 		rates:         rates,
 		notifies:      notifies,
@@ -139,7 +142,8 @@ func (s *Scheduler) hasRetention() bool {
 	return r.MonitorLogsDays > 0 ||
 		r.BalanceSnapshotsDays > 0 ||
 		r.NotificationLogsDays > 0 ||
-		r.AnnouncementsDays > 0
+		r.AnnouncementsDays > 0 ||
+		r.GatewayUsageLogsDays > 0
 }
 
 // runRetention 按配置删除过期历史。任一表失败不影响其它，全部错误写日志。
@@ -199,6 +203,16 @@ func (s *Scheduler) runRetention() {
 			s.log.Warn("retention announcements failed", "err", err)
 		} else if n > 0 {
 			s.log.Info("retention announcements deleted", "rows", n, "before", cutoff)
+		}
+	}
+
+	if r.GatewayUsageLogsDays > 0 && s.gatewayUsage != nil {
+		cutoff := now.AddDate(0, 0, -r.GatewayUsageLogsDays)
+		n, err := s.gatewayUsage.DeleteBefore(cutoff)
+		if err != nil {
+			s.log.Warn("retention gateway_usage_logs failed", "err", err)
+		} else if n > 0 {
+			s.log.Info("retention gateway_usage_logs deleted", "rows", n, "before", cutoff)
 		}
 	}
 }

@@ -763,7 +763,7 @@ func convertAnthropicToolsToResponses(tools []any) []any {
 			"type":        "function",
 			"name":        name,
 			"description": t["description"],
-			"parameters":   normalizeToolParameters(t["input_schema"]),
+			"parameters":  normalizeToolParameters(t["input_schema"]),
 			"strict":      false,
 		}
 		asChat = append(asChat, item)
@@ -1221,15 +1221,7 @@ func OpenAIChatToResponsesResponse(body []byte, model string) ([]byte, error) {
 	}
 	usage := map[string]any{}
 	if u, ok := in["usage"].(map[string]any); ok {
-		if v, ok := asInt(u["prompt_tokens"]); ok {
-			usage["input_tokens"] = v
-		}
-		if v, ok := asInt(u["completion_tokens"]); ok {
-			usage["output_tokens"] = v
-		}
-		if d, ok := u["prompt_tokens_details"]; ok {
-			usage["input_tokens_details"] = d
-		}
+		usage = openAIUsageToResponses(u)
 		if d, ok := u["completion_tokens_details"]; ok {
 			usage["output_tokens_details"] = d
 		}
@@ -1449,21 +1441,8 @@ func responsesObjectToOpenAIChat(in map[string]any, model string) ([]byte, error
 
 	usage := map[string]any{}
 	if u, ok := in["usage"].(map[string]any); ok {
-		if v, ok := asInt(u["input_tokens"]); ok {
-			usage["prompt_tokens"] = v
-		}
-		if v, ok := asInt(u["output_tokens"]); ok {
-			usage["completion_tokens"] = v
-		}
-		pt, _ := asInt(usage["prompt_tokens"])
-		ct, _ := asInt(usage["completion_tokens"])
-		if pt > 0 || ct > 0 {
-			usage["total_tokens"] = pt + ct
-		}
-		// 透传细节
-		if d, ok := u["input_tokens_details"]; ok {
-			usage["prompt_tokens_details"] = d
-		}
+		usage = openAIUsageToChat(u)
+		// 透传输出细节。
 		if d, ok := u["output_tokens_details"]; ok {
 			usage["completion_tokens_details"] = d
 		}
@@ -1483,6 +1462,31 @@ func responsesObjectToOpenAIChat(in map[string]any, model string) ([]byte, error
 		out["created"] = created
 	}
 	return json.Marshal(out)
+}
+
+// copyOpenAICacheUsageFields keeps cache buckets intact when converting
+// between Chat Completions and Responses. Providers use several compatible
+// spellings for cache reads and cache creation; preserving all fields that are
+// present prevents a later usage normalizer from silently reclassifying them.
+func copyOpenAICacheUsageFields(dst, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	for _, key := range []string{
+		"cache_read_input_tokens", "cache_read_tokens", "cached_tokens",
+		"prompt_cache_hit_tokens", "cache_hit_tokens",
+		"cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens", "cache_write_input_tokens",
+		"cache_creation_5m_input_tokens", "cache_creation_5m_tokens",
+		"cache_creation_1h_input_tokens", "cache_creation_1h_tokens", "cache_creation",
+	} {
+		if value, exists := src[key]; exists {
+			// A converter may already have synthesized a canonical value from
+			// duration buckets. Do not replace that value with a stale alias.
+			if _, canonical := dst[key]; !canonical {
+				dst[key] = value
+			}
+		}
+	}
 }
 
 // ResponsesToAnthropicResponse Responses → Anthropic messages（非流式 JSON）。
@@ -1667,25 +1671,7 @@ func responsesObjectToAnthropic(in map[string]any, model string) ([]byte, error)
 
 	usage := map[string]any{}
 	if u, ok := in["usage"].(map[string]any); ok {
-		inTok, _ := asInt(u["input_tokens"])
-		outTok, _ := asInt(u["output_tokens"])
-		// Anthropic 语义：input_tokens 不含 cache_read；若有 details 则拆
-		cacheRead := 0
-		if d, ok := u["input_tokens_details"].(map[string]any); ok {
-			if v, ok := asInt(d["cached_tokens"]); ok {
-				cacheRead = v
-			}
-		}
-		if cacheRead > 0 && inTok >= cacheRead {
-			usage["input_tokens"] = inTok - cacheRead
-			usage["cache_read_input_tokens"] = cacheRead
-		} else {
-			usage["input_tokens"] = inTok
-		}
-		usage["output_tokens"] = outTok
-		if v, ok := asInt(u["cache_creation_input_tokens"]); ok && v > 0 {
-			usage["cache_creation_input_tokens"] = v
-		}
+		usage = openAIUsageToAnthropic(u)
 	}
 
 	out := map[string]any{

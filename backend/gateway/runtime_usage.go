@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/bejix/upstream-ops/backend/storage"
 	"github.com/gin-gonic/gin"
 )
@@ -33,7 +34,7 @@ func (rt *Runtime) recordUsage(
 		priceModel = requestedModel
 	}
 	// 对齐 sub2api RecordUsage：OpenAI 总输入含 cache 明细 → 拆互斥桶再计费/落库
-	tokens = SplitOpenAIUsageBuckets(tokens)
+	tokens = NormalizeUsageBuckets(tokens, protocol.Kind(meta.UpstreamProtocol))
 	pricing := rt.Pricing.Resolve(priceModel)
 	cost := CalculateCost(pricing, tokens, rate, billingRate)
 	reqType := storage.GatewayRequestTypeSync
@@ -119,14 +120,14 @@ func (rt *Runtime) recordUsage(
 		GatewayProviderID: providerID,
 		ProviderName:      providerName,
 		// 路由快照：保存路由换 id 后历史记录仍可展示
-		SourceAPIKeyID:        sourceKeyID,
-		SourceAPIKeyName:      sourceKeyName,
-		SourceGroupID:         route.SourceGroupID,
-		SourceGroupName:       sourceGroupName,
-		RequestID:             reqID,
-		Attempt:               attempt,
-		AttemptKind:           attemptKind,
-		AttemptStatus:         attemptStatus,
+		SourceAPIKeyID:   sourceKeyID,
+		SourceAPIKeyName: sourceKeyName,
+		SourceGroupID:    route.SourceGroupID,
+		SourceGroupName:  sourceGroupName,
+		RequestID:        reqID,
+		Attempt:          attempt,
+		AttemptKind:      attemptKind,
+		AttemptStatus:    attemptStatus,
 		// Winner is marked only by the atomic finalizer after downstream
 		// delivery. meta.Winner is still used above to classify extra cost.
 		Winner:                false,
@@ -202,14 +203,101 @@ func (rt *Runtime) recordUsage(
 }
 
 func (rt *Runtime) finalizeUsageWinner(reqID string, key *storage.GatewayKey, attempt int, usageLogID uint) error {
+	return rt.finalizeUsageWinnerWithSettlement(reqID, key, attempt, usageLogID, storage.GatewayFinalizeRequestInput{})
+}
+
+func (rt *Runtime) finalizeUsageWinnerWithSettlement(reqID string, key *storage.GatewayKey, attempt int, usageLogID uint, settlement storage.GatewayFinalizeRequestInput) error {
 	if rt == nil || rt.Usage == nil || key == nil {
 		return fmt.Errorf("gateway usage settlement is not configured")
 	}
+	settlement.RequestID = reqID
+	settlement.GatewayKeyID = key.ID
+	settlement.Delivered = true
+	settlement.WinnerAttempt = attempt
+	settlement.WinnerUsageLogID = usageLogID
 	_, err := rt.Usage.FinalizeRequest(storage.GatewayFinalizeRequestInput{
-		RequestID: reqID, GatewayKeyID: key.ID, Delivered: true,
-		WinnerAttempt: attempt, WinnerUsageLogID: usageLogID,
+		RequestID: settlement.RequestID, GatewayKeyID: settlement.GatewayKeyID, Delivered: settlement.Delivered,
+		WinnerAttempt: settlement.WinnerAttempt, WinnerUsageLogID: settlement.WinnerUsageLogID,
+		BilledCost: settlement.BilledCost, BilledCostSet: settlement.BilledCostSet,
+		HedgeTriggered: settlement.HedgeTriggered, VirtualCacheReadEnabled: settlement.VirtualCacheReadEnabled,
+		VirtualCacheReadTokens: settlement.VirtualCacheReadTokens,
+		VirtualCacheReadCost:   settlement.VirtualCacheReadCost,
+		VirtualCacheReason:     settlement.VirtualCacheReason,
 	})
 	return err
+}
+
+// buildVirtualCacheSettlement reclassifies the winner's fresh input as a
+// cache-read only after an actual concurrent hedge was launched. The raw
+// upstream usage remains in the attempt row; this value is only a user-side
+// settlement override.
+func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, winner *coordinatedForwardAttempt) storage.GatewayFinalizeRequestInput {
+	if rt == nil || req == nil || req.group == nil || winner == nil || winner.Tokens.ImageOutputTokens > 0 {
+		return storage.GatewayFinalizeRequestInput{}
+	}
+	reason := strings.TrimSpace(req.virtualCacheReason)
+	if reason == "" && req.group.HedgeVirtualCacheEnabled && req.hedgeTriggered {
+		// Keep direct helper callers and older runtime tests compatible.
+		reason = storage.GatewayVirtualCacheReasonHedge
+	}
+	switch reason {
+	case storage.GatewayVirtualCacheReasonHedge:
+		if !req.group.HedgeVirtualCacheEnabled {
+			return storage.GatewayFinalizeRequestInput{}
+		}
+	case storage.GatewayVirtualCacheReasonResponseRuleFailover:
+		if !req.group.ResponseValidationVirtualCacheEnabled {
+			return storage.GatewayFinalizeRequestInput{}
+		}
+	default:
+		return storage.GatewayFinalizeRequestInput{}
+	}
+	model := strings.TrimSpace(winner.UpstreamModel)
+	if model == "" {
+		model = strings.TrimSpace(req.requestedModel)
+	}
+	tokens := NormalizeUsageBuckets(winner.Tokens, protocol.Kind(winner.UsageMeta.UpstreamProtocol))
+	virtualTokens := tokens.InputTokens
+	if virtualTokens <= 0 {
+		return storage.GatewayFinalizeRequestInput{}
+	}
+	pricing := ModelPricing{}
+	if rt.Pricing != nil {
+		pricing = rt.Pricing.Resolve(model)
+	}
+	rawCost := CalculateCost(pricing, tokens, winner.Plan.Candidate.EffectiveRate, winner.Plan.Candidate.BillingRate)
+	virtualized := tokens
+	virtualized.InputTokens = 0
+	virtualized.CacheReadTokens += virtualTokens
+	billedCost := CalculateCost(pricing, virtualized, winner.Plan.Candidate.EffectiveRate, winner.Plan.Candidate.BillingRate)
+	// Downstream virtual-cache signalling is a routing policy, not a function
+	// of this process's optional price catalog. Unknown/equal/inverted local
+	// prices must not suppress the usage rewrite that Sub2API bills from.
+	// Keep the local charge non-increasing when an override is malformed.
+	billedActual := billedCost.ActualCost
+	if billedActual > rawCost.ActualCost {
+		billedActual = rawCost.ActualCost
+	}
+	accountRate := billedCost.ActualCost
+	virtualReadCost := float64(virtualTokens) * pricing.CacheReadPricePerToken
+	if billedCost.TotalCost > 0 {
+		accountRate /= billedCost.TotalCost
+	} else {
+		accountRate = 0
+	}
+	virtualReadCost *= accountRate
+	if virtualReadCost > billedActual {
+		virtualReadCost = billedActual
+	}
+	return storage.GatewayFinalizeRequestInput{
+		BilledCost:              billedActual,
+		BilledCostSet:           true,
+		HedgeTriggered:          reason == storage.GatewayVirtualCacheReasonHedge,
+		VirtualCacheReadEnabled: true,
+		VirtualCacheReadTokens:  virtualTokens,
+		VirtualCacheReadCost:    virtualReadCost,
+		VirtualCacheReason:      reason,
+	}
 }
 
 func (rt *Runtime) finalizeUsageFailure(reqID string, key *storage.GatewayKey) {

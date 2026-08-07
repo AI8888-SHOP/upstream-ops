@@ -657,16 +657,29 @@ export function RoutesPanel({
                   />
                 </TableCell>
                 <TableCell>
-                  <Switch
-                    checked={r.enabled !== false}
-                    onCheckedChange={(v) => {
-                      setRouteDrafts((prev) => {
-                        const next = [...prev]
-                        next[idx] = { ...next[idx], enabled: v }
-                        return next
-                      })
-                    }}
-                  />
+                  <div className="flex flex-col items-start gap-1">
+                    <Switch
+                      checked={r.enabled !== false && !r.rate_limit_auto_disabled}
+                      disabled={!!r.rate_limit_auto_disabled}
+                      title={
+                        r.rate_limit_auto_disabled
+                          ? r.rate_limit_auto_disabled_reason || "倍率超过网关组上限"
+                          : undefined
+                      }
+                      onCheckedChange={(v) => {
+                        setRouteDrafts((prev) => {
+                          const next = [...prev]
+                          next[idx] = { ...next[idx], enabled: v }
+                          return next
+                        })
+                      }}
+                    />
+                    {r.rate_limit_auto_disabled ? (
+                      <Badge variant="destructive" className="px-1.5 text-[10px]">
+                        倍率超限
+                      </Badge>
+                    ) : null}
+                  </div>
                 </TableCell>
                 <TableCell className="text-xs max-w-36">
                   <div className="truncate">
