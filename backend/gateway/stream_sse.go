@@ -2,6 +2,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -261,6 +262,25 @@ func mayContainUsageFields(data string, kind protocolKind) bool {
 	return protocol.NormalizeKind(kind) == protocol.KindAnthropic && strings.Contains(data, anthropicInputTokensMarker)
 }
 
+// mayContainUsageFieldsBytes is the allocation-free variant used by the
+// virtual-cache SSE transformer. Keep the string form above for parsers that
+// already have a string payload, while the forwarding hot path can inspect
+// the original event bytes before converting them to a string.
+func mayContainUsageFieldsBytes(data []byte, kind protocolKind) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, marker := range usageFieldMarkerBytes {
+		if bytes.Contains(data, marker) {
+			return true
+		}
+	}
+	if bytes.Contains(data, []byte(`\u`)) {
+		return true
+	}
+	return protocol.NormalizeKind(kind) == protocol.KindAnthropic && bytes.Contains(data, []byte(anthropicInputTokensMarker))
+}
+
 // Keep these byte slices package-global.  This function runs for every SSE
 // event; constructing a marker slice on each call would turn a cheap filter
 // into an allocation-heavy hot path.
@@ -279,6 +299,23 @@ var usageFieldMarkers = []string{
 	`"cache_write`,
 	`"image_tokens"`,
 	`"reasoning_tokens"`,
+}
+
+var usageFieldMarkerBytes = [][]byte{
+	[]byte(`"usage"`),
+	[]byte(`"prompt_tokens"`),
+	[]byte(`"completion_tokens"`),
+	[]byte(`"input_tokens"`),
+	[]byte(`"output_tokens"`),
+	[]byte(`"prompt_cache_hit_tokens"`),
+	[]byte(`"cache_hit_tokens"`),
+	[]byte(`"cache_read_input_tokens"`),
+	[]byte(`"cached_tokens"`),
+	[]byte(`"cache_read`),
+	[]byte(`"cache_creation`),
+	[]byte(`"cache_write`),
+	[]byte(`"image_tokens"`),
+	[]byte(`"reasoning_tokens"`),
 }
 
 var anthropicInputTokensMarker = "input_tokens"

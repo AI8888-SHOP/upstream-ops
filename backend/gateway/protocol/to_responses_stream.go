@@ -917,6 +917,18 @@ func (s *ChatToResponsesStream) emitCompleted(status string) [][]byte {
 		if v, ok := asInt(s.usage["completion_tokens"]); ok {
 			usage["output_tokens"] = v
 		}
+		if details, ok := s.usage["prompt_tokens_details"].(map[string]any); ok {
+			copied := make(map[string]any, len(details))
+			for key, value := range details {
+				copied[key] = value
+			}
+			usage["input_tokens_details"] = copied
+		}
+		for _, key := range []string{"cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens"} {
+			if value, exists := s.usage[key]; exists {
+				usage[key] = value
+			}
+		}
 		in, _ := asInt(usage["input_tokens"])
 		out, _ := asInt(usage["output_tokens"])
 		usage["total_tokens"] = in + out

@@ -728,6 +728,8 @@ export function GatewayPage() {
       hedge_virtual_cache_enabled: formDefaults.hedge_virtual_cache_enabled,
       response_validation_enabled:
         validationDefaults?.enabled ?? formDefaults.response_validation_enabled,
+      response_validation_virtual_cache_enabled:
+        formDefaults.response_validation_virtual_cache_enabled,
       response_validation_prefix_bytes: String(
         validationDefaults?.prefixBytes ??
           formDefaults.response_validation_prefix_bytes,
@@ -762,6 +764,8 @@ export function GatewayPage() {
       hedge_max_attempts: String(g.hedge_max_attempts ?? 4),
       hedge_virtual_cache_enabled: !!g.hedge_virtual_cache_enabled,
       response_validation_enabled: !!g.response_validation_enabled,
+      response_validation_virtual_cache_enabled:
+        !!g.response_validation_virtual_cache_enabled,
       response_validation_prefix_bytes: String(
         g.response_validation_prefix_bytes ?? 8192,
       ),
@@ -835,6 +839,8 @@ export function GatewayPage() {
       hedge_max_attempts: hedgeMaxAttempts,
       hedge_virtual_cache_enabled: groupForm.hedge_virtual_cache_enabled,
       response_validation_enabled: groupForm.response_validation_enabled,
+      response_validation_virtual_cache_enabled:
+        groupForm.response_validation_virtual_cache_enabled,
       response_validation_stream_mode: "prefix",
       response_validation_prefix_bytes: prefixBytes,
       response_validation_prefix_timeout_ms: prefixTimeoutMS,

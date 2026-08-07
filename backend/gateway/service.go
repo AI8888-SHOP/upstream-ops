@@ -11,6 +11,7 @@ package gateway
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -61,6 +62,11 @@ type Service struct {
 
 	upstreamConcurrencyMu sync.Mutex
 	upstreamConcurrency   *upstreamConcurrencyRegistry
+	// httpTransports is keyed by the effective proxy URL. A blank key is the
+	// direct/environment-proxy transport. Clients remain cheap per-request,
+	// while their transports retain idle connections across attempts.
+	httpTransportsMu sync.Mutex
+	httpTransports   map[string]*http.Transport
 	loadBalanceMu         sync.RWMutex
 	loadBalanceStates     map[loadBalancePoolKey]*loadBalancePoolState
 
@@ -127,6 +133,7 @@ func NewService(
 		channelGroupsCache: map[uint]channelGroupsCacheEntry{},
 		routeAffinities:    map[routeAffinityKey]routeAffinityEntry{},
 		upstreamConcurrency: newUpstreamConcurrencyRegistry(),
+		httpTransports:     map[string]*http.Transport{},
 		loadBalanceStates:   map[loadBalancePoolKey]*loadBalancePoolState{},
 	}
 	s.Admin = &AdminService{Service: s}
@@ -155,9 +162,35 @@ func (s *Service) ListDefaultPrices(query string) []DefaultPriceItem {
 }
 
 func (s *Service) UpdateProxyConfig(cfg config.ProxyConfig) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	previous := effectiveProxyURL(s.proxyConfig)
+	changed := previous != effectiveProxyURL(cfg)
 	s.proxyConfig = cfg
+	s.mu.Unlock()
+	if changed {
+		s.invalidateHTTPTransports()
+	}
+}
+
+func effectiveProxyURL(cfg config.ProxyConfig) string {
+	proxy, err := cfg.ActiveURL()
+	if err != nil {
+		return ""
+	}
+	return proxy
+}
+
+// CloseIdleConnections releases pooled sockets without interrupting active
+// requests. It is safe to call during shutdown or before replacing runtime
+// dependencies.
+func (s *Service) CloseIdleConnections() {
+	if s == nil {
+		return
+	}
+	s.invalidateHTTPTransports()
 }
 
 func (s *Service) UpdateUpstreamConfig(cfg config.UpstreamConfig) {

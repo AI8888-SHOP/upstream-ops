@@ -266,7 +266,8 @@ wait_for_healthy() {
 }
 
 persist_env_value_in_file() {
-  local file="$1" key="$2" value="$3" tmp="${file}.next" mode
+  local file="$1" key="$2" value="$3" mode
+  local tmp="${file}.next"
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
   mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || printf '600')"
   local updated=0 line

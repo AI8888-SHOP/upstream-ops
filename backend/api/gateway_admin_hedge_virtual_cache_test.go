@@ -35,7 +35,7 @@ func TestGatewayGroupVirtualCacheFlagAPI(t *testing.T) {
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/api/gateway/groups",
-		strings.NewReader(`{"name":"virtual-cache-api","hedge_enabled":true,"hedge_virtual_cache_enabled":true}`),
+		strings.NewReader(`{"name":"virtual-cache-api","hedge_enabled":true,"hedge_virtual_cache_enabled":true,"response_validation_enabled":true,"response_validation_virtual_cache_enabled":true}`),
 	)
 	request.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(created, request)
@@ -46,7 +46,7 @@ func TestGatewayGroupVirtualCacheFlagAPI(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &group); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
-	if !group.HedgeEnabled || !group.HedgeVirtualCacheEnabled {
+	if !group.HedgeEnabled || !group.HedgeVirtualCacheEnabled || !group.ResponseValidationVirtualCacheEnabled {
 		t.Fatalf("created group hedge policy = %+v", group)
 	}
 
@@ -54,7 +54,7 @@ func TestGatewayGroupVirtualCacheFlagAPI(t *testing.T) {
 	request = httptest.NewRequest(
 		http.MethodPut,
 		fmt.Sprintf("/api/gateway/groups/%d", group.ID),
-		strings.NewReader(`{"hedge_virtual_cache_enabled":false}`),
+		strings.NewReader(`{"hedge_virtual_cache_enabled":false,"response_validation_virtual_cache_enabled":false}`),
 	)
 	request.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(updated, request)
@@ -65,7 +65,7 @@ func TestGatewayGroupVirtualCacheFlagAPI(t *testing.T) {
 	if err := json.Unmarshal(updated.Body.Bytes(), &updatedGroup); err != nil {
 		t.Fatalf("decode update response: %v", err)
 	}
-	if updatedGroup.HedgeVirtualCacheEnabled {
+	if updatedGroup.HedgeVirtualCacheEnabled || updatedGroup.ResponseValidationVirtualCacheEnabled {
 		t.Fatalf("updated virtual cache flag = true, want false")
 	}
 
@@ -79,7 +79,7 @@ func TestGatewayGroupVirtualCacheFlagAPI(t *testing.T) {
 	if err := json.Unmarshal(loaded.Body.Bytes(), &loadedGroup); err != nil {
 		t.Fatalf("decode get response: %v", err)
 	}
-	if loadedGroup.HedgeVirtualCacheEnabled {
+	if loadedGroup.HedgeVirtualCacheEnabled || loadedGroup.ResponseValidationVirtualCacheEnabled {
 		t.Fatalf("persisted virtual cache flag = true, want false")
 	}
 }

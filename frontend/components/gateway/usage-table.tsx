@@ -1157,6 +1157,8 @@ function totalTokens(u: GatewayUsageLog) {
 function TokenCell({ u }: { u: GatewayUsageLog }) {
   const reasoning = u.reasoning_tokens ?? 0
   const virtualCacheRead = u.virtual_cache_read_tokens ?? 0
+  const virtualCacheLabel =
+    u.virtual_cache_reason === "response_rule_failover" ? "正则顺延 virtual read" : "并发兜底 virtual read"
   const inputTokens = Math.max(0, (u.input_tokens || 0) - virtualCacheRead)
   return (
     <div className="flex items-start gap-1.5">
@@ -1179,7 +1181,7 @@ function TokenCell({ u }: { u: GatewayUsageLog }) {
               </span>
             )}
             {virtualCacheRead > 0 && (
-              <span className="font-medium text-cyan-600 dark:text-cyan-400 tabular-nums" title="Gateway virtual cache credit">
+              <span className="font-medium text-cyan-600 dark:text-cyan-400 tabular-nums" title={virtualCacheLabel}>
                 virtual read {formatTokens(virtualCacheRead)}
               </span>
             )}
@@ -1224,7 +1226,7 @@ function TokenCell({ u }: { u: GatewayUsageLog }) {
           )}
           {virtualCacheRead > 0 && (
             <div className="flex justify-between gap-6">
-              <span className="text-muted-foreground">virtual cache read</span>
+              <span className="text-muted-foreground">{virtualCacheLabel}</span>
               <span>{formatTokens(virtualCacheRead)}</span>
             </div>
           )}
@@ -1258,6 +1260,8 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
   const standard = u.total_cost || 0
   const actual = u.actual_cost || 0
   const virtualCacheRead = u.virtual_cache_read_tokens ?? 0
+  const virtualCacheLabel =
+    u.virtual_cache_reason === "response_rule_failover" ? "正则顺延 virtual read" : "并发兜底 virtual read"
   const billed = u.billed_cost ?? 0
   const displayed = u.winner && (billed > 0 || virtualCacheRead > 0) ? billed : actual
   const extra = u.estimated_extra_cost || 0
@@ -1266,7 +1270,7 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
       <div className="flex items-center gap-1.5">
         <span
           className="font-medium tabular-nums text-green-600 dark:text-green-400"
-          title={virtualCacheRead > 0 ? "User billed cost after virtual cache credit" : "实收 = 标准费用 × 账号计费倍率"}
+          title={virtualCacheRead > 0 ? `${virtualCacheLabel} 后用户实收` : "实收 = 标准费用 × 账号计费倍率"}
         >
           {money6(displayed)}
         </span>
@@ -1307,7 +1311,7 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
             )}
             {virtualCacheRead > 0 && (
               <div className="flex justify-between gap-6">
-                <span className="text-muted-foreground">virtual cache read</span>
+                <span className="text-muted-foreground">{virtualCacheLabel}</span>
                 <span>{money6(u.virtual_cache_read_cost ?? 0)}</span>
               </div>
             )}

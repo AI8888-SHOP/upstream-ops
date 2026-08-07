@@ -1638,6 +1638,87 @@ func TestGatewayUsageFinalizeVirtualCacheAcceptsRegexRejectedConcurrentCompanion
 	}
 }
 
+func TestGatewayUsageFinalizeResponseRuleVirtualCache(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "vc-response-rule-key", KeyHash: "vc-response-rule-hash", KeyPrefix: "sk-vcrr-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	rejected := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: "vc-response-rule-request", RouteID: 11,
+		Attempt: 1, AttemptKind: GatewayAttemptKindRegexReject, AttemptStatus: GatewayAttemptStatusRejected,
+		ValidationPostCommit: false, BillingMode: "token", InputTokens: 50, ActualCost: 1,
+		CreatedAt: time.Now().UTC(),
+	}
+	winner := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: rejected.RequestID, RouteID: 22,
+		Attempt: 2, AttemptKind: GatewayAttemptKindFailover, AttemptStatus: GatewayAttemptStatusAccepted,
+		BillingMode: "token", InputTokens: 50, ActualCost: 1, Success: true,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := logs.Create(rejected); err != nil {
+		t.Fatalf("create rejected usage: %v", err)
+	}
+	if err := logs.Create(winner); err != nil {
+		t.Fatalf("create winner usage: %v", err)
+	}
+	first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: winner.RequestID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: winner.Attempt, WinnerUsageLogID: winner.ID,
+		BilledCost: 0.25, BilledCostSet: true,
+		VirtualCacheReadEnabled: true, VirtualCacheReadTokens: 50, VirtualCacheReadCost: 0.01,
+		VirtualCacheReason: GatewayVirtualCacheReasonResponseRuleFailover,
+	})
+	if err != nil || !first {
+		t.Fatalf("response-rule virtual finalize = %v, err=%v", first, err)
+	}
+	var gotUsage GatewayUsageLog
+	if err := db.First(&gotUsage, winner.ID).Error; err != nil {
+		t.Fatalf("load winner usage: %v", err)
+	}
+	var settlement GatewayWinnerSettlement
+	if err := db.First(&settlement, "request_id = ?", winner.RequestID).Error; err != nil {
+		t.Fatalf("load settlement: %v", err)
+	}
+	var finalization GatewayRequestFinalization
+	if err := db.First(&finalization, "request_id = ?", winner.RequestID).Error; err != nil {
+		t.Fatalf("load finalization: %v", err)
+	}
+	if gotUsage.VirtualCacheReason != GatewayVirtualCacheReasonResponseRuleFailover ||
+		settlement.VirtualCacheReason != GatewayVirtualCacheReasonResponseRuleFailover ||
+		finalization.VirtualCacheReason != GatewayVirtualCacheReasonResponseRuleFailover {
+		t.Fatalf("virtual cache reason was not persisted: usage=%q settlement=%q finalization=%q",
+			gotUsage.VirtualCacheReason, settlement.VirtualCacheReason, finalization.VirtualCacheReason)
+	}
+}
+
+func TestGatewayUsageFinalizeResponseRuleVirtualCacheRejectsSameRoute(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "vc-response-rule-same-key", KeyHash: "vc-response-rule-same-hash", KeyPrefix: "sk-vcrs-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	requestID := "vc-response-rule-same-request"
+	for _, usage := range []*GatewayUsageLog{
+		{GatewayKeyID: key.ID, RequestID: requestID, RouteID: 11, Attempt: 1, AttemptKind: GatewayAttemptKindRegexReject, AttemptStatus: GatewayAttemptStatusRejected, BillingMode: "token", InputTokens: 10, ActualCost: 1, CreatedAt: time.Now().UTC()},
+		{GatewayKeyID: key.ID, RequestID: requestID, RouteID: 11, Attempt: 2, AttemptKind: GatewayAttemptKindFailover, AttemptStatus: GatewayAttemptStatusAccepted, BillingMode: "token", InputTokens: 10, ActualCost: 1, Success: true, CreatedAt: time.Now().UTC()},
+	} {
+		if err := logs.Create(usage); err != nil {
+			t.Fatalf("create usage: %v", err)
+		}
+	}
+	_, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: requestID, GatewayKeyID: key.ID, Delivered: true, WinnerAttempt: 2,
+		BilledCost: 0.5, BilledCostSet: true, VirtualCacheReadEnabled: true,
+		VirtualCacheReadTokens: 5, VirtualCacheReason: GatewayVirtualCacheReasonResponseRuleFailover,
+	})
+	if err == nil {
+		t.Fatal("same-route response-rule virtual settlement unexpectedly succeeded")
+	}
+}
+
 func TestGatewayUsageFinalizeRejectsUnboundBilledCostOverride(t *testing.T) {
 	db := openTestDB(t)
 	key := &GatewayKey{Name: "billed-override-key", KeyHash: "billed-override-hash", KeyPrefix: "sk-bco-", KeyCipher: "cipher"}

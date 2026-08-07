@@ -222,6 +222,7 @@ func (rt *Runtime) finalizeUsageWinnerWithSettlement(reqID string, key *storage.
 		HedgeTriggered: settlement.HedgeTriggered, VirtualCacheReadEnabled: settlement.VirtualCacheReadEnabled,
 		VirtualCacheReadTokens: settlement.VirtualCacheReadTokens,
 		VirtualCacheReadCost:   settlement.VirtualCacheReadCost,
+		VirtualCacheReason:     settlement.VirtualCacheReason,
 	})
 	return err
 }
@@ -231,8 +232,24 @@ func (rt *Runtime) finalizeUsageWinnerWithSettlement(reqID string, key *storage.
 // upstream usage remains in the attempt row; this value is only a user-side
 // settlement override.
 func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, winner *coordinatedForwardAttempt) storage.GatewayFinalizeRequestInput {
-	if rt == nil || rt.Pricing == nil || req == nil || req.group == nil || winner == nil ||
-		!req.group.HedgeVirtualCacheEnabled || !req.hedgeTriggered || winner.Tokens.ImageOutputTokens > 0 {
+	if rt == nil || rt.Pricing == nil || req == nil || req.group == nil || winner == nil || winner.Tokens.ImageOutputTokens > 0 {
+		return storage.GatewayFinalizeRequestInput{}
+	}
+	reason := strings.TrimSpace(req.virtualCacheReason)
+	if reason == "" && req.group.HedgeVirtualCacheEnabled && req.hedgeTriggered {
+		// Keep direct helper callers and older runtime tests compatible.
+		reason = storage.GatewayVirtualCacheReasonHedge
+	}
+	switch reason {
+	case storage.GatewayVirtualCacheReasonHedge:
+		if !req.group.HedgeVirtualCacheEnabled {
+			return storage.GatewayFinalizeRequestInput{}
+		}
+	case storage.GatewayVirtualCacheReasonResponseRuleFailover:
+		if !req.group.ResponseValidationVirtualCacheEnabled {
+			return storage.GatewayFinalizeRequestInput{}
+		}
+	default:
 		return storage.GatewayFinalizeRequestInput{}
 	}
 	model := strings.TrimSpace(winner.UpstreamModel)
@@ -269,11 +286,27 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 	return storage.GatewayFinalizeRequestInput{
 		BilledCost:              billedCost.ActualCost,
 		BilledCostSet:           true,
-		HedgeTriggered:          true,
+		HedgeTriggered:          reason == storage.GatewayVirtualCacheReasonHedge,
 		VirtualCacheReadEnabled: true,
 		VirtualCacheReadTokens:  virtualTokens,
 		VirtualCacheReadCost:    virtualReadCost,
+		VirtualCacheReason:      reason,
 	}
+}
+
+func (rt *Runtime) virtualCachePricingEligible(req *coordinatedForwardRequest, winner *coordinatedForwardAttempt) bool {
+	if rt == nil || rt.Pricing == nil || req == nil || winner == nil {
+		return false
+	}
+	model := strings.TrimSpace(winner.UpstreamModel)
+	if model == "" {
+		model = strings.TrimSpace(req.requestedModel)
+	}
+	if model == "" {
+		return false
+	}
+	pricing := rt.Pricing.Resolve(model)
+	return pricing.InputPricePerToken > pricing.CacheReadPricePerToken
 }
 
 func (rt *Runtime) finalizeUsageFailure(reqID string, key *storage.GatewayKey) {

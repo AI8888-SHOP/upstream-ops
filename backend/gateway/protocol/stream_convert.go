@@ -28,6 +28,7 @@ type AnthropicToOpenAIStream struct {
 	toolIndex map[int]int
 	nextTool  int
 	finish    any
+	usage     map[string]any
 }
 
 func NewAnthropicToOpenAIStream(model string) *AnthropicToOpenAIStream {
@@ -64,6 +65,9 @@ func (s *AnthropicToOpenAIStream) Feed(eventName, data string) [][]byte {
 			}
 			if m, ok := msg["model"].(string); ok && m != "" {
 				s.Model = m
+			}
+			if usage, ok := msg["usage"].(map[string]any); ok {
+				s.usage = usage
 			}
 		}
 		if !s.RoleSent {
@@ -166,15 +170,15 @@ func (s *AnthropicToOpenAIStream) Feed(eventName, data string) [][]byte {
 				s.finish = finish
 			}
 		}
-		usageDelta := map[string]any{}
+		if s.usage == nil {
+			s.usage = make(map[string]any)
+		}
 		if u, ok := payload["usage"].(map[string]any); ok {
-			if v, ok := asInt(u["output_tokens"]); ok {
-				usageDelta["completion_tokens"] = v
-			}
-			if v, ok := asInt(u["input_tokens"]); ok {
-				usageDelta["prompt_tokens"] = v
+			for key, value := range u {
+				s.usage[key] = value
 			}
 		}
+		usageDelta := anthropicUsageToOpenAI(s.usage)
 		chunkMap := map[string]any{
 			"id":      s.MsgID,
 			"object":  "chat.completion.chunk",
@@ -224,6 +228,7 @@ type OpenAIToAnthropicStream struct {
 	// chat tool index → anthropic content block index
 	toolBlockIdx map[int]int
 	toolOpened   map[int]bool
+	usage        map[string]any
 }
 
 func NewOpenAIToAnthropicStream(model string) *OpenAIToAnthropicStream {
@@ -278,6 +283,9 @@ func (s *OpenAIToAnthropicStream) FeedData(data string) [][]byte {
 	}
 	if m, ok := payload["model"].(string); ok && m != "" {
 		s.Model = m
+	}
+	if usage, ok := payload["usage"].(map[string]any); ok {
+		s.usage = usage
 	}
 	choices, _ := payload["choices"].([]any)
 	if len(choices) == 0 {
@@ -412,16 +420,68 @@ func (s *OpenAIToAnthropicStream) Close() [][]byte {
 			"index": 0,
 		}))
 	}
+	usage := map[string]any{"output_tokens": 0}
+	if s.usage != nil {
+		usage = openAIUsageToAnthropic(s.usage)
+	}
 	out = append(out, encodeSSEFrame("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
 			"stop_reason":   mapFinishReasonToAnthropic(s.Finish),
 			"stop_sequence": nil,
 		},
-		"usage": map[string]any{"output_tokens": 0},
+		"usage": usage,
 	}))
 	out = append(out, encodeSSEFrame("message_stop", map[string]any{"type": "message_stop"}))
 	return out
+}
+
+func openAIUsageToAnthropic(usage map[string]any) map[string]any {
+	totalInput, _ := asInt(usage["prompt_tokens"])
+	if totalInput == 0 {
+		totalInput, _ = asInt(usage["input_tokens"])
+	}
+	output, _ := asInt(usage["completion_tokens"])
+	if output == 0 {
+		output, _ = asInt(usage["output_tokens"])
+	}
+	cacheRead := openAICachedTokens(usage)
+	cacheCreation := openAICacheCreationTokens(usage)
+	fresh := totalInput - cacheRead - cacheCreation
+	if fresh < 0 {
+		fresh = 0
+	}
+	return map[string]any{
+		"input_tokens":                fresh,
+		"output_tokens":               output,
+		"cache_read_input_tokens":     cacheRead,
+		"cache_creation_input_tokens": cacheCreation,
+	}
+}
+
+func openAICachedTokens(usage map[string]any) int {
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		if details, ok := usage[key].(map[string]any); ok {
+			if value, ok := asInt(details["cached_tokens"]); ok {
+				return value
+			}
+		}
+	}
+	for _, key := range []string{"cache_read_input_tokens", "cache_read_tokens", "cached_tokens"} {
+		if value, ok := asInt(usage[key]); ok && value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func openAICacheCreationTokens(usage map[string]any) int {
+	for _, key := range []string{"cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens"} {
+		if value, ok := asInt(usage[key]); ok && value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func openAISSEFrame(chunkJSON []byte) []byte {

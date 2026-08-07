@@ -75,6 +75,72 @@ func TestCoordinatedHedgeCreditRequiresActualUpstreamStart(t *testing.T) {
 	}
 }
 
+func TestVirtualCacheReasonForResponseRuleFailover(t *testing.T) {
+	const model = "claude-3-7-sonnet-20250219"
+	rt := &Runtime{Service: &Service{Pricing: NewPricingCatalog(nil)}}
+	req := &coordinatedForwardRequest{
+		path: "/v1/chat/completions", requestedModel: model,
+		group: &storage.GatewayGroup{ResponseValidationVirtualCacheEnabled: true},
+	}
+	rejected := &coordinatedForwardAttempt{
+		Info: hedgeAttemptInfo{Number: 1, Kind: attemptKindPrimary},
+		Route: storage.GatewayRoute{ID: 1},
+		Validation: validationResult{Decision: validationRejected, RuleID: 7},
+	}
+	rejected.markUpstreamStarted()
+	winner := &coordinatedForwardAttempt{
+		Info: hedgeAttemptInfo{Number: 2, Kind: attemptKindFailover},
+		Route: storage.GatewayRoute{ID: 2}, UpstreamModel: model,
+	}
+	winner.markUpstreamStarted()
+	var states sync.Map
+	states.Store(1, rejected)
+	states.Store(2, winner)
+	if reason := rt.virtualCacheReasonForWinner(req, winner, &states); reason != storage.GatewayVirtualCacheReasonResponseRuleFailover {
+		t.Fatalf("reason=%q, want response-rule failover", reason)
+	}
+	rejected.Validation.PostCommit = true
+	if reason := rt.virtualCacheReasonForWinner(req, winner, &states); reason != "" {
+		t.Fatalf("post-commit reason=%q, want empty", reason)
+	}
+	rejected.Validation.PostCommit = false
+	req.group.HedgeVirtualCacheEnabled = true
+	hedge := &coordinatedForwardAttempt{Info: hedgeAttemptInfo{Number: 3, Kind: attemptKindHedge, Concurrent: true}}
+	hedge.markUpstreamStarted()
+	states.Store(3, hedge)
+	if reason := rt.virtualCacheReasonForWinner(req, winner, &states); reason != storage.GatewayVirtualCacheReasonHedge {
+		t.Fatalf("hedge precedence reason=%q", reason)
+	}
+}
+
+func TestVirtualCacheReasonForSequentialResponseRuleFailoverWithHedgeEnabled(t *testing.T) {
+	const model = "claude-3-7-sonnet-20250219"
+	rt := &Runtime{Service: &Service{Pricing: NewPricingCatalog(nil)}}
+	req := &coordinatedForwardRequest{
+		path: "/v1/chat/completions", requestedModel: model, hedgeActive: true,
+		group: &storage.GatewayGroup{ResponseValidationVirtualCacheEnabled: true},
+	}
+	rejected := &coordinatedForwardAttempt{
+		Info:       hedgeAttemptInfo{Number: 1, Kind: attemptKindPrimary},
+		Route:      storage.GatewayRoute{ID: 1},
+		Validation: validationResult{Decision: validationRejected, RuleID: 7},
+	}
+	rejected.markUpstreamStarted()
+	winner := &coordinatedForwardAttempt{
+		Info: hedgeAttemptInfo{
+			Number: 2, Kind: attemptKindHedge, Concurrent: false,
+		},
+		Route: storage.GatewayRoute{ID: 2}, UpstreamModel: model,
+	}
+	winner.markUpstreamStarted()
+	var states sync.Map
+	states.Store(1, rejected)
+	states.Store(2, winner)
+	if reason := rt.virtualCacheReasonForWinner(req, winner, &states); reason != storage.GatewayVirtualCacheReasonResponseRuleFailover {
+		t.Fatalf("reason=%q, want response-rule failover", reason)
+	}
+}
+
 func TestCoordinatedResponsesRegexRejectSwitchesBeforeClientCommit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	failedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

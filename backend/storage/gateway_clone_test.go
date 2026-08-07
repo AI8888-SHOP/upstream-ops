@@ -37,6 +37,7 @@ func TestGatewayGroupsCloneCopiesConfigurationAndResetsRuntimeState(t *testing.T
 		HedgeMaxAttempts:          5,
 		HedgeVirtualCacheEnabled:  true,
 		ResponseValidationEnabled: true,
+		ResponseValidationVirtualCacheEnabled: true,
 		ResponseValidationStreamMode: "prefix",
 		ResponseValidationPrefixBytes: 1024,
 		ResponseValidationPrefixTimeoutMS: 250,
@@ -141,7 +142,8 @@ func TestGatewayGroupsCloneCopiesConfigurationAndResetsRuntimeState(t *testing.T
 		t.Fatalf("clone group identity = %#v", cloned.Group)
 	}
 	if cloned.Group.ModelMappingJSON != source.ModelMappingJSON || cloned.Group.ModelsJSON != source.ModelsJSON ||
-		cloned.Group.HedgeMaxParallel != source.HedgeMaxParallel || !cloned.Group.HedgeVirtualCacheEnabled {
+		cloned.Group.HedgeMaxParallel != source.HedgeMaxParallel || !cloned.Group.HedgeVirtualCacheEnabled ||
+		!cloned.Group.ResponseValidationVirtualCacheEnabled {
 		t.Fatalf("clone group configuration was not copied: %#v", cloned.Group)
 	}
 

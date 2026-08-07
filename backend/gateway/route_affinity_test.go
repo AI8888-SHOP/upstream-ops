@@ -1,12 +1,96 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/bejix/upstream-ops/backend/storage"
 )
+
+func TestRequestRouteAffinityIncrementalHashMatchesLegacy(t *testing.T) {
+	items := []any{
+		map[string]any{"role": "system", "content": "system"},
+		map[string]any{"role": "developer", "content": "developer"},
+		map[string]any{"role": "tool", "content": "tool"},
+	}
+	for index := 0; index < 80; index++ {
+		role := "user"
+		if index%2 == 1 {
+			role = "assistant"
+		}
+		items = append(items, map[string]any{
+			"role":    role,
+			"content": "turn-" + string(rune('a'+index%26)),
+		})
+	}
+	payload := map[string]any{
+		"model":        "m",
+		"system":       "system prompt",
+		"instructions": "developer instruction",
+		"tools":        []any{map[string]any{"name": "lookup"}},
+		"messages":     items,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	want := legacyRouteAffinityFingerprints("messages", payload, items, "m")
+	got := requestRouteAffinityFingerprints(nil, body, "m")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("incremental fingerprints differ from legacy algorithm:\n got: %v\nwant: %v", got, want)
+	}
+	if len(got) != maxRouteAffinityPrefixes {
+		t.Fatalf("fingerprint count=%d, want bounded tail %d", len(got), maxRouteAffinityPrefixes)
+	}
+}
+
+func legacyRouteAffinityFingerprints(field string, payload map[string]any, items []any, model string) []string {
+	static := map[string]any{"model": model}
+	for _, key := range []string{"system", "instructions", "tools"} {
+		if value, ok := payload[key]; ok {
+			static[key] = value
+		}
+	}
+	staticJSON, err := json.Marshal(static)
+	if err != nil {
+		return nil
+	}
+	hashInput := make([]byte, 0, len(staticJSON)+len(field)+len(items)*32+16)
+	hashInput = append(hashInput, ("body:"+field+"\x00")...)
+	hashInput = append(hashInput, staticJSON...)
+	conversationSeen := false
+	prefixes := make([]string, 0, minInt(len(items), maxRouteAffinityPrefixes))
+	for _, item := range items {
+		itemJSON, err := json.Marshal(item)
+		if err != nil {
+			return nil
+		}
+		hashInput = append(hashInput, 0)
+		hashInput = append(hashInput, itemJSON...)
+		conversationSeen = conversationSeen || conversationItemHasTurn(item)
+		if !conversationSeen {
+			continue
+		}
+		sum := sha256.Sum256(hashInput)
+		fingerprint := hex.EncodeToString(sum[:])
+		if len(prefixes) == maxRouteAffinityPrefixes {
+			copy(prefixes, prefixes[1:])
+			prefixes[len(prefixes)-1] = fingerprint
+		} else {
+			prefixes = append(prefixes, fingerprint)
+		}
+	}
+	result := make([]string, 0, len(prefixes))
+	for index := len(prefixes) - 1; index >= 0; index-- {
+		result = appendUniqueString(result, prefixes[index])
+	}
+	return result
+}
 
 func TestRequestRouteAffinityMatchesConversationPrefix(t *testing.T) {
 	first := []byte(`{"model":"m","messages":[{"role":"user","content":"one"}]}`)

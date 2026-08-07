@@ -76,6 +76,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.ResponseValidationEnabled != nil {
 		validationEnabled = *in.ResponseValidationEnabled
 	}
+	validationVirtualCache := false
+	if in.ResponseValidationVirtualCacheEnabled != nil {
+		validationVirtualCache = *in.ResponseValidationVirtualCacheEnabled
+	}
 	validationMode := gwDefaults.ResponseValidation.StreamMode
 	if in.ResponseValidationStreamMode != nil {
 		validationMode = *in.ResponseValidationStreamMode
@@ -129,6 +133,7 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		HedgeMaxAttempts:                  hedgeAttempts,
 		HedgeVirtualCacheEnabled:          hedgeVirtualCache,
 		ResponseValidationEnabled:         validationEnabled,
+		ResponseValidationVirtualCacheEnabled: validationVirtualCache,
 		ResponseValidationStreamMode:      validationMode,
 		ResponseValidationPrefixBytes:     prefixBytes,
 		ResponseValidationPrefixTimeoutMS: prefixTimeoutMS,
@@ -304,6 +309,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	item.HedgeDelaySeconds, item.HedgeMaxParallel, item.HedgeMaxAttempts = a.clampGroupHedgePolicy(hd, hp, ha)
 	if in.ResponseValidationEnabled != nil {
 		item.ResponseValidationEnabled = *in.ResponseValidationEnabled
+	}
+	if in.ResponseValidationVirtualCacheEnabled != nil {
+		item.ResponseValidationVirtualCacheEnabled = *in.ResponseValidationVirtualCacheEnabled
 	}
 	validationMode := item.ResponseValidationStreamMode
 	if in.ResponseValidationStreamMode != nil {

@@ -1574,6 +1574,7 @@ type GatewayFinalizeRequestInput struct {
 	VirtualCacheReadEnabled bool
 	VirtualCacheReadTokens  int
 	VirtualCacheReadCost    float64
+	VirtualCacheReason      string
 }
 
 // FinalizeRequest 原子完成 winner-only 结算。返回值表示本次调用是否首次
@@ -1635,8 +1636,13 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 		if math.IsNaN(billedCost) || math.IsInf(billedCost, 0) || billedCost < 0 {
 			return fmt.Errorf("winner billed cost must be a finite non-negative number")
 		}
-		virtualRequested := input.VirtualCacheReadEnabled ||
-			input.VirtualCacheReadTokens > 0 || input.VirtualCacheReadCost > 0
+		virtualReason := strings.TrimSpace(input.VirtualCacheReason)
+		if virtualReason == "" && input.HedgeTriggered {
+			// Backwards compatibility for callers created before the reason field.
+			virtualReason = GatewayVirtualCacheReasonHedge
+		}
+		virtualRequested := input.VirtualCacheReadEnabled || input.VirtualCacheReadTokens > 0 ||
+			input.VirtualCacheReadCost > 0 || virtualReason != ""
 		if input.BilledCostSet && !virtualRequested {
 			return fmt.Errorf("billed cost override requires virtual cache settlement")
 		}
@@ -1647,24 +1653,40 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 			if !input.VirtualCacheReadEnabled || input.VirtualCacheReadTokens <= 0 {
 				return fmt.Errorf("virtual cache settlement requires positive virtual cache tokens")
 			}
-			if !input.HedgeTriggered {
-				return fmt.Errorf("virtual cache settlement requires a real hedge")
-			}
-			if usage.AttemptKind != GatewayAttemptKindPrimary && usage.AttemptKind != GatewayAttemptKindHedge {
-				return fmt.Errorf("virtual cache settlement requires a hedge winner")
-			}
 			if !usage.Success {
 				return fmt.Errorf("virtual cache settlement requires a successful winner")
 			}
 			if gatewayUsageHasMediaOutput(usage) {
 				return fmt.Errorf("virtual cache settlement is not available for media output")
 			}
-			hasCompanion, err := gatewayUsageHasHedgeCompanion(tx, input.RequestID, input.GatewayKeyID, usage)
-			if err != nil {
-				return fmt.Errorf("check hedge companion: %w", err)
-			}
-			if !hasCompanion {
-				return fmt.Errorf("virtual cache settlement requires a recorded hedge attempt")
+			switch virtualReason {
+			case GatewayVirtualCacheReasonHedge:
+				if !input.HedgeTriggered {
+					return fmt.Errorf("virtual cache hedge settlement requires a real hedge")
+				}
+				if usage.AttemptKind != GatewayAttemptKindPrimary && usage.AttemptKind != GatewayAttemptKindHedge {
+					return fmt.Errorf("virtual cache hedge settlement requires a hedge winner")
+				}
+				hasCompanion, err := gatewayUsageHasHedgeCompanion(tx, input.RequestID, input.GatewayKeyID, usage)
+				if err != nil {
+					return fmt.Errorf("check hedge companion: %w", err)
+				}
+				if !hasCompanion {
+					return fmt.Errorf("virtual cache hedge settlement requires a recorded hedge attempt")
+				}
+			case GatewayVirtualCacheReasonResponseRuleFailover:
+				if usage.AttemptKind != GatewayAttemptKindFailover {
+					return fmt.Errorf("virtual cache response-rule settlement requires a failover winner")
+				}
+				hasCompanion, err := gatewayUsageHasResponseRuleCompanion(tx, input.RequestID, input.GatewayKeyID, usage)
+				if err != nil {
+					return fmt.Errorf("check response-rule companion: %w", err)
+				}
+				if !hasCompanion {
+					return fmt.Errorf("virtual cache response-rule settlement requires a prior rejected route")
+				}
+			default:
+				return fmt.Errorf("unsupported virtual cache reason %q", virtualReason)
 			}
 			if input.VirtualCacheReadTokens > usage.InputTokens {
 				return fmt.Errorf("virtual cache read tokens exceed fresh input tokens")
@@ -1692,6 +1714,7 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 			BilledCost:             billedCost,
 			VirtualCacheReadTokens: input.VirtualCacheReadTokens,
 			VirtualCacheReadCost:   input.VirtualCacheReadCost,
+			VirtualCacheReason:     virtualReason,
 			CreatedAt:              time.Now().UTC(),
 		}
 		if err := tx.Create(settlement).Error; err != nil {
@@ -1710,6 +1733,7 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 			"billed_cost":               billedCost,
 			"virtual_cache_read_tokens": input.VirtualCacheReadTokens,
 			"virtual_cache_read_cost":   input.VirtualCacheReadCost,
+			"virtual_cache_reason":      virtualReason,
 		}).Error; err != nil {
 			return err
 		}
@@ -1726,6 +1750,7 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 				"billed_cost":               billedCost,
 				"virtual_cache_read_tokens": input.VirtualCacheReadTokens,
 				"virtual_cache_read_cost":   input.VirtualCacheReadCost,
+				"virtual_cache_reason":      virtualReason,
 			}).Error
 	})
 	if err != nil {
@@ -1764,6 +1789,20 @@ func gatewayUsageHasHedgeCompanion(tx *gorm.DB, requestID string, gatewayKeyID u
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func gatewayUsageHasResponseRuleCompanion(tx *gorm.DB, requestID string, gatewayKeyID uint, winner GatewayUsageLog) (bool, error) {
+	if tx == nil || strings.TrimSpace(requestID) == "" || gatewayKeyID == 0 || winner.Attempt <= 1 {
+		return false, nil
+	}
+	var count int64
+	err := tx.Model(&GatewayUsageLog{}).
+		Where("request_id = ? AND gateway_key_id = ?", requestID, gatewayKeyID).
+		Where("attempt < ? AND route_id <> ?", winner.Attempt, winner.RouteID).
+		Where("attempt_kind = ? AND attempt_status = ?", GatewayAttemptKindRegexReject, GatewayAttemptStatusRejected).
+		Where("validation_post_commit = ?", false).
+		Count(&count).Error
+	return count > 0, err
 }
 
 // gatewayUsageHasMediaOutput covers both the normal runtime billing fields and

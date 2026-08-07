@@ -139,9 +139,9 @@ func appendConversationFingerprints(out *[]string, field string, payload map[str
 	// commonly appends an assistant turn and a new user turn, so removing only
 	// the final item cannot match the previous request's history. Keeping a
 	// bounded tail protects long conversations from creating excessive keys.
-	hashInput := make([]byte, 0, len(staticJSON)+len(field)+len(items)*32+16)
-	hashInput = append(hashInput, ("body:"+field+"\x00")...)
-	hashInput = append(hashInput, staticJSON...)
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("body:" + field + "\x00"))
+	_, _ = digest.Write(staticJSON)
 	conversationSeen := false
 	prefixes := make([]string, 0, minInt(len(items), maxRouteAffinityPrefixes))
 	for _, item := range items {
@@ -149,19 +149,18 @@ func appendConversationFingerprints(out *[]string, field string, payload map[str
 		if marshalErr != nil {
 			return
 		}
-		hashInput = append(hashInput, 0)
-		hashInput = append(hashInput, itemJSON...)
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write(itemJSON)
 		conversationSeen = conversationSeen || conversationItemHasTurn(item)
 		if !conversationSeen {
 			continue
 		}
-		sum := sha256.Sum256(hashInput)
-		digest := hex.EncodeToString(sum[:])
+		fingerprint := hex.EncodeToString(digest.Sum(nil))
 		if len(prefixes) == maxRouteAffinityPrefixes {
 			copy(prefixes, prefixes[1:])
-			prefixes[len(prefixes)-1] = digest
+			prefixes[len(prefixes)-1] = fingerprint
 		} else {
-			prefixes = append(prefixes, digest)
+			prefixes = append(prefixes, fingerprint)
 		}
 	}
 	for index := len(prefixes) - 1; index >= 0; index-- {

@@ -98,32 +98,60 @@ func RewriteModelInBody(body []byte, upstreamModel string) []byte {
 	return out
 }
 
+type requestThinking struct {
+	Type string `json:"type"`
+}
+
+type requestBodyInfo struct {
+	Model           string `json:"model"`
+	Stream          bool   `json:"stream"`
+	ServiceTier     string `json:"service_tier"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	Reasoning       *struct {
+		Effort string `json:"effort"`
+	} `json:"reasoning"`
+	OutputConfig *struct {
+		Effort string `json:"effort"`
+	} `json:"output_config"`
+	Thinking *requestThinking `json:"thinking"`
+}
+
+func parseRequestBodyInfo(body []byte) (requestBodyInfo, bool) {
+	var info requestBodyInfo
+	if len(body) == 0 || json.Unmarshal(body, &info) != nil {
+		return requestBodyInfo{}, false
+	}
+	return info, true
+}
+
+// ExtractRequestInfo parses the request envelope once for the forwarding hot
+// path. Large conversation arrays are skipped by encoding/json because they are
+// not fields on requestBodyInfo.
+func ExtractRequestInfo(body []byte) (model string, stream bool, serviceTier, reasoningEffort string, thinkingEnabled bool) {
+	info, ok := parseRequestBodyInfo(body)
+	if !ok {
+		return "", false, "", "", false
+	}
+	model = strings.TrimSpace(info.Model)
+	stream = info.Stream
+	serviceTier, reasoningEffort = requestMetaFromInfo(info)
+	thinkingEnabled = bodyThinkingEnabled(info.Thinking)
+	return
+}
+
 // ExtractModelFromBody 从 JSON 请求体取 model。
 func ExtractModelFromBody(body []byte) string {
-	if len(body) == 0 {
+	info, ok := parseRequestBodyInfo(body)
+	if !ok {
 		return ""
 	}
-	var obj struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(obj.Model)
+	return strings.TrimSpace(info.Model)
 }
 
 // ExtractStreamFlag 从请求体判断是否 stream。
 func ExtractStreamFlag(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	var obj struct {
-		Stream bool `json:"stream"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return false
-	}
-	return obj.Stream
+	info, ok := parseRequestBodyInfo(body)
+	return ok && info.Stream
 }
 
 // ExtractMetaFromBody 提取 service_tier / reasoning_effort（尽力而为）。
@@ -135,48 +163,36 @@ func ExtractStreamFlag(body []byte) bool {
 //  5. 国产 thinking 开启但无档位时默认 "high"（见 ApplyThinkingEnabledEffortFallback；
 //     此处仅用 body.model 做初判，路由映射后的上游模型在转发路径再补一次）
 func ExtractMetaFromBody(body []byte) (serviceTier, reasoningEffort string) {
-	if len(body) == 0 {
+	info, ok := parseRequestBodyInfo(body)
+	if !ok {
 		return "", ""
 	}
-	var obj struct {
-		Model           string `json:"model"`
-		ServiceTier     string `json:"service_tier"`
-		ReasoningEffort string `json:"reasoning_effort"`
-		Reasoning       *struct {
-			Effort string `json:"effort"`
-		} `json:"reasoning"`
-		OutputConfig *struct {
-			Effort string `json:"effort"`
-		} `json:"output_config"`
-		Thinking *struct {
-			Type string `json:"type"`
-		} `json:"thinking"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return "", ""
-	}
-	serviceTier = strings.TrimSpace(obj.ServiceTier)
+	return requestMetaFromInfo(info)
+}
 
-	if obj.Reasoning != nil {
-		if e := normalizeOpenAIReasoningEffort(obj.Reasoning.Effort); e != "" {
+func requestMetaFromInfo(info requestBodyInfo) (serviceTier, reasoningEffort string) {
+	serviceTier = strings.TrimSpace(info.ServiceTier)
+
+	if info.Reasoning != nil {
+		if e := normalizeOpenAIReasoningEffort(info.Reasoning.Effort); e != "" {
 			return serviceTier, e
 		}
 	}
-	if e := normalizeOpenAIReasoningEffort(obj.ReasoningEffort); e != "" {
+	if e := normalizeOpenAIReasoningEffort(info.ReasoningEffort); e != "" {
 		return serviceTier, e
 	}
-	if obj.OutputConfig != nil {
-		if e := normalizeClaudeOutputEffort(obj.OutputConfig.Effort); e != "" {
+	if info.OutputConfig != nil {
+		if e := normalizeClaudeOutputEffort(info.OutputConfig.Effort); e != "" {
 			return serviceTier, e
 		}
 	}
-	if e := deriveReasoningEffortFromModel(obj.Model); e != "" {
+	if e := deriveReasoningEffortFromModel(info.Model); e != "" {
 		return serviceTier, e
 	}
 	// 初判：thinking 已开且 body.model 属于国产 passback 族 → high
 	// （映射后的上游模型在 attempt 侧再走一遍 ApplyThinkingEnabledEffortFallback）
-	if bodyThinkingEnabled(obj.Thinking) {
-		if e := defaultEffortForThinkingEnabled(obj.Model); e != "" {
+	if bodyThinkingEnabled(info.Thinking) {
+		if e := defaultEffortForThinkingEnabled(info.Model); e != "" {
 			return serviceTier, e
 		}
 	}
@@ -186,23 +202,11 @@ func ExtractMetaFromBody(body []byte) (serviceTier, reasoningEffort string) {
 // bodyHasThinkingEnabled 检测入站 body 是否开启 thinking（Anthropic / 国产兼容）。
 // 对齐 sub2api：thinking.type 为 enabled 或 adaptive。
 func bodyHasThinkingEnabled(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	var obj struct {
-		Thinking *struct {
-			Type string `json:"type"`
-		} `json:"thinking"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return false
-	}
-	return bodyThinkingEnabled(obj.Thinking)
+	info, ok := parseRequestBodyInfo(body)
+	return ok && bodyThinkingEnabled(info.Thinking)
 }
 
-func bodyThinkingEnabled(thinking *struct {
-	Type string `json:"type"`
-}) bool {
+func bodyThinkingEnabled(thinking *requestThinking) bool {
 	if thinking == nil {
 		return false
 	}

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/gin-gonic/gin"
 )
 
@@ -44,9 +45,11 @@ type streamPrefixGateWriter struct {
 	winner    bool
 	committed bool
 	commitErr error
+	finished  bool
 	rejection validationResult
 	lateMatch validationResult
 	timer     *timeTimer
+	virtualCache *virtualCacheSSETransformer
 }
 
 // timeTimer keeps the production implementation testable without exposing a
@@ -104,9 +107,18 @@ func (g *streamPrefixGateWriter) Write(payload []byte) (int, error) {
 		if result := g.validator.Consume(payload); result.IsRejected() && result.PostCommit && !g.lateMatch.IsRejected() {
 			g.lateMatch = result
 		}
+		out := payload
+		if g.virtualCache != nil {
+			out = g.virtualCache.Transform(payload, false)
+		}
 		downstream := g.downstream
 		g.mu.Unlock()
-		return downstream.Write(payload)
+		if len(out) > 0 {
+			if _, err := downstream.Write(out); err != nil {
+				return 0, err
+			}
+		}
+		return len(payload), nil
 	}
 
 	if g.size < 0 {
@@ -209,6 +221,15 @@ func (g *streamPrefixGateWriter) Unwrap() http.ResponseWriter {
 
 func (g *streamPrefixGateWriter) Ready() <-chan validationResult { return g.ready }
 
+func (g *streamPrefixGateWriter) EnableVirtualCache(kind protocol.Kind) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.committed || g.virtualCache != nil {
+		return
+	}
+	g.virtualCache = newVirtualCacheSSETransformer(kind)
+}
+
 func (g *streamPrefixGateWriter) Win() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -230,8 +251,12 @@ func (g *streamPrefixGateWriter) Win() error {
 		g.downstream.Header()[key] = copied
 	}
 	g.downstream.WriteHeader(g.status)
-	if len(g.buffer) > 0 {
-		_, g.commitErr = g.downstream.Write(g.buffer)
+	buffer := g.buffer
+	if g.virtualCache != nil {
+		buffer = g.virtualCache.Transform(buffer, g.finished)
+	}
+	if len(buffer) > 0 {
+		_, g.commitErr = g.downstream.Write(buffer)
 	}
 	if g.commitErr == nil {
 		g.downstream.Flush()
@@ -258,6 +283,15 @@ func (g *streamPrefixGateWriter) Lose() {
 func (g *streamPrefixGateWriter) Finish() validationResult {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.finished = true
+	if g.committed && g.virtualCache != nil && g.commitErr == nil {
+		if tail := g.virtualCache.Transform(nil, true); len(tail) > 0 {
+			_, g.commitErr = g.downstream.Write(tail)
+			if g.commitErr == nil {
+				g.downstream.Flush()
+			}
+		}
+	}
 	if g.rejection.IsRejected() {
 		return g.rejection
 	}
@@ -286,6 +320,18 @@ func (g *streamPrefixGateWriter) DownstreamCommitted() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.committed
+}
+
+func (g *streamPrefixGateWriter) CommitError() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.commitErr
+}
+
+func (g *streamPrefixGateWriter) VirtualCacheApplied() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.virtualCache != nil && g.virtualCache.Applied()
 }
 
 func (g *streamPrefixGateWriter) Rejection() validationResult {

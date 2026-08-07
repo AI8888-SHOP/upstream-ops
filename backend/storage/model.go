@@ -481,6 +481,9 @@ const (
 	GatewayAttemptKindRecovery    = "recovery"
 	GatewayAttemptKindRegexReject = "regex_reject"
 
+	GatewayVirtualCacheReasonHedge                = "hedge"
+	GatewayVirtualCacheReasonResponseRuleFailover = "response_rule_failover"
+
 	GatewayAttemptStatusAccepted = "accepted"
 	GatewayAttemptStatusRejected = "rejected"
 	GatewayAttemptStatusError    = "error"
@@ -562,7 +565,8 @@ type GatewayGroup struct {
 	// usage and attempt costs remain unchanged for audit/accounting.
 	HedgeVirtualCacheEnabled bool `gorm:"not null;default:false" json:"hedge_virtual_cache_enabled"`
 	// 响应校验按组启用；流式响应只在提交客户端前检查 prefix。
-	ResponseValidationEnabled         bool   `gorm:"not null;default:false" json:"response_validation_enabled"`
+	ResponseValidationEnabled             bool   `gorm:"not null;default:false" json:"response_validation_enabled"`
+	ResponseValidationVirtualCacheEnabled bool   `gorm:"not null;default:false" json:"response_validation_virtual_cache_enabled"`
 	ResponseValidationStreamMode      string `gorm:"size:16;not null;default:'prefix'" json:"response_validation_stream_mode"`
 	ResponseValidationPrefixBytes     int    `gorm:"not null;default:8192" json:"response_validation_prefix_bytes"`
 	ResponseValidationPrefixTimeoutMS int    `gorm:"not null;default:2000" json:"response_validation_prefix_timeout_ms"`
@@ -763,6 +767,7 @@ type GatewayUsageLog struct {
 	// the raw upstream usage buckets above.
 	VirtualCacheReadTokens int     `gorm:"not null;default:0" json:"virtual_cache_read_tokens"`
 	VirtualCacheReadCost   float64 `gorm:"not null;default:0" json:"virtual_cache_read_cost"`
+	VirtualCacheReason     string  `gorm:"size:32;not null;default:'';index" json:"virtual_cache_reason,omitempty"`
 	ImageOutputCost        float64 `gorm:"not null;default:0" json:"image_output_cost"`
 	TotalCost              float64 `gorm:"not null;default:0" json:"total_cost"`
 	ActualCost             float64 `gorm:"not null;default:0" json:"actual_cost"`
@@ -808,6 +813,7 @@ type GatewayRequestFinalization struct {
 	BilledCost             float64   `gorm:"not null;default:0" json:"billed_cost"`
 	VirtualCacheReadTokens int       `gorm:"not null;default:0" json:"virtual_cache_read_tokens"`
 	VirtualCacheReadCost   float64   `gorm:"not null;default:0" json:"virtual_cache_read_cost"`
+	VirtualCacheReason     string    `gorm:"size:32;not null;default:'';index" json:"virtual_cache_reason,omitempty"`
 	CreatedAt              time.Time `gorm:"not null" json:"created_at"`
 }
 
@@ -824,6 +830,7 @@ type GatewayWinnerSettlement struct {
 	BilledCost             float64   `gorm:"not null;default:0" json:"billed_cost"`
 	VirtualCacheReadTokens int       `gorm:"not null;default:0" json:"virtual_cache_read_tokens"`
 	VirtualCacheReadCost   float64   `gorm:"not null;default:0" json:"virtual_cache_read_cost"`
+	VirtualCacheReason     string    `gorm:"size:32;not null;default:'';index" json:"virtual_cache_reason,omitempty"`
 	CreatedAt              time.Time `gorm:"not null" json:"created_at"`
 }
 

@@ -38,11 +38,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		// 仅透传；若路由强制 anthropic 则报错
 	}
 
-	requestedModel := ExtractModelFromBody(body)
-	stream := ExtractStreamFlag(body)
-	serviceTier, reasoningEffort := ExtractMetaFromBody(body)
-	// thinking 是否开启：国产模型无 effort 档位时，按上游映射模型补默认 high（对齐 sub2api）
-	thinkingEnabled := bodyHasThinkingEnabled(body)
+	requestedModel, stream, serviceTier, reasoningEffort, thinkingEnabled := ExtractRequestInfo(body)
 	_ = rt.Keys.TouchLastUsed(key.ID, time.Now())
 
 	routes, err := rt.Routes.ListByGroupID(group.ID)
@@ -99,6 +95,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			reasoningEffort: reasoningEffort, thinkingEnabled: thinkingEnabled,
 			routes: routes, validator: validator, requestID: reqID, affinity: affinity,
 			firstToken: firstTokenTimeout, hedgeActive: hedgeActive,
+			prepareCache: &upstreamRequestPrepareCache{},
 		})
 		return
 	}
@@ -141,6 +138,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	// 全局尝试序号（写入 usage.attempt，同一 request_id 关联）
 	attemptNo := 0
 	routesTried := 0
+	prepareCache := &upstreamRequestPrepareCache{}
 	finishRecoveryProbe := func(routeID uint) {
 		if !affinity.Recovery || affinity.RecoveryRouteID != routeID {
 			return
@@ -263,7 +261,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				upstreamKind = protocol.KindOpenAIChat
 			}
 
-			fwdBody, upstreamPath, converted, convErr := rt.prepareUpstreamRequest(body, kind, upstreamKind, upstreamModel, stream, path)
+			fwdBody, upstreamPath, converted, convErr := prepareCache.prepare(
+				rt.Service, body, kind, upstreamKind, requestedModel, upstreamModel, stream, path,
+			)
 			if convErr != nil {
 				message := "protocol convert failed: " + convErr.Error()
 				errInfo := usageErrorInfo{

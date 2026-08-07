@@ -201,18 +201,7 @@ func AnthropicToOpenAIResponse(body []byte, model string) ([]byte, error) {
 	}
 	usage := map[string]any{}
 	if u, ok := in["usage"].(map[string]any); ok {
-		inTok, _ := asInt(u["input_tokens"])
-		outTok, _ := asInt(u["output_tokens"])
-		usage["prompt_tokens"] = inTok
-		usage["completion_tokens"] = outTok
-		usage["total_tokens"] = inTok + outTok
-		// 保留 cache 扩展
-		if v, ok := asInt(u["cache_creation_input_tokens"]); ok {
-			usage["cache_creation_input_tokens"] = v
-		}
-		if v, ok := asInt(u["cache_read_input_tokens"]); ok {
-			usage["cache_read_input_tokens"] = v
-		}
+		usage = anthropicUsageToOpenAI(u)
 	}
 	if model == "" {
 		if m, ok := in["model"].(string); ok {
@@ -234,6 +223,27 @@ func AnthropicToOpenAIResponse(body []byte, model string) ([]byte, error) {
 		"usage": usage,
 	}
 	return json.Marshal(out)
+}
+
+func anthropicUsageToOpenAI(usage map[string]any) map[string]any {
+	fresh, _ := asInt(usage["input_tokens"])
+	output, _ := asInt(usage["output_tokens"])
+	cacheRead, _ := asInt(usage["cache_read_input_tokens"])
+	cacheCreation, _ := asInt(usage["cache_creation_input_tokens"])
+	totalInput := fresh + cacheRead + cacheCreation
+	out := map[string]any{
+		"prompt_tokens":     totalInput,
+		"completion_tokens": output,
+		"total_tokens":      totalInput + output,
+	}
+	if cacheRead > 0 {
+		out["cache_read_input_tokens"] = cacheRead
+		out["prompt_tokens_details"] = map[string]any{"cached_tokens": cacheRead}
+	}
+	if cacheCreation > 0 {
+		out["cache_creation_input_tokens"] = cacheCreation
+	}
+	return out
 }
 
 // AnthropicSSEToOpenAISSE 将缓冲的 Anthropic SSE 转为 OpenAI chat.completion.chunk SSE。

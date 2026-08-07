@@ -1082,6 +1082,9 @@ func (s *ResponsesToOpenAIStream) handleCompleted(payload map[string]any) [][]by
 				var m map[string]any
 				if json.Unmarshal(chat, &m) == nil {
 					frames := s.emitChatMessageAsChunks(m)
+					if usage := responsesUsageToOpenAI(resp); len(usage) > 0 {
+						frames = append(frames, openAIUsageFrame(s.MsgID, s.Model, usage))
+					}
 					s.done = true
 					frames = append(frames, []byte("data: [DONE]\n\n"))
 					return frames
@@ -1101,8 +1104,49 @@ func (s *ResponsesToOpenAIStream) handleCompleted(payload map[string]any) [][]by
 	var frames [][]byte
 	frames = append(frames, s.ensureRole()...)
 	frames = append(frames, openAISSEFrame(openaiChunk(s.MsgID, s.Model, map[string]any{}, s.finish)))
+	if resp, ok := payload["response"].(map[string]any); ok {
+		if usage := responsesUsageToOpenAI(resp); len(usage) > 0 {
+			frames = append(frames, openAIUsageFrame(s.MsgID, s.Model, usage))
+		}
+	}
 	frames = append(frames, []byte("data: [DONE]\n\n"))
 	return frames
+}
+
+func responsesUsageToOpenAI(response map[string]any) map[string]any {
+	usage, _ := response["usage"].(map[string]any)
+	if usage == nil {
+		return nil
+	}
+	input, _ := asInt(usage["input_tokens"])
+	output, _ := asInt(usage["output_tokens"])
+	out := map[string]any{
+		"prompt_tokens":     input,
+		"completion_tokens": output,
+		"total_tokens":      input + output,
+	}
+	if details, ok := usage["input_tokens_details"].(map[string]any); ok {
+		copied := make(map[string]any, len(details))
+		for key, value := range details {
+			copied[key] = value
+		}
+		out["prompt_tokens_details"] = copied
+	}
+	for _, key := range []string{"cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens"} {
+		if value, exists := usage[key]; exists {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func openAIUsageFrame(id, model string, usage map[string]any) []byte {
+	payload := map[string]any{
+		"id": id, "object": "chat.completion.chunk", "created": 0, "model": model,
+		"choices": []any{}, "usage": usage,
+	}
+	raw, _ := json.Marshal(payload)
+	return openAISSEFrame(raw)
 }
 
 func (s *ResponsesToOpenAIStream) emitChatMessageAsChunks(m map[string]any) [][]byte {

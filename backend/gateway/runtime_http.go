@@ -55,25 +55,64 @@ func (rt *Runtime) httpClientForChannel(ch *storage.Channel) *http.Client {
 func (rt *Runtime) httpClientForTarget(ch *storage.Channel, provider *storage.GatewayProvider) *http.Client {
 	// 网关转发超时由 gateway.forwardTimeoutSeconds 控制（与监控上游 timeout 分离）。
 	timeout := rt.gatewayRuntime().ForwardTimeout()
+	proxy := rt.proxyURLForTarget(ch, provider)
+	transport := rt.httpTransportForProxy(proxy)
+	return &http.Client{Timeout: timeout, Transport: transport}
+}
 
+func (rt *Runtime) httpTransportForProxy(proxy string) *http.Transport {
+	if rt == nil || rt.Service == nil {
+		return newGatewayHTTPTransport(proxy)
+	}
+	s := rt.Service
+	s.httpTransportsMu.Lock()
+	defer s.httpTransportsMu.Unlock()
+	if s.httpTransports == nil {
+		s.httpTransports = make(map[string]*http.Transport)
+	}
+	if transport := s.httpTransports[proxy]; transport != nil {
+		return transport
+	}
+	transport := newGatewayHTTPTransport(proxy)
+	s.httpTransports[proxy] = transport
+	return transport
+}
+
+func (s *Service) invalidateHTTPTransports() {
+	if s == nil {
+		return
+	}
+	s.httpTransportsMu.Lock()
+	transports := s.httpTransports
+	s.httpTransports = make(map[string]*http.Transport)
+	s.httpTransportsMu.Unlock()
+	for _, transport := range transports {
+		if transport != nil {
+			transport.CloseIdleConnections()
+		}
+	}
+}
+
+func newGatewayHTTPTransport(proxy string) *http.Transport {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		MaxIdleConns:          100,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   32,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}
-	if proxy := rt.proxyURLForTarget(ch, provider); proxy != "" {
+	if proxy != "" {
 		if u, err := url.Parse(proxy); err == nil {
 			transport.Proxy = http.ProxyURL(u)
 		}
 	}
-	return &http.Client{Timeout: timeout, Transport: transport}
+	return transport
 }
 
 // ---------- key helpers ----------

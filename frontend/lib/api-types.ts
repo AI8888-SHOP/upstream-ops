@@ -671,6 +671,8 @@ export interface GatewayGroup {
   hedge_virtual_cache_enabled?: boolean
   /** 是否启用响应内容正则校验 */
   response_validation_enabled?: boolean
+  /** 正则预提交拒绝并切换其它渠道后，将 winner 输入按虚拟缓存读取计费 */
+  response_validation_virtual_cache_enabled?: boolean
   /** 流式校验模式；当前为 prefix */
   response_validation_stream_mode?: "prefix"
   /** 提交流给客户端前最多缓存的字节数 */
@@ -947,6 +949,8 @@ export interface GatewayUsageLog {
   cache_read_tokens: number
   /** 网关为实际并发 hedge 提供的用户侧虚拟缓存读取 token */
   virtual_cache_read_tokens?: number
+  /** hedge | response_rule_failover */
+  virtual_cache_reason?: string
   cache_creation_5m_tokens?: number
   cache_creation_1h_tokens?: number
   image_output_tokens?: number

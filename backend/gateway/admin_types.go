@@ -33,6 +33,7 @@ type CreateGroupInput struct {
 	HedgeMaxAttempts                  *int     `json:"hedge_max_attempts"`
 	HedgeVirtualCacheEnabled          *bool    `json:"hedge_virtual_cache_enabled"`
 	ResponseValidationEnabled         *bool    `json:"response_validation_enabled"`
+	ResponseValidationVirtualCacheEnabled *bool `json:"response_validation_virtual_cache_enabled"`
 	ResponseValidationStreamMode      *string  `json:"response_validation_stream_mode"`
 	ResponseValidationPrefixBytes     *int     `json:"response_validation_prefix_bytes"`
 	ResponseValidationPrefixTimeoutMS *int     `json:"response_validation_prefix_timeout_ms"`
@@ -65,6 +66,7 @@ type UpdateGroupInput struct {
 	HedgeMaxAttempts                  *int     `json:"hedge_max_attempts"`
 	HedgeVirtualCacheEnabled          *bool    `json:"hedge_virtual_cache_enabled"`
 	ResponseValidationEnabled         *bool    `json:"response_validation_enabled"`
+	ResponseValidationVirtualCacheEnabled *bool `json:"response_validation_virtual_cache_enabled"`
 	ResponseValidationStreamMode      *string  `json:"response_validation_stream_mode"`
 	ResponseValidationPrefixBytes     *int     `json:"response_validation_prefix_bytes"`
 	ResponseValidationPrefixTimeoutMS *int     `json:"response_validation_prefix_timeout_ms"`

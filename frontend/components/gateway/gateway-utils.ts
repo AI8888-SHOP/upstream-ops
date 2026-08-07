@@ -41,6 +41,7 @@ export type GroupFormState = {
   hedge_max_attempts: string
   hedge_virtual_cache_enabled: boolean
   response_validation_enabled: boolean
+  response_validation_virtual_cache_enabled: boolean
   response_validation_prefix_bytes: string
   response_validation_prefix_timeout_ms: string
   /** 组级统一 User-Agent；路由选「组」时使用 */
@@ -521,6 +522,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   hedge_max_attempts: "4",
   hedge_virtual_cache_enabled: false,
   response_validation_enabled: false,
+  response_validation_virtual_cache_enabled: false,
   response_validation_prefix_bytes: "8192",
   response_validation_prefix_timeout_ms: "2000",
   user_agent: "",

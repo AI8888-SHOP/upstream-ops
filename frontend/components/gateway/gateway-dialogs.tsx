@@ -1021,6 +1021,22 @@ export function GroupFormDialog({
                   }
                 />
               </div>
+              <div className="flex items-center justify-between gap-2 border-t border-border/60 pt-3">
+                <div className="min-w-0 flex-1">
+                  <Label>正则顺延虚拟缓存</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    响应在提交前命中规则并切换其它渠道时，将获胜响应的输入按缓存读取计费。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  disabled={!groupForm.response_validation_enabled}
+                  checked={groupForm.response_validation_virtual_cache_enabled}
+                  onCheckedChange={(v) =>
+                    setGroupForm({ ...groupForm, response_validation_virtual_cache_enabled: v })
+                  }
+                />
+              </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1">
                   <Label>流式前缀（字节）</Label>
