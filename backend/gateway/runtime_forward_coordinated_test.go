@@ -547,16 +547,31 @@ func TestCoordinatedTransportFailurePolicyKeepsRetryIndependent(t *testing.T) {
 	}
 }
 
-func TestValidateCoordinatedAttemptSkipsExcludedRunningRetry(t *testing.T) {
+func TestValidateCoordinatedAttemptSkipsExcludedPrimary(t *testing.T) {
 	attempt := &coordinatedForwardAttempt{
 		Route:  storage.GatewayRoute{ID: 7},
+		Plan:   coordinatedRoutePlan{TryOnRoute: 0, MaxTries: 2},
 		Status: http.StatusOK,
 	}
 	var excluded sync.Map
 	excluded.Store(uint(7), struct{}{})
 	accepted, err := validateCoordinatedAttempt(attempt, &excluded)
 	if accepted || !errors.Is(err, errSkippedRejectedRoute) {
-		t.Fatalf("accepted=%v err=%v, want excluded retry", accepted, err)
+		t.Fatalf("accepted=%v err=%v, want excluded primary", accepted, err)
+	}
+}
+
+func TestValidateCoordinatedAttemptAllowsPlannedSameRouteRetryAfterRejection(t *testing.T) {
+	attempt := &coordinatedForwardAttempt{
+		Route:  storage.GatewayRoute{ID: 7},
+		Plan:   coordinatedRoutePlan{TryOnRoute: 1, MaxTries: 2},
+		Status: http.StatusOK,
+	}
+	var excluded sync.Map
+	excluded.Store(uint(7), struct{}{})
+	accepted, err := validateCoordinatedAttempt(attempt, &excluded)
+	if !accepted || err != nil {
+		t.Fatalf("accepted=%v err=%v, want same-route retry to remain eligible", accepted, err)
 	}
 }
 

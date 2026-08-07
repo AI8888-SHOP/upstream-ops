@@ -299,7 +299,7 @@ export function ResponseRulesPanel({
                 响应正则规则
               </div>
               <p className="text-xs leading-5 text-muted-foreground">
-                按优先级检查响应。命中后拒绝当前 attempt，并直接切换其它路由。
+                按优先级检查响应。命中后拒绝当前 attempt，先按组内重试次数重试当前路由，再切换其它路由。
               </p>
             </div>
             <div className="flex flex-wrap gap-2">

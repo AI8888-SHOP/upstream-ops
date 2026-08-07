@@ -232,7 +232,11 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 				return attempt, attempt.Err
 			}
 		}
-		if _, excluded := excludedRoutes.Load(attempt.Route.ID); excluded {
+		if _, excluded := excludedRoutes.Load(attempt.Route.ID); excluded && attempt.Plan.TryOnRoute == 0 {
+			// A response-rule rejection excludes a route's primary entry, but it
+			// must not cancel the explicitly planned same-route retry ladder. This
+			// lets RetryCount absorb transient/provider-local overload text before
+			// the scheduler moves to the next channel.
 			attempt.Skipped = true
 			attempt.Err = errSkippedRejectedRoute
 			return attempt, attempt.Err
@@ -442,11 +446,11 @@ func validateCoordinatedAttempt(attempt *coordinatedForwardAttempt, excludedRout
 	if attempt == nil || attempt.Skipped {
 		return false, errSkippedRejectedRoute
 	}
-	if excludedRoutes != nil {
+	if excludedRoutes != nil && attempt.Plan.TryOnRoute == 0 {
 		if _, excluded := excludedRoutes.Load(attempt.Route.ID); excluded {
 			// A same-route retry may already be running when another attempt on
-			// that route matches a pre-commit response rule. It must not win after
-			// the route has been explicitly rejected.
+			// that route matches a pre-commit response rule. A later planned retry
+			// is still allowed to test the same route before failover.
 			return false, errSkippedRejectedRoute
 		}
 	}

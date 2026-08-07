@@ -1010,7 +1010,7 @@ export function GroupFormDialog({
                 <div className="min-w-0 flex-1">
                   <Label>正则响应校验</Label>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    命中规则后直接切换其它路由。非流式检查完整响应；流式在提交前检查前缀。
+                    命中规则后先按重试次数重试当前路由，再切换其它路由。非流式检查完整响应；流式在提交前检查前缀。
                   </p>
                 </div>
                 <Switch
