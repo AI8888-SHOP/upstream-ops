@@ -1264,7 +1264,9 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
     u.virtual_cache_reason === "response_rule_failover" ? "正则顺延 virtual read" : "并发兜底 virtual read"
   const billed = u.billed_cost ?? 0
   const displayed = u.winner && (billed > 0 || virtualCacheRead > 0) ? billed : actual
-  const extra = u.estimated_extra_cost || 0
+  const virtualCacheSubsidy =
+    u.winner && virtualCacheRead > 0 ? Math.max(0, actual - billed) : 0
+  const extra = Math.max(0, (u.estimated_extra_cost || 0) + virtualCacheSubsidy)
   return (
     <div className="text-sm">
       <div className="flex items-center gap-1.5">
@@ -1315,6 +1317,12 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
                 <span>{money6(u.virtual_cache_read_cost ?? 0)}</span>
               </div>
             )}
+            {virtualCacheSubsidy > 0 && (
+              <div className="flex justify-between gap-6 text-amber-700 dark:text-amber-300">
+                <span>虚拟缓存补贴</span>
+                <span>{money6(virtualCacheSubsidy)}</span>
+              </div>
+            )}
             <div className="flex justify-between gap-6">
               <span className="text-muted-foreground">倍率</span>
               <span className="text-blue-400">{(u.rate_multiplier || 1).toFixed(4)}x</span>
@@ -1341,7 +1349,7 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
             )}
             {extra > 0 ? (
               <div className="flex justify-between gap-6 text-amber-700 dark:text-amber-300">
-                <span>额外上游成本</span>
+                <span>额外成本（attempt + 补贴）</span>
                 <span>{money6(extra)}</span>
               </div>
             ) : null}
@@ -1349,7 +1357,7 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
         </Tooltip>
       </div>
       {extra > 0 ? (
-        <div className="mt-0.5 text-[11px] tabular-nums text-amber-600 dark:text-amber-400" title="loser/rejected attempt 的可能额外上游成本，不计入网关 Key 配额">
+        <div className="mt-0.5 text-[11px] tabular-nums text-amber-600 dark:text-amber-400" title="loser/rejected attempt 成本 + 虚拟缓存补贴，不计入网关 Key 配额">
           额外 {money6(extra)}
         </div>
       ) : null}

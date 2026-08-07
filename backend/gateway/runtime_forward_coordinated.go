@@ -36,6 +36,8 @@ type coordinatedForwardRequest struct {
 	requestID       string
 	firstToken      time.Duration
 	hedgeActive     bool
+	hedgeEligibilityKnown bool
+	virtualCacheEligible  bool
 	// hedgeTriggered is true only when the coordinator actually started an
 	// auxiliary hedge attempt. A hedge-enabled group that completed on its
 	// primary before the delay must not receive a virtual cache credit.
@@ -162,10 +164,11 @@ func (a *coordinatedForwardAttempt) awaitStreamResult() streamAttemptResult {
 	return result
 }
 
-func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, validator *responseValidator, request hedgeRequest) (bool, bool) {
+func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, validator *responseValidator, request hedgeRequest) (bool, bool, bool) {
 	validationEnabled := validator != nil && validator.Enabled()
-	hedgeActive := group != nil && group.HedgeEnabled && hedgeEligible(request)
-	return validationEnabled || hedgeActive, hedgeActive
+	virtualCacheEligible := hedgeEligible(request)
+	hedgeActive := group != nil && group.HedgeEnabled && virtualCacheEligible
+	return validationEnabled || hedgeActive, hedgeActive, virtualCacheEligible
 }
 
 func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
@@ -737,7 +740,6 @@ func (rt *Runtime) cleanupCoordinatedStreamLosers(result hedgeRunResult[*coordin
 	if result.Winner != nil {
 		winnerNumber = result.Winner.Info.Number
 	}
-	deadline := time.Now().Add(hedgeCleanupTimeout)
 	states.Range(func(key, value any) bool {
 		number, _ := key.(int)
 		attempt, _ := value.(*coordinatedForwardAttempt)
@@ -755,18 +757,15 @@ func (rt *Runtime) cleanupCoordinatedStreamLosers(result hedgeRunResult[*coordin
 			// cancellation row if it misses the cleanup deadline.
 			return true
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
 		select {
 		case streamResult := <-streamDone:
-			stopHedgeTimer(timer)
 			attempt.setStreamResult(streamResult)
 			attempt.applyStreamResult(streamResult)
-		case <-timer.C:
-			return false
+		default:
+			// runHedge already gave canceled losers a bounded grace period. Do
+			// not add a second blocking wait after the winner stream has ended;
+			// auditCoordinatedAttempts safely emits a synthetic cancellation row
+			// for a runner that is still unwinding.
 		}
 		return true
 	})
@@ -1089,10 +1088,14 @@ func (rt *Runtime) virtualCacheReasonForWinner(req *coordinatedForwardRequest, w
 	if modelForEligibility == "" {
 		modelForEligibility = req.requestedModel
 	}
-	if !hedgeEligible(hedgeRequest{
-		Path: req.path, Model: modelForEligibility, Header: header,
-		Body: req.body, Stream: req.stream, Realtime: strings.Contains(strings.ToLower(req.path), "realtime"),
-	}) {
+	eligible := req.virtualCacheEligible
+	if !req.hedgeEligibilityKnown {
+		eligible = hedgeEligible(hedgeRequest{
+			Path: req.path, Model: modelForEligibility, Header: header,
+			Body: req.body, Stream: req.stream, Realtime: strings.Contains(strings.ToLower(req.path), "realtime"),
+		})
+	}
+	if !eligible || mediaGenerationModel(modelForEligibility) {
 		return ""
 	}
 	if req.group.HedgeVirtualCacheEnabled && states != nil {

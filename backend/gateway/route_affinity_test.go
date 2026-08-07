@@ -129,6 +129,14 @@ func TestRequestRouteAffinityPrefersExplicitSessionHeader(t *testing.T) {
 	}
 }
 
+func TestRequestRouteAffinityUsesAnalyzedPromptCacheKeyWithoutBodyScan(t *testing.T) {
+	got := requestRouteAffinityFingerprintsWithID(nil, []byte(`not-json`), "m", "codex-cache-key")
+	want := []string{routeAffinityDigest("body:id\x00codex-cache-key")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("analyzed affinity fingerprints=%v, want %v", got, want)
+	}
+}
+
 func TestSortRoutesWithAffinityRecoversCooledRoute(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := &Service{}

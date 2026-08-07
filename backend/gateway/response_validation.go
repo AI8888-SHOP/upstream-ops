@@ -837,26 +837,66 @@ var assistantJSONFieldPriority = [...]string{
 // the JSON event has closed. It deliberately traverses only known assistant
 // fields, so arbitrary metadata strings are not treated as visible text.
 func extractPartialJSONAssistantText(data []byte) string {
+	text, _ := extractPartialJSONAssistantTextWithShape(data)
+	return text
+}
+
+func extractPartialJSONAssistantTextWithShape(data []byte) (string, bool) {
 	p := partialJSONParser{data: data}
-	return p.parseValue(true, 0)
+	return p.parseValue(true, 0), p.sawAssistantField
 }
 
 func extractPartialJSONErrorMessage(data []byte) string {
-	return extractPartialJSONErrorMessageDepth(data, 0)
+	text, _ := extractPartialJSONErrorMessageDepthFound(data, 0)
+	return text
+}
+
+var errorJSONFieldMarkers = [...][]byte{
+	[]byte(`"error"`), []byte(`"message"`), []byte(`"detail"`),
+	[]byte(`"error_description"`), []byte(`"response"`),
+	[]byte(`"incomplete_details"`), []byte(`"reason"`),
+}
+
+func mayContainErrorJSONField(data []byte) bool {
+	for _, marker := range errorJSONFieldMarkers {
+		if bytes.Contains(data, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractPartialJSONErrorMessageDepth(data []byte, depth int) string {
+	text, _ := extractPartialJSONErrorMessageDepthFound(data, depth)
+	return text
+}
+
+// extractPartialJSONErrorMessageDepthFound returns whether an error-bearing
+// field was present separately from its text. That lets the SSE hot path avoid
+// a full encoding/json decode for ordinary content events that cannot contain
+// an error message.
+func extractPartialJSONErrorMessageDepthFound(data []byte, depth int) (string, bool) {
 	if depth > 4 {
-		return ""
+		return "", false
 	}
+	found := false
 	for _, key := range []string{"error", "message", "detail", "error_description"} {
 		value, ok := partialJSONRootMember(data, key)
 		if !ok {
 			continue
 		}
+		found = true
+		if key == "error" {
+			if nested, nestedFound := extractPartialJSONErrorMessageDepthFound(value, depth+1); nestedFound {
+				if nested != "" {
+					return nested, true
+				}
+				found = true
+			}
+		}
 		p := partialJSONParser{data: value}
 		if text := p.parseValue(true, 0); text != "" {
-			return text
+			return text, true
 		}
 	}
 	for _, key := range []string{"response", "incomplete_details"} {
@@ -864,22 +904,27 @@ func extractPartialJSONErrorMessageDepth(data []byte, depth int) string {
 		if !ok {
 			continue
 		}
-		if text := extractPartialJSONErrorMessageDepth(value, depth+1); text != "" {
-			return text
+		found = true
+		if text, nestedFound := extractPartialJSONErrorMessageDepthFound(value, depth+1); nestedFound {
+			if text != "" {
+				return text, true
+			}
 		}
 	}
 	if value, ok := partialJSONRootMember(data, "reason"); ok {
+		found = true
 		parser := partialJSONParser{data: value}
 		if text := parser.parseValue(true, 0); text != "" {
-			return text
+			return text, true
 		}
 	}
-	return ""
+	return "", found
 }
 
 type partialJSONParser struct {
-	data []byte
-	pos  int
+	data              []byte
+	pos               int
+	sawAssistantField bool
 }
 
 func partialJSONRootMember(data []byte, wanted string) ([]byte, bool) {
@@ -972,6 +1017,9 @@ func (p *partialJSONParser) parseObject(collect bool, depth int) string {
 		}
 		p.pos++
 		childCollect := collect && isAssistantJSONField(key)
+		if childCollect {
+			p.sawAssistantField = true
+		}
 		value := p.parseValue(childCollect, depth)
 		if childCollect {
 			values[key] += value
@@ -1668,24 +1716,33 @@ func extractAssistantText(body []byte, headers http.Header) string {
 	if strings.Contains(contentType, "text/event-stream") || looksLikeSSEBody(body) {
 		var out strings.Builder
 		for _, payload := range sseDataPayloads(body) {
-			if payload == "" || payload == "[DONE]" {
+			trimmed := bytes.TrimSpace(payload)
+			if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
+				continue
+			}
+			if text, handled := extractSSEAssistantPayload(trimmed); handled {
+				out.WriteString(text)
 				continue
 			}
 			var value any
-			if json.Unmarshal([]byte(payload), &value) == nil {
+			if json.Unmarshal(trimmed, &value) == nil {
 				appendAssistantJSON(&out, value)
-			} else if trimmed := strings.TrimSpace(payload); strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			} else if bytes.HasPrefix(trimmed, []byte("{")) || bytes.HasPrefix(trimmed, []byte("[")) {
 				// A prefix can end in the middle of an SSE event or JSON string.
 				// Parse only assistant-bearing fields so metadata does not trigger
 				// an assistant_text rule while the event is incomplete.
-				out.WriteString(extractPartialJSONAssistantText([]byte(trimmed)))
+				out.WriteString(extractPartialJSONAssistantText(trimmed))
 			} else {
-				out.WriteString(payload)
+				out.Write(trimmed)
 			}
 		}
 		if out.Len() > 0 {
 			return out.String()
 		}
+		// A valid SSE stream with only metadata must not turn the entire raw
+		// envelope into assistant text. Besides avoiding false regex matches,
+		// this keeps lifecycle frames off the JSON decoder fallback path.
+		return ""
 	}
 	var value any
 	if json.Unmarshal(body, &value) == nil {
@@ -1694,6 +1751,45 @@ func extractAssistantText(body []byte, headers http.Header) string {
 		return out.String()
 	}
 	return string(body)
+}
+
+// extractSSEAssistantPayload handles the common JSON shapes without decoding
+// the complete event into interface{} maps. Responses lifecycle and terminal
+// events are metadata/error frames; only output_text events contribute visible
+// assistant text. The bool reports that the payload shape was recognized, so
+// callers can reserve json.Unmarshal for unusual provider payloads.
+func extractSSEAssistantPayload(payload []byte) (string, bool) {
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return "", true
+	}
+	if payload[0] == '"' {
+		parser := partialJSONParser{data: payload}
+		if text, complete := parser.parseString(); complete {
+			return text, true
+		}
+	}
+	if payload[0] != '{' && payload[0] != '[' {
+		return string(payload), true
+	}
+
+	if eventType := responsesPayloadTypeBytes(payload); len(eventType) > 0 {
+		lowerType := strings.ToLower(string(eventType))
+		if strings.HasPrefix(lowerType, "response.") {
+			if strings.Contains(lowerType, "output_text") {
+				text, _ := extractPartialJSONAssistantTextWithShape(payload)
+				return text, true
+			}
+			return "", true
+		}
+		if isResponsesLifecycleEventBytes(eventType) || isResponsesTerminalEventBytes(eventType) {
+			return "", true
+		}
+	}
+	if text, recognized := extractPartialJSONAssistantTextWithShape(payload); recognized {
+		return text, true
+	}
+	return "", false
 }
 
 func appendAssistantJSON(out *strings.Builder, value any) {
@@ -1782,14 +1878,39 @@ func extractResponseErrorMessage(body []byte, headers http.Header) string {
 	}
 	if looksLikeSSEBody(body) || (headers != nil && strings.Contains(strings.ToLower(headers.Get("Content-Type")), "text/event-stream")) {
 		for _, payload := range sseDataPayloads(body) {
-			if msg := extractResponseErrorMessage([]byte(payload), nil); msg != "" {
-				return msg
+			trimmed := bytes.TrimSpace(payload)
+			if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
+				continue
 			}
-			trimmed := strings.TrimSpace(payload)
-			if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-				if msg := extractPartialJSONErrorMessage([]byte(trimmed)); msg != "" {
-					return msg
+			if bytes.HasPrefix(trimmed, []byte("{")) || bytes.HasPrefix(trimmed, []byte("[")) {
+				if bytes.HasPrefix(trimmed, []byte("{")) && !mayContainErrorJSONField(trimmed) {
+					continue
 				}
+				if msg, found := extractPartialJSONErrorMessageDepthFound(trimmed, 0); msg != "" {
+					return msg
+				} else if found {
+					// The payload contains an error-bearing key, but its value is
+					// incomplete. Do not decode unrelated metadata; the next event
+					// may carry the complete error.
+					continue
+				}
+				if bytes.HasPrefix(trimmed, []byte("{")) {
+					// A root object with none of the error-bearing fields cannot
+					// produce a match. Avoid decoding every ordinary JSON delta.
+					continue
+				}
+				// Unknown valid provider shapes are rare. Preserve compatibility
+				// with the old map decoder only for those shapes.
+				var object map[string]any
+				if json.Unmarshal(trimmed, &object) == nil {
+					if msg := extractErrorMessageObject(object); msg != "" {
+						return msg
+					}
+				}
+				continue
+			}
+			if msg := strings.TrimSpace(string(trimmed)); msg != "" {
+				return msg
 			}
 		}
 		return ""
@@ -1836,24 +1957,52 @@ func looksLikeSSEBody(body []byte) bool {
 	return bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte(":"))
 }
 
-func sseDataPayloads(body []byte) []string {
-	normalized := strings.ReplaceAll(string(body), "\r\n", "\n")
-	events := strings.Split(normalized, "\n\n")
-	result := make([]string, 0, len(events))
-	for _, event := range events {
-		var data strings.Builder
-		for _, line := range strings.Split(event, "\n") {
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			if data.Len() > 0 {
-				data.WriteByte('\n')
-			}
-			data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+func sseDataPayloads(body []byte) [][]byte {
+	result := make([][]byte, 0, 8)
+	var first []byte
+	var joined []byte
+	flush := func() {
+		if len(joined) > 0 {
+			result = append(result, joined)
+		} else if len(first) > 0 {
+			result = append(result, first)
 		}
-		if data.Len() > 0 {
-			result = append(result, data.String())
-		}
+		first = nil
+		joined = nil
 	}
+	for start := 0; start <= len(body); {
+		end := bytes.IndexByte(body[start:], '\n')
+		lineEnd := len(body)
+		next := len(body)
+		if end >= 0 {
+			lineEnd = start + end
+			next = lineEnd + 1
+		}
+		line := body[start:lineEnd]
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			flush()
+		} else if bytes.HasPrefix(trimmed, []byte("data:")) {
+			value := bytes.TrimSpace(trimmed[len("data:"):])
+			if len(value) > 0 {
+				if first == nil {
+					first = value
+				} else {
+					if joined == nil {
+						joined = make([]byte, 0, len(first)+len(value)+1)
+						joined = append(joined, first...)
+					}
+					joined = append(joined, '\n')
+					joined = append(joined, value...)
+				}
+			}
+		}
+		if end < 0 {
+			break
+		}
+		start = next
+	}
+	flush()
 	return result
 }

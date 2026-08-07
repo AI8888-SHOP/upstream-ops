@@ -581,6 +581,48 @@ func TestResponseValidatorProtocolShapes(t *testing.T) {
 	}
 }
 
+func TestExtractAssistantTextResponsesSSEFastPath(t *testing.T) {
+	body := []byte(`event: response.created
+data: {"type":"response.created","response":{"status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"hello \"world\""}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","text":"done"}
+
+`)
+	if got, want := extractAssistantText(body, http.Header{"Content-Type": []string{"text/event-stream"}}), "hello \"world\"done"; got != want {
+		t.Fatalf("got=%q want=%q", got, want)
+	}
+}
+
+func TestExtractAssistantTextSSESkipsMetadataOnlyFrames(t *testing.T) {
+	body := []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"status\":\"in_progress\",\"text\":\"metadata\"}\n\n")
+	if got := extractAssistantText(body, http.Header{"Content-Type": []string{"text/event-stream"}}); got != "" {
+		t.Fatalf("metadata leaked into assistant text: %q", got)
+	}
+}
+
+func TestExtractResponseErrorMessageSSEAvoidsMetadataDecode(t *testing.T) {
+	content := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"safe\"}\n\n")
+	if got := extractResponseErrorMessage(content, http.Header{"Content-Type": []string{"text/event-stream"}}); got != "" {
+		t.Fatalf("content unexpectedly produced error message: %q", got)
+	}
+	failure := []byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"Our servers are currently overloaded.\"}}}\n\n")
+	if got, want := extractResponseErrorMessage(failure, nil), "Our servers are currently overloaded."; got != want {
+		t.Fatalf("got=%q want=%q", got, want)
+	}
+}
+
+func TestSSEDataPayloadsPreservesMultilineData(t *testing.T) {
+	body := []byte("data: {\"a\":\n" + "data: 1}\n\n" + "data: [DONE]\n\n")
+	items := sseDataPayloads(body)
+	if len(items) != 2 || string(items[0]) != "{\"a\":\n1}" || string(items[1]) != "[DONE]" {
+		t.Fatalf("payloads=%q", items)
+	}
+}
+
 func TestResponseValidatorChecksPartialSSEJSONAtPrefixBoundary(t *testing.T) {
 	v := mustResponseValidator(t, 256, time.Second, responseRuleSpec{
 		ID: 6, Name: "partial", Enabled: true, Pattern: `blocked`, Target: "assistant_text",

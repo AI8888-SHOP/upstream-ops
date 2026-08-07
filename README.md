@@ -238,7 +238,7 @@ The system settings page manages:
 - Balance sync cron.
 - Rate sync cron.
 - Scheduler concurrency.
-- Monitor log, balance snapshot, notification log, and announcement retention.
+- Monitor log, balance snapshot, notification log, gateway usage, and announcement retention.
 - Rate change notification merge policy.
 - Minimum rate change percentage for notifications.
 - Low-balance alert cooldown.
@@ -1316,6 +1316,7 @@ Default retention:
 - Upstream synchronization logs: follow the monitor log retention period.
 - Balance snapshots: 90 days.
 - Notification logs: 90 days.
+- Gateway usage records and cost details: 90 days.
 - Upstream announcements: controlled by announcement retention days. `0` disables cleanup.
 - Rate change logs are not cleaned by default.
 

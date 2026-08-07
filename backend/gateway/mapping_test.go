@@ -17,6 +17,30 @@ func TestRewriteModelInBody(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRequestBodyExtractsAffinityAndMediaOnce(t *testing.T) {
+	analysis := analyzeRequestBody([]byte(`{
+		"model":"gpt-5.6-sol",
+		"stream":true,
+		"prompt_cache_key":"codex-session-1",
+		"response_modalities":["text","image"],
+		"input":[{"role":"user","content":"large conversation is ignored by the typed envelope"}]
+	}`))
+	if !analysis.Parsed || analysis.Model != "gpt-5.6-sol" || !analysis.Stream {
+		t.Fatalf("request analysis=%+v", analysis)
+	}
+	if analysis.AffinityID != "codex-session-1" {
+		t.Fatalf("affinity id=%q", analysis.AffinityID)
+	}
+	if !analysis.MediaGeneration {
+		t.Fatal("image response modality was not classified as media generation")
+	}
+
+	ordinary := analyzeRequestBody([]byte(`{"model":"gpt-5.6-sol","image_generation":false,"modalities":["text"]}`))
+	if !ordinary.Parsed || ordinary.MediaGeneration {
+		t.Fatalf("ordinary request analysis=%+v", ordinary)
+	}
+}
+
 func TestParseOpenAIUsage(t *testing.T) {
 	body := []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
 	u := ParseOpenAIUsage(body)

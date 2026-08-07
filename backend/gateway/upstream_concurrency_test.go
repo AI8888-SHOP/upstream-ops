@@ -253,6 +253,51 @@ func TestUpstreamConcurrencyReleaseIsIdempotent(t *testing.T) {
 	second()
 }
 
+func TestUpstreamConcurrencyReleaseWakesOneWaiterFIFO(t *testing.T) {
+	r := newUpstreamConcurrencyRegistry()
+	key := upstreamConcurrencyKey{Kind: upstreamConcurrencyKindMonitor, ID: 9}
+	first, err := r.acquire(context.Background(), key, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type acquiredSlot struct {
+		index   int
+		release func()
+	}
+	acquired := make(chan acquiredSlot, 3)
+	for index := 0; index < 3; index++ {
+		index := index
+		go func() {
+			release, acquireErr := r.acquire(context.Background(), key, 1)
+			if acquireErr == nil {
+				acquired <- acquiredSlot{index: index, release: release}
+			}
+		}()
+		waitForUpstreamConcurrencyWaiters(t, r, key, index+1)
+	}
+
+	first()
+	for want := 0; want < 3; want++ {
+		var slot acquiredSlot
+		select {
+		case slot = <-acquired:
+		case <-time.After(time.Second):
+			t.Fatalf("waiter %d was not released", want)
+		}
+		if slot.index != want {
+			t.Fatalf("released waiter=%d, want FIFO waiter %d", slot.index, want)
+		}
+		select {
+		case extra := <-acquired:
+			extra.release()
+			t.Fatalf("release woke extra waiter %d while waiter %d held the slot", extra.index, want)
+		case <-time.After(20 * time.Millisecond):
+		}
+		slot.release()
+	}
+}
+
 func TestForwardOnceConcurrencyPeak(t *testing.T) {
 	var current, peak int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -501,6 +546,24 @@ func upstreamConcurrencyActive(r *upstreamConcurrencyRegistry, key upstreamConcu
 		return entry.active
 	}
 	return 0
+}
+
+func waitForUpstreamConcurrencyWaiters(t *testing.T, r *upstreamConcurrencyRegistry, key upstreamConcurrencyKey, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		count := 0
+		if entry := r.entries[key]; entry != nil {
+			count = len(entry.waiters)
+		}
+		r.mu.Unlock()
+		if count >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("queued waiters did not reach %d", want)
 }
 
 type concurrencySignalRecorder struct {

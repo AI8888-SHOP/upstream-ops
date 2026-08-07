@@ -180,9 +180,9 @@ func TestRunHedgeNeverExceedsMaxParallel(t *testing.T) {
 }
 
 func TestRunHedgeWaitsForCanceledLoserCleanup(t *testing.T) {
-	originalCleanup := hedgeCleanupTimeout
-	hedgeCleanupTimeout = time.Second
-	t.Cleanup(func() { hedgeCleanupTimeout = originalCleanup })
+	originalCleanup := hedgeWinnerCleanupTimeout
+	hedgeWinnerCleanupTimeout = time.Second
+	t.Cleanup(func() { hedgeWinnerCleanupTimeout = originalCleanup })
 	loserFinished := make(chan struct{})
 	result, err := runHedge(
 		context.Background(),
@@ -213,6 +213,39 @@ func TestRunHedgeWaitsForCanceledLoserCleanup(t *testing.T) {
 	}
 }
 
+func TestRunHedgeBoundsWinnerCleanupDelay(t *testing.T) {
+	originalCleanup := hedgeWinnerCleanupTimeout
+	hedgeWinnerCleanupTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { hedgeWinnerCleanupTimeout = originalCleanup })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	started := time.Now()
+	result, err := runHedge(
+		context.Background(),
+		true,
+		hedgePolicy{Enabled: true, Delay: time.Millisecond, MaxParallel: 2, MaxAttempts: 2},
+		func(ctx context.Context, info hedgeAttemptInfo) (int, error) {
+			if info.Number == 2 {
+				return 2, nil
+			}
+			<-ctx.Done()
+			<-release
+			return 0, ctx.Err()
+		},
+		func(value int) (bool, error) { return value == 2, nil },
+		hedgeHooks[int]{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("winner cleanup blocked for %s", elapsed)
+	}
+	if len(result.Attempts) != 2 || result.Attempts[0].Outcome != hedgeOutcomeLost {
+		t.Fatalf("attempts=%+v, want a synthetic lost loser", result.Attempts)
+	}
+}
+
 func TestHedgeEligibleExcludesGeneratedMediaAndRealtime(t *testing.T) {
 	cases := []hedgeRequest{
 		{Path: "/v1/images/generations", Model: "gpt-4o"},
@@ -233,6 +266,21 @@ func TestHedgeEligibleExcludesGeneratedMediaAndRealtime(t *testing.T) {
 	}
 	if !hedgeEligible(ordinaryMultimodal) {
 		t.Fatal("ordinary image-input text request should remain hedge eligible")
+	}
+}
+
+func TestHedgeEligibleUsesPreanalyzedMediaFlag(t *testing.T) {
+	if hedgeEligible(hedgeRequest{
+		Path: "/v1/responses", Body: []byte(`not-json`),
+		BodyMediaAnalyzed: true, BodyGeneratesMedia: true,
+	}) {
+		t.Fatal("preanalyzed media-generation request should not hedge")
+	}
+	if !hedgeEligible(hedgeRequest{
+		Path: "/v1/responses", Body: []byte(`not-json`),
+		BodyMediaAnalyzed: true, BodyGeneratesMedia: false,
+	}) {
+		t.Fatal("preanalyzed text request should remain hedge eligible")
 	}
 }
 

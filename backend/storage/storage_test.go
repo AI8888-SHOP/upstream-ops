@@ -1811,6 +1811,14 @@ func TestGatewayUsageStatsReclassifiesVirtualCacheWithoutAddingTokens(t *testing
 	if err := NewGatewayUsageLogs(db).Create(usage); err != nil {
 		t.Fatalf("create usage: %v", err)
 	}
+	loser := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: usage.RequestID, Attempt: 2,
+		AttemptKind: GatewayAttemptKindHedge, AttemptStatus: GatewayAttemptStatusCanceled,
+		ActualCost: 0.25, EstimatedExtraCost: 0.25, CreatedAt: time.Now().UTC(),
+	}
+	if err := NewGatewayUsageLogs(db).Create(loser); err != nil {
+		t.Fatalf("create loser usage: %v", err)
+	}
 	stats, err := NewGatewayUsageLogs(db).Stats(GatewayUsageQuery{})
 	if err != nil {
 		t.Fatalf("usage stats: %v", err)
@@ -1818,8 +1826,11 @@ func TestGatewayUsageStatsReclassifiesVirtualCacheWithoutAddingTokens(t *testing
 	if stats.TotalInputTokens != 60 || stats.TotalCacheReadTokens != 50 || stats.TotalTokens != 135 {
 		t.Fatalf("token stats = input=%d read=%d total=%d, want 60/50/135", stats.TotalInputTokens, stats.TotalCacheReadTokens, stats.TotalTokens)
 	}
-	if stats.WinnerCost != 0.75 || stats.TotalUpstreamCost != 1.25 {
-		t.Fatalf("cost stats = winner=%v upstream=%v, want 0.75/1.25", stats.WinnerCost, stats.TotalUpstreamCost)
+	if stats.WinnerCost != 0.75 || stats.TotalUpstreamCost != 1.50 {
+		t.Fatalf("cost stats = winner=%v upstream=%v, want 0.75/1.50", stats.WinnerCost, stats.TotalUpstreamCost)
+	}
+	if stats.VirtualCacheSubsidyCost != 0.50 || stats.ExtraAttemptCost != 0.75 {
+		t.Fatalf("extra cost stats = virtual_subsidy=%v extra=%v, want 0.50/0.75", stats.VirtualCacheSubsidyCost, stats.ExtraAttemptCost)
 	}
 }
 

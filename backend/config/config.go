@@ -115,6 +115,7 @@ type RetentionConfig struct {
 	BalanceSnapshotsDays int    `mapstructure:"balanceSnapshotsDays" yaml:"balanceSnapshotsDays" json:"balanceSnapshotsDays"`
 	NotificationLogsDays int    `mapstructure:"notificationLogsDays" yaml:"notificationLogsDays" json:"notificationLogsDays"`
 	AnnouncementsDays    int    `mapstructure:"announcementsDays" yaml:"announcementsDays" json:"announcementsDays"`
+	GatewayUsageLogsDays int    `mapstructure:"gatewayUsageLogsDays" yaml:"gatewayUsageLogsDays" json:"gatewayUsageLogsDays"`
 }
 
 // NotificationsConfig 通知去抖策略。所有字段都是"少烦我"取向，默认不丢消息只合并。
@@ -452,7 +453,6 @@ func load(path string, withEnv bool) (*Config, string, error) {
 			}
 		}
 	}
-
 	cfg := &Config{}
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, "", fmt.Errorf("unmarshal config: %w", err)
@@ -542,12 +542,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.concurrency", 4)
 
 	// 历史清理：每天凌晨 3:17 跑一次（6 字段 cron 含秒），
-	// monitor 30 天 / balance 90 天 / notify 90 天。rate_change_logs 不清理（业务核心数据）。
+	// monitor 30 天 / balance、notify、gateway usage 90 天。rate_change_logs 不清理（业务核心数据）。
 	v.SetDefault("scheduler.retention.cron", "0 17 3 * * *")
 	v.SetDefault("scheduler.retention.monitorLogsDays", 30)
 	v.SetDefault("scheduler.retention.balanceSnapshotsDays", 90)
 	v.SetDefault("scheduler.retention.notificationLogsDays", 90)
 	v.SetDefault("scheduler.retention.announcementsDays", 90)
+	v.SetDefault("scheduler.retention.gatewayUsageLogsDays", 90)
 
 	v.SetDefault("auth.enabled", false)
 	v.SetDefault("auth.username", "admin")

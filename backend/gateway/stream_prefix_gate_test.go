@@ -246,10 +246,7 @@ func TestStreamPrefixGatePostCommitAuditDoesNotRejectWrite(t *testing.T) {
 	}
 }
 
-func TestCleanupCoordinatedStreamLosersWaitsForResult(t *testing.T) {
-	originalCleanup := hedgeCleanupTimeout
-	hedgeCleanupTimeout = time.Second
-	t.Cleanup(func() { hedgeCleanupTimeout = originalCleanup })
+func TestCleanupCoordinatedStreamLosersDoesNotWaitForResult(t *testing.T) {
 	loser := &coordinatedForwardAttempt{
 		Info:       hedgeAttemptInfo{Number: 2},
 		StartedAt:  time.Now(),
@@ -257,18 +254,38 @@ func TestCleanupCoordinatedStreamLosersWaitsForResult(t *testing.T) {
 	}
 	var states sync.Map
 	states.Store(2, loser)
+	release := make(chan struct{})
+	sent := make(chan struct{})
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		<-release
 		loser.streamDone <- streamAttemptResult{Status: 499, Err: errStreamGateLost}
+		close(sent)
 	}()
 	runResult := hedgeRunResult[*coordinatedForwardAttempt]{
 		Winner: &hedgeAttemptResult[*coordinatedForwardAttempt]{Info: hedgeAttemptInfo{Number: 1}},
 	}
+	started := time.Now()
 	(&Runtime{}).cleanupCoordinatedStreamLosers(runResult, &states)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("loser cleanup blocked for %s", elapsed)
+	}
 	loser.streamMu.Lock()
 	ready, status := loser.streamReady, loser.streamResult.Status
 	loser.streamMu.Unlock()
+	if ready || status != 0 || loser.Status != 0 {
+		t.Fatalf("loser completed during non-blocking cleanup: ready=%v stream_status=%d attempt_status=%d", ready, status, loser.Status)
+	}
+	close(release)
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("loser result was not published")
+	}
+	(&Runtime{}).cleanupCoordinatedStreamLosers(runResult, &states)
+	loser.streamMu.Lock()
+	ready, status = loser.streamReady, loser.streamResult.Status
+	loser.streamMu.Unlock()
 	if !ready || status != 499 || loser.Status != 499 {
-		t.Fatalf("loser ready=%v stream_status=%d attempt_status=%d", ready, status, loser.Status)
+		t.Fatalf("ready loser was not collected: ready=%v stream_status=%d attempt_status=%d", ready, status, loser.Status)
 	}
 }

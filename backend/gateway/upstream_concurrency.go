@@ -20,19 +20,18 @@ type upstreamConcurrencyKey struct {
 type upstreamConcurrencyEntry struct {
 	active  int
 	limit   int
-	changed chan struct{}
+	waiters []*upstreamConcurrencyWaiter
 }
 
 func newUpstreamConcurrencyEntry(limit int) *upstreamConcurrencyEntry {
 	return &upstreamConcurrencyEntry{
-		limit:   normalizeUpstreamConcurrencyLimit(limit),
-		changed: make(chan struct{}),
+		limit: normalizeUpstreamConcurrencyLimit(limit),
 	}
 }
 
-func (e *upstreamConcurrencyEntry) notify() {
-	close(e.changed)
-	e.changed = make(chan struct{})
+type upstreamConcurrencyWaiter struct {
+	ready   chan struct{}
+	granted bool
 }
 
 // upstreamConcurrencyRegistry tracks attempts across every route, group,
@@ -82,42 +81,105 @@ func (r *upstreamConcurrencyRegistry) acquire(
 		r.entries = make(map[upstreamConcurrencyKey]*upstreamConcurrencyEntry)
 	}
 	entry := r.entries[key]
+	limitChanged := false
 	if entry == nil {
 		entry = newUpstreamConcurrencyEntry(limit)
 		r.entries[key] = entry
 	} else if entry.limit != limit {
 		entry.limit = limit
-		entry.notify()
+		limitChanged = true
 	}
 
-	for entry.limit > 0 && entry.active >= entry.limit {
-		changed := entry.changed
+	// Existing waiters always keep their place. Reserving the active slot while
+	// holding the registry lock prevents a release from waking every blocked
+	// goroutine only to have all but one contend and go back to sleep. A caller
+	// that changes the limit keeps the previous immediate-update semantics: it
+	// claims newly-created capacity, then any additional slots go to the queue.
+	if (limitChanged || len(entry.waiters) == 0) && (entry.limit == 0 || entry.active < entry.limit) {
+		entry.active++
+		r.dispatchLocked(entry)
 		r.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-changed:
-		}
+		return r.releaseFunc(entry), nil
+	}
+	waiter := &upstreamConcurrencyWaiter{ready: make(chan struct{})}
+	entry.waiters = append(entry.waiters, waiter)
+	r.dispatchLocked(entry)
+	r.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
 		r.mu.Lock()
+		if waiter.granted {
+			if entry.active > 0 {
+				entry.active--
+			}
+		} else {
+			removeUpstreamConcurrencyWaiter(entry, waiter)
+		}
+		r.dispatchLocked(entry)
+		r.mu.Unlock()
+		return nil, ctx.Err()
+	case <-waiter.ready:
 		if err := ctx.Err(); err != nil {
+			r.mu.Lock()
+			if entry.active > 0 {
+				entry.active--
+			}
+			r.dispatchLocked(entry)
 			r.mu.Unlock()
 			return nil, err
 		}
 	}
-	entry.active++
-	r.mu.Unlock()
+	return r.releaseFunc(entry), nil
+}
 
+func (r *upstreamConcurrencyRegistry) releaseFunc(entry *upstreamConcurrencyEntry) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			r.mu.Lock()
 			if entry.active > 0 {
 				entry.active--
-				entry.notify()
 			}
+			r.dispatchLocked(entry)
 			r.mu.Unlock()
 		})
-	}, nil
+	}
+}
+
+// dispatchLocked grants only the number of slots that are currently
+// available. A normal release therefore wakes one FIFO waiter instead of the
+// whole queue. Switching a limit to unlimited intentionally drains the queue.
+func (r *upstreamConcurrencyRegistry) dispatchLocked(entry *upstreamConcurrencyEntry) {
+	if entry == nil {
+		return
+	}
+	for len(entry.waiters) > 0 && (entry.limit == 0 || entry.active < entry.limit) {
+		waiter := entry.waiters[0]
+		entry.waiters[0] = nil
+		entry.waiters = entry.waiters[1:]
+		if waiter == nil || waiter.granted {
+			continue
+		}
+		waiter.granted = true
+		entry.active++
+		close(waiter.ready)
+	}
+}
+
+func removeUpstreamConcurrencyWaiter(entry *upstreamConcurrencyEntry, target *upstreamConcurrencyWaiter) {
+	if entry == nil || target == nil {
+		return
+	}
+	for index, waiter := range entry.waiters {
+		if waiter != target {
+			continue
+		}
+		copy(entry.waiters[index:], entry.waiters[index+1:])
+		entry.waiters[len(entry.waiters)-1] = nil
+		entry.waiters = entry.waiters[:len(entry.waiters)-1]
+		return
+	}
 }
 
 func (s *Service) upstreamConcurrencyRegistry() *upstreamConcurrencyRegistry {

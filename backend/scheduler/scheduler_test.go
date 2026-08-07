@@ -76,6 +76,7 @@ func TestRunRetentionDeletesAnnouncements(t *testing.T) {
 		},
 		&monitor.Service{},
 		monLogs,
+		nil,
 		syncLogs,
 		rates,
 		notifies,
@@ -135,6 +136,7 @@ func TestRunRetentionDeletesUpstreamSyncLogsWithMonitorLogDays(t *testing.T) {
 		},
 		&monitor.Service{},
 		monLogs,
+		nil,
 		syncLogs,
 		rates,
 		notifies,
@@ -158,11 +160,58 @@ func TestRunRetentionDeletesUpstreamSyncLogsWithMonitorLogDays(t *testing.T) {
 	}
 }
 
+func TestRunRetentionDeletesGatewayUsageLogs(t *testing.T) {
+	db := openTestDB(t)
+	usage := storage.NewGatewayUsageLogs(db)
+	oldCreatedAt := time.Now().AddDate(0, 0, -10)
+	newCreatedAt := time.Now()
+	for _, item := range []*storage.GatewayUsageLog{
+		{RequestID: "old-request", CreatedAt: oldCreatedAt},
+		{RequestID: "new-request", CreatedAt: newCreatedAt},
+	} {
+		if err := usage.Create(item); err != nil {
+			t.Fatalf("create usage log: %v", err)
+		}
+	}
+
+	s := New(
+		config.SchedulerConfig{
+			Retention: config.RetentionConfig{
+				GatewayUsageLogsDays: 1,
+			},
+		},
+		nil,
+		nil,
+		usage,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		config.ProxyConfig{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	s.runRetention()
+
+	page, err := usage.List(storage.GatewayUsageQuery{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("list usage logs: %v", err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].RequestID != "new-request" {
+		t.Fatalf("usage logs not cleaned: total=%d items=%#v", page.Total, page.Items)
+	}
+}
+
 func TestRunRatesTriggersUpstreamSync(t *testing.T) {
 	syncSvc := &fakeUpstreamSync{}
 	gatewayResort := &fakeGatewayResort{}
 	s := New(
 		config.SchedulerConfig{},
+		nil,
 		nil,
 		nil,
 		nil,

@@ -873,8 +873,18 @@ func clearGatewayRoutePause(c *gin.Context, d *Deps) {
 
 func parseGatewayUsageQuery(c *gin.Context) storage.GatewayUsageQuery {
 	q := storage.GatewayUsageQuery{
-		Page:     queryInt(c, "page", 1),
-		PageSize: queryInt(c, "page_size", 20),
+		Page:             queryInt(c, "page", 1),
+		PageSize:         queryInt(c, "page_size", 20),
+		// Keep the legacy response shape for external API callers. The bundled
+		// frontend opts out explicitly because neither aggregate is displayed.
+		IncludeSum:       true,
+		IncludeEndpoints: true,
+	}
+	if v, ok := c.GetQuery("include_sum"); ok {
+		q.IncludeSum = parseGatewayUsageBool(v, q.IncludeSum)
+	}
+	if v, ok := c.GetQuery("include_endpoints"); ok {
+		q.IncludeEndpoints = parseGatewayUsageBool(v, q.IncludeEndpoints)
 	}
 	if v := c.Query("group_id"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
@@ -921,6 +931,17 @@ func parseGatewayUsageQuery(c *gin.Context) storage.GatewayUsageQuery {
 		}
 	}
 	return q
+}
+
+func parseGatewayUsageBool(value string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 // parseUsageTime 兼容前端 toISOString（含毫秒）与 datetime-local（无时区=本地）。

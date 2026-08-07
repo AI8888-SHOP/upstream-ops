@@ -1686,6 +1686,10 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 type GatewayUsageLogs struct {
 	db             *gorm.DB
 	statsMu        sync.Mutex
+	// statsQueryMu serializes expensive aggregate refreshes across distinct
+	// dashboard filter keys. Per-key single-flight alone still allows a
+	// dashboard to launch several parallel COUNT(DISTINCT ...) scans.
+	statsQueryMu   sync.Mutex
 	statsCache     map[gatewayStatsQueryKey]gatewayStatsCacheEntry
 	statsInFlight  map[gatewayStatsQueryKey]*gatewayStatsCall
 	statsLastWrite atomic.Int64
@@ -1700,6 +1704,7 @@ type gatewayStatsQueryKey struct {
 	gatewayGroupID uint
 	gatewayKeyID   uint
 	channelID      uint
+	includeEndpoints bool
 	model          string
 	requestID      string
 	resultMode     string
@@ -1721,10 +1726,10 @@ type gatewayStatsCall struct {
 
 const (
 	// Stats are an operator-facing aggregate, not a billing source of truth.
-	// Allow a short stale window under sustained write load so every request
-	// attempt does not force the expensive aggregate query back onto SQLite.
-	gatewayStatsCacheTTL        = 10 * time.Second
-	gatewayStatsRefreshInterval = 5 * time.Second
+	// The bundled UI polls every 30 seconds, so refresh less frequently under
+	// sustained writes while retaining a bounded hard lifetime for idle caches.
+	gatewayStatsCacheTTL        = 10 * time.Minute
+	gatewayStatsRefreshInterval = 2 * time.Minute
 	gatewayStatsCacheMaxEntries = 256
 )
 
@@ -2128,6 +2133,11 @@ type GatewayUsageQuery struct {
 	GatewayGroupID uint
 	GatewayKeyID   uint
 	ChannelID      uint
+	// IncludeSum and IncludeEndpoints keep optional dashboard aggregates out of
+	// latency-sensitive list/stat calls. The HTTP API enables both by default
+	// for backwards compatibility; the bundled UI explicitly opts out.
+	IncludeSum       bool
+	IncludeEndpoints bool
 	Model          string
 	// RequestID 模糊匹配 request_id
 	RequestID   string
@@ -2184,6 +2194,13 @@ type GatewayUsageStats struct {
 	TotalActualCost      float64 `json:"total_actual_cost"`
 	TotalUpstreamCost    float64 `json:"total_upstream_cost"`
 	WinnerCost           float64 `json:"winner_cost"`
+	// VirtualCacheSubsidyCost is the amount absorbed by the gateway when a
+	// virtual-cache winner's raw upstream cost exceeds the amount billed to
+	// the gateway key. It is included in ExtraAttemptCost for the aggregate
+	// "extra cost" total, but remains separate for accounting breakdowns.
+	VirtualCacheSubsidyCost float64 `json:"virtual_cache_subsidy_cost"`
+	// ExtraAttemptCost includes loser/rejected attempts and virtual-cache
+	// subsidies. Keep the field name for API compatibility.
 	ExtraAttemptCost     float64 `json:"extra_attempt_cost"`
 	AverageDurationMS    float64 `json:"average_duration_ms"`
 	// RPM/TPM：近 5 分钟均值（对齐 sub2api），与筛选时间范围无关；TPM 仅 input+output
@@ -2334,7 +2351,9 @@ func (r *GatewayUsageLogs) List(q GatewayUsageQuery) (*GatewayUsagePage, error) 
 		return nil, err
 	}
 	var sum float64
-	_ = db.Session(&gorm.Session{}).Select("COALESCE(SUM(actual_cost),0)").Scan(&sum).Error
+	if q.IncludeSum {
+		_ = db.Session(&gorm.Session{}).Select("COALESCE(SUM(actual_cost),0)").Scan(&sum).Error
+	}
 
 	var rows []GatewayUsageLog
 	offset := (q.Page - 1) * q.PageSize
@@ -2596,7 +2615,11 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 	r.statsInFlight[key] = call
 	r.statsMu.Unlock()
 
-	value, err := r.statsUncached(q)
+	value, err := func() (*GatewayUsageStats, error) {
+		r.statsQueryMu.Lock()
+		defer r.statsQueryMu.Unlock()
+		return r.statsUncached(q)
+	}()
 	r.statsMu.Lock()
 	call.value = value
 	call.err = err
@@ -2653,6 +2676,7 @@ func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStat
 		TotalActualCost          float64
 		TotalUpstreamCost        float64
 		WinnerCost               float64
+		VirtualCacheSubsidyCost  float64
 		ExtraAttemptCost         float64
 		AvgDurationMS            float64
 	}
@@ -2674,19 +2698,25 @@ func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStat
 			CASE WHEN billed_cost > 0 OR virtual_cache_read_tokens > 0 OR actual_cost = 0
 				THEN billed_cost ELSE actual_cost END
 			ELSE 0 END),0) as winner_cost,
-		COALESCE(SUM(estimated_extra_cost),0) as extra_attempt_cost,
+		COALESCE(SUM(CASE WHEN winner AND virtual_cache_read_tokens > 0 AND actual_cost > billed_cost
+			THEN actual_cost - billed_cost ELSE 0 END),0) as virtual_cache_subsidy_cost,
+		COALESCE(SUM(estimated_extra_cost),0) +
+			COALESCE(SUM(CASE WHEN winner AND virtual_cache_read_tokens > 0 AND actual_cost > billed_cost
+				THEN actual_cost - billed_cost ELSE 0 END),0) as extra_attempt_cost,
 		COALESCE(AVG(duration_ms),0) as avg_duration_ms
 	`).Scan(&row).Error; err != nil {
 		return nil, err
 	}
 	var endpoints []GatewayEndpointStat
-	_ = r.applyFilters(r.db.Model(&GatewayUsageLog{}), q).
-		Select("inbound_endpoint as endpoint, COUNT(DISTINCT request_id) as requests").
-		Where("inbound_endpoint <> ''").
-		Group("inbound_endpoint").
-		Order("requests DESC").
-		Limit(20).
-		Scan(&endpoints).Error
+	if q.IncludeEndpoints {
+		_ = r.applyFilters(r.db.Model(&GatewayUsageLog{}), q).
+			Select("inbound_endpoint as endpoint, COUNT(DISTINCT request_id) as requests").
+			Where("inbound_endpoint <> ''").
+			Group("inbound_endpoint").
+			Order("requests DESC").
+			Limit(20).
+			Scan(&endpoints).Error
+	}
 
 	totalTokens := row.TotalInputTokens + row.TotalOutputTokens + row.TotalCacheCreationTokens + row.TotalCacheReadTokens
 	rpm, tpm := r.performanceRPMAndTPM(q)
@@ -2705,6 +2735,7 @@ func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStat
 		TotalActualCost:          row.TotalActualCost,
 		TotalUpstreamCost:        row.TotalUpstreamCost,
 		WinnerCost:               row.WinnerCost,
+		VirtualCacheSubsidyCost:  row.VirtualCacheSubsidyCost,
 		ExtraAttemptCost:         row.ExtraAttemptCost,
 		AverageDurationMS:        row.AvgDurationMS,
 		RPM:                      rpm,
@@ -2720,6 +2751,7 @@ func gatewayStatsCacheKey(q GatewayUsageQuery) gatewayStatsQueryKey {
 		gatewayGroupID: q.GatewayGroupID,
 		gatewayKeyID:   q.GatewayKeyID,
 		channelID:      q.ChannelID,
+		includeEndpoints: q.IncludeEndpoints,
 		model:          strings.TrimSpace(q.Model),
 		requestID:      strings.TrimSpace(q.RequestID),
 		resultMode:     strings.ToLower(strings.TrimSpace(q.ResultMode)),

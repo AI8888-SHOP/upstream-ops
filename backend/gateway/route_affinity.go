@@ -53,10 +53,14 @@ func (a routeAffinityContext) enabled() bool {
 }
 
 func (rt *Runtime) routeAffinityForRequest(c *gin.Context, keyID, groupID uint, protocolName, model string, body []byte) routeAffinityContext {
+	return rt.routeAffinityForAnalyzedRequest(c, keyID, groupID, protocolName, model, body, "")
+}
+
+func (rt *Runtime) routeAffinityForAnalyzedRequest(c *gin.Context, keyID, groupID uint, protocolName, model string, body []byte, affinityID string) routeAffinityContext {
 	if rt == nil || rt.Service == nil || keyID == 0 || groupID == 0 {
 		return routeAffinityContext{}
 	}
-	fingerprints := requestRouteAffinityFingerprints(c, body, model)
+	fingerprints := requestRouteAffinityFingerprintsWithID(c, body, model, affinityID)
 	if len(fingerprints) == 0 {
 		return routeAffinityContext{}
 	}
@@ -76,6 +80,10 @@ func (rt *Runtime) routeAffinityForRequest(c *gin.Context, keyID, groupID uint, 
 }
 
 func requestRouteAffinityFingerprints(c *gin.Context, body []byte, model string) []string {
+	return requestRouteAffinityFingerprintsWithID(c, body, model, "")
+}
+
+func requestRouteAffinityFingerprintsWithID(c *gin.Context, body []byte, model, affinityID string) []string {
 	var fingerprints []string
 	add := func(kind string, value any) {
 		raw := strings.TrimSpace(stringValue(value))
@@ -106,6 +114,10 @@ func requestRouteAffinityFingerprints(c *gin.Context, body []byte, model string)
 		if len(fingerprints) > 0 {
 			return fingerprints
 		}
+	}
+	if affinityID = strings.TrimSpace(affinityID); affinityID != "" {
+		add("body:id", affinityID)
+		return fingerprints
 	}
 
 	var payload map[string]any
@@ -202,7 +214,8 @@ func conversationItemHasTurn(item any) bool {
 func findRouteAffinityID(payload map[string]any) string {
 	for _, key := range []string{
 		"session_id", "sessionId", "conversation_id", "conversationId",
-		"thread_id", "threadId", "previous_response_id", "previousResponseId",
+		"thread_id", "threadId", "prompt_cache_key", "promptCacheKey",
+		"previous_response_id", "previousResponseId",
 	} {
 		if value, ok := payload[key]; ok {
 			if text := strings.TrimSpace(stringValue(value)); text != "" {

@@ -18,6 +18,9 @@ func TestLoadAppliesUpstreamDefaults(t *testing.T) {
 	if cfg.Upstream.UserAgent != DefaultUpstreamUserAgent {
 		t.Fatalf("user agent = %q", cfg.Upstream.UserAgent)
 	}
+	if cfg.Scheduler.Retention.GatewayUsageLogsDays != 90 {
+		t.Fatalf("gateway usage retention = %d", cfg.Scheduler.Retention.GatewayUsageLogsDays)
+	}
 }
 
 func TestDatabaseConfigUsesDriverSpecificDefaultPort(t *testing.T) {

@@ -176,6 +176,14 @@ export default function SettingsPage() {
       const cfg = query.data.config;
       setForm({
         ...cfg,
+        scheduler: {
+          ...cfg.scheduler,
+          retention: {
+            ...cfg.scheduler.retention,
+            gatewayUsageLogsDays:
+              cfg.scheduler.retention.gatewayUsageLogsDays ?? 90,
+          },
+        },
         gateway: {
           ...defaultGatewayConfig,
           ...(cfg.gateway ?? {}),
@@ -701,7 +709,7 @@ export default function SettingsPage() {
                   />
                 </Field>
               </div>
-              <div className="mt-4 grid gap-4 md:grid-cols-3">
+              <div className="mt-4 grid gap-4 md:grid-cols-3 xl:grid-cols-4">
                 <Field
                   label="监控日志保留天数"
                   description="超过该天数的监控日志会被清理。"
@@ -773,6 +781,31 @@ export default function SettingsPage() {
                                 retention: {
                                   ...prev.scheduler.retention,
                                   notificationLogsDays: num(e.target.value),
+                                },
+                              },
+                            }
+                          : prev,
+                      )
+                    }
+                  />
+                </Field>
+                <Field
+                  label="网关使用记录保留天数"
+                  description="超过该天数的网关使用记录和费用明细会被自动清理。"
+                >
+                  <Input
+                    type="number"
+                    value={String(form.scheduler.retention.gatewayUsageLogsDays)}
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              scheduler: {
+                                ...prev.scheduler,
+                                retention: {
+                                  ...prev.scheduler.retention,
+                                  gatewayUsageLogsDays: num(e.target.value),
                                 },
                               },
                             }

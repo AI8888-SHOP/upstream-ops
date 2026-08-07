@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -114,6 +115,47 @@ type requestBodyInfo struct {
 		Effort string `json:"effort"`
 	} `json:"output_config"`
 	Thinking *requestThinking `json:"thinking"`
+
+	SessionID          string `json:"session_id"`
+	SessionIDCamel     string `json:"sessionId"`
+	ConversationID     string `json:"conversation_id"`
+	ConversationIDCamel string `json:"conversationId"`
+	ThreadID           string `json:"thread_id"`
+	ThreadIDCamel      string `json:"threadId"`
+	PromptCacheKey     string `json:"prompt_cache_key"`
+	PromptCacheKeyCamel string `json:"promptCacheKey"`
+	PreviousResponseID string `json:"previous_response_id"`
+	PreviousResponseIDCamel string `json:"previousResponseId"`
+
+	ResponseModalities      []string `json:"response_modalities"`
+	ResponseModalitiesCamel []string `json:"responseModalities"`
+	OutputModalities        []string `json:"output_modalities"`
+	OutputModalitiesCamel   []string `json:"outputModalities"`
+	Modalities              []string `json:"modalities"`
+	ResponseMIMEType        string   `json:"response_mime_type"`
+	ResponseMIMETypeCamel   string   `json:"responseMimeType"`
+	OutputMIMEType          string   `json:"output_mime_type"`
+	OutputMIMETypeCamel     string   `json:"outputMimeType"`
+	ImageGeneration         json.RawMessage `json:"image_generation"`
+	ImageGenerationCamel    json.RawMessage `json:"imageGeneration"`
+	VideoGeneration         json.RawMessage `json:"video_generation"`
+	VideoGenerationCamel    json.RawMessage `json:"videoGeneration"`
+	Task                     string          `json:"task"`
+	Operation                string          `json:"operation"`
+	Tools                    []struct {
+		Type string `json:"type"`
+	} `json:"tools"`
+}
+
+type requestAnalysis struct {
+	Model           string
+	Stream          bool
+	ServiceTier     string
+	ReasoningEffort string
+	ThinkingEnabled bool
+	MediaGeneration bool
+	AffinityID      string
+	Parsed          bool
 }
 
 func parseRequestBodyInfo(body []byte) (requestBodyInfo, bool) {
@@ -124,19 +166,96 @@ func parseRequestBodyInfo(body []byte) (requestBodyInfo, bool) {
 	return info, true
 }
 
+func analyzeRequestBody(body []byte) requestAnalysis {
+	info, ok := parseRequestBodyInfo(body)
+	if !ok {
+		return requestAnalysis{}
+	}
+	serviceTier, reasoningEffort := requestMetaFromInfo(info)
+	return requestAnalysis{
+		Model:           strings.TrimSpace(info.Model),
+		Stream:          info.Stream,
+		ServiceTier:     serviceTier,
+		ReasoningEffort: reasoningEffort,
+		ThinkingEnabled: bodyThinkingEnabled(info.Thinking),
+		MediaGeneration: requestInfoGeneratesMedia(info),
+		AffinityID:      requestInfoAffinityID(info),
+		Parsed:          true,
+	}
+}
+
 // ExtractRequestInfo parses the request envelope once for the forwarding hot
 // path. Large conversation arrays are skipped by encoding/json because they are
 // not fields on requestBodyInfo.
 func ExtractRequestInfo(body []byte) (model string, stream bool, serviceTier, reasoningEffort string, thinkingEnabled bool) {
-	info, ok := parseRequestBodyInfo(body)
-	if !ok {
+	analysis := analyzeRequestBody(body)
+	if !analysis.Parsed {
 		return "", false, "", "", false
 	}
-	model = strings.TrimSpace(info.Model)
-	stream = info.Stream
-	serviceTier, reasoningEffort = requestMetaFromInfo(info)
-	thinkingEnabled = bodyThinkingEnabled(info.Thinking)
+	model = analysis.Model
+	stream = analysis.Stream
+	serviceTier = analysis.ServiceTier
+	reasoningEffort = analysis.ReasoningEffort
+	thinkingEnabled = analysis.ThinkingEnabled
 	return
+}
+
+func requestInfoAffinityID(info requestBodyInfo) string {
+	for _, value := range []string{
+		info.SessionID, info.SessionIDCamel,
+		info.ConversationID, info.ConversationIDCamel,
+		info.ThreadID, info.ThreadIDCamel,
+		info.PromptCacheKey, info.PromptCacheKeyCamel,
+		info.PreviousResponseID, info.PreviousResponseIDCamel,
+	} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func requestInfoGeneratesMedia(info requestBodyInfo) bool {
+	if mediaGenerationModel(info.Model) {
+		return true
+	}
+	for _, modalities := range [][]string{
+		info.ResponseModalities, info.ResponseModalitiesCamel,
+		info.OutputModalities, info.OutputModalitiesCamel, info.Modalities,
+	} {
+		for _, modality := range modalities {
+			switch strings.ToLower(strings.TrimSpace(modality)) {
+			case "image", "video":
+				return true
+			}
+		}
+	}
+	for _, mimeType := range []string{
+		info.ResponseMIMEType, info.ResponseMIMETypeCamel,
+		info.OutputMIMEType, info.OutputMIMETypeCamel,
+	} {
+		if mediaMIMEType(mimeType) {
+			return true
+		}
+	}
+	for _, option := range []json.RawMessage{
+		info.ImageGeneration, info.ImageGenerationCamel,
+		info.VideoGeneration, info.VideoGenerationCamel,
+	} {
+		trimmed := bytes.TrimSpace(option)
+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) && !bytes.Equal(trimmed, []byte("false")) {
+			return true
+		}
+	}
+	if mediaGenerationType(info.Task) || mediaGenerationType(info.Operation) {
+		return true
+	}
+	for _, tool := range info.Tools {
+		if mediaGenerationType(tool.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 // ExtractModelFromBody 从 JSON 请求体取 model。

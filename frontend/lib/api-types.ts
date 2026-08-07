@@ -250,6 +250,7 @@ export interface SystemSchedulerRetentionConfig {
   balanceSnapshotsDays: number
   notificationLogsDays: number
   announcementsDays: number
+  gatewayUsageLogsDays: number
 }
 
 export interface SystemSchedulerConfig {
@@ -1047,7 +1048,9 @@ export interface GatewayUsageStats {
   total_upstream_cost?: number
   /** 仅 winner 的网关结算成本。 */
   winner_cost?: number
-  /** loser/rejected/canceled attempt 的估算额外成本。 */
+  /** 虚拟缓存 winner 的 upstream actual - billed 补贴。 */
+  virtual_cache_subsidy_cost?: number
+  /** loser/rejected/canceled attempt + 虚拟缓存补贴。 */
   extra_attempt_cost?: number
   average_duration_ms: number
   /** 近 5 分钟平均每分钟请求数 */

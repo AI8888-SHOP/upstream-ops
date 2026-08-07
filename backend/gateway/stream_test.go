@@ -18,10 +18,19 @@ import (
 // flushRecorder 实现 http.Flusher，便于观察流式写出。
 type flushRecorder struct {
 	*httptest.ResponseRecorder
-	flushes int
+	flushes  int
+	flushCh  chan struct{}
 }
 
-func (f *flushRecorder) Flush() { f.flushes++ }
+func (f *flushRecorder) Flush() {
+	f.flushes++
+	if f.flushCh != nil {
+		select {
+		case f.flushCh <- struct{}{}:
+		default:
+		}
+	}
+}
 
 func TestCommitSSEHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -591,6 +600,23 @@ func TestResponsesSSEEventIsLifecycle(t *testing.T) {
 	}
 }
 
+func TestClassifyResponsesSSEEventAvoidsJSONDecodeForTerminalStatus(t *testing.T) {
+	lifecycle, terminal := classifyResponsesSSEEvent(
+		"response.created",
+		`{"type":"response.created","response":{"status":"completed"}}`,
+	)
+	if !lifecycle || !terminal {
+		t.Fatalf("classification = lifecycle=%v terminal=%v, want both true", lifecycle, terminal)
+	}
+	lifecycle, terminal = classifyResponsesSSEEvent(
+		"response.in_progress",
+		`{"type":"response.in_progress","response":{"status":"in_progress"}}`,
+	)
+	if !lifecycle || terminal {
+		t.Fatalf("in-progress classification = lifecycle=%v terminal=%v, want lifecycle only", lifecycle, terminal)
+	}
+}
+
 func TestFinalizeStreamClientDisconnect(t *testing.T) {
 	// 中途断开：保留 client 标记并补 StreamErr
 	mid := streamAttemptResult{ClientDisconnected: true}
@@ -653,6 +679,9 @@ func TestForwardStream_AnthropicToOpenAIConvert(t *testing.T) {
 	if !strings.Contains(out, `"content":"Z"`) {
 		t.Fatalf("missing content: %s", out)
 	}
+	if got := strings.Count(out, "[DONE]"); got != 1 {
+		t.Fatalf("expected one converted terminal frame, got %d: %s", got, out)
+	}
 }
 
 func TestStreamKeepaliveFrame(t *testing.T) {
@@ -673,5 +702,210 @@ func TestSSEEventHasPayload(t *testing.T) {
 	}
 	if !(&Runtime{Service: &Service{}}).sseEventHasPayload([]string{"event: response.created", "data: {}"}) {
 		t.Fatal("event+data should count as payload")
+	}
+}
+
+func TestStreamFlushStateFlushesOnIntervalOrSize(t *testing.T) {
+	now := time.Unix(100, 0)
+	var state streamFlushState
+	state.add([][]byte{[]byte("token")})
+	if !state.shouldFlush(now) {
+		t.Fatal("first buffered frame should flush immediately")
+	}
+	state.reset(now)
+	state.add([][]byte{[]byte("token")})
+	if state.shouldFlush(now.Add(streamFlushInterval - time.Nanosecond)) {
+		t.Fatal("small frame flushed before interval")
+	}
+	if !state.shouldFlush(now.Add(streamFlushInterval)) {
+		t.Fatal("small frame did not flush at interval")
+	}
+	state.reset(now)
+	state.add([][]byte{[]byte(strings.Repeat("x", streamFlushBytes))})
+	if !state.shouldFlush(now) {
+		t.Fatal("size threshold did not force a flush")
+	}
+	state.stop()
+}
+
+func TestStreamFlushStateTimerFiresWithoutAnotherEvent(t *testing.T) {
+	var state streamFlushState
+	state.reset(time.Now())
+	state.add([][]byte{[]byte("token")})
+	ch := state.channel()
+	select {
+	case <-ch:
+	case <-time.After(250 * time.Millisecond):
+		state.stop()
+		t.Fatal("flush timer did not fire")
+	}
+	state.stop()
+}
+
+func TestForwardStreamPreservesMultilineSSEEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: custom\nid: event-1\ndata: first\ndata: second\nretry: 1000\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	res := (&Service{}).forwardStream(
+		c.Request.Context(), c, &upstreamTarget{BaseURL: upstream.URL, APIKey: "k"},
+		"/v1/chat/completions", http.MethodPost, nil,
+		[]byte(`{"model":"m","stream":true}`),
+		protocol.KindOpenAIChat, protocol.KindOpenAIChat, "m", false, 0,
+	)
+	if res.Err != nil {
+		t.Fatalf("err=%v", res.Err)
+	}
+	out := rec.Body.String()
+	for _, part := range []string{"event: custom\n", "id: event-1\n", "data: first\n", "data: second\n", "retry: 1000\n\n"} {
+		if !strings.Contains(out, part) {
+			t.Fatalf("output missing %q: %s", part, out)
+		}
+	}
+	if strings.Index(out, "event: custom") > strings.Index(out, "data: first") || strings.Index(out, "data: first") > strings.Index(out, "data: second") {
+		t.Fatalf("multiline event order changed: %s", out)
+	}
+}
+
+func TestForwardStreamReturnsAfterTerminalWithoutWaitingForEOF(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	release := make(chan struct{})
+	releaseUpstream := func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}
+	terminalSent := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(terminalSent)
+		<-release
+	}))
+	defer func() {
+		releaseUpstream()
+		upstream.Close()
+	}()
+
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resultCh := make(chan streamAttemptResult, 1)
+	started := time.Now()
+	go func() {
+		resultCh <- (&Service{}).forwardStream(
+			c.Request.Context(), c, &upstreamTarget{BaseURL: upstream.URL, APIKey: "k"},
+			"/v1/chat/completions", http.MethodPost, nil,
+			[]byte(`{"model":"m","stream":true}`),
+			protocol.KindOpenAIChat, protocol.KindOpenAIChat, "m", false, 0,
+		)
+	}()
+	select {
+	case <-terminalSent:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("test upstream did not send terminal frame")
+	}
+	var result streamAttemptResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(250 * time.Millisecond):
+		releaseUpstream()
+		<-resultCh
+		t.Fatal("forwarder waited for upstream EOF after terminal frame")
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("terminal return took %s", elapsed)
+	}
+	if result.Err != nil || !result.DownstreamComplete {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+type streamErrorBody struct {
+	data   []byte
+	offset int
+	err    error
+}
+
+func (r *streamErrorBody) Read(p []byte) (int, error) {
+	if r.offset < len(r.data) {
+		n := copy(p, r.data[r.offset:])
+		r.offset += n
+		return n, nil
+	}
+	return 0, r.err
+}
+
+func (r *streamErrorBody) Close() error { return nil }
+
+func TestForwardStreamScannerErrorDoesNotCommitIncompleteEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       &streamErrorBody{data: []byte("data: {\"error\":{\"message\":\"partial\"}}"), err: errors.New("read boom")},
+	}
+	result := (&Runtime{Service: &Service{}}).forwardStreamIncremental(
+		context.Background(), context.Background(), nil, c, resp, time.Now(), 0,
+		protocol.KindOpenAIChat, protocol.KindOpenAIChat, "m", false, resp.Header, resp.StatusCode,
+	)
+	if result.Err == nil {
+		t.Fatal("expected scanner error")
+	}
+	if result.Committed || rec.Body.Len() != 0 {
+		t.Fatalf("incomplete event reached client: committed=%v body=%q", result.Committed, rec.Body.String())
+	}
+	if !strings.Contains(string(result.Body), "partial") {
+		t.Fatalf("diagnostic body lost incomplete event: %q", result.Body)
+	}
+}
+
+func TestForwardStreamScannerErrorKeepsCompletedEvents(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: &streamErrorBody{
+			data: []byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"partial\":true}"),
+			err:  errors.New("read boom"),
+		},
+	}
+	result := (&Runtime{Service: &Service{}}).forwardStreamIncremental(
+		context.Background(), context.Background(), nil, c, resp, time.Now(), 0,
+		protocol.KindOpenAIChat, protocol.KindOpenAIChat, "m", false, resp.Header, resp.StatusCode,
+	)
+	if !result.Committed || result.StreamErr == nil {
+		t.Fatalf("result=%+v, want committed stream error", result)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"content":"ok"`) {
+		t.Fatalf("completed event was lost: %s", out)
+	}
+	if strings.Contains(out, "partial") {
+		t.Fatalf("incomplete event was forwarded: %s", out)
 	}
 }

@@ -38,7 +38,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		// 仅透传；若路由强制 anthropic 则报错
 	}
 
-	requestedModel, stream, serviceTier, reasoningEffort, thinkingEnabled := ExtractRequestInfo(body)
+	requestInfo := analyzeRequestBody(body)
+	requestedModel, stream := requestInfo.Model, requestInfo.Stream
+	serviceTier, reasoningEffort := requestInfo.ServiceTier, requestInfo.ReasoningEffort
+	thinkingEnabled := requestInfo.ThinkingEnabled
 	_ = rt.Keys.TouchLastUsed(key.ID, time.Now())
 
 	routes, err := rt.Routes.ListByGroupID(group.ID)
@@ -75,7 +78,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	// selection. Disable concurrent hedge scheduling for such a request even
 	// when the client-facing name itself looks like a text model.
 	mappedMediaModel := mappedRouteContainsMediaModel(routes, requestedModel, groupMapping)
-	affinity := rt.routeAffinityForRequest(c, key.ID, group.ID, string(kind), requestedModel, body)
+	affinity := rt.routeAffinityForAnalyzedRequest(c, key.ID, group.ID, string(kind), requestedModel, body, requestInfo.AffinityID)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	validator, validationErr := rt.responseValidatorForGroup(group)
 	if validationErr != nil {
@@ -83,12 +86,14 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		rt.writeGatewayError(c, kind, http.StatusInternalServerError, "api_error", validationErr.Error())
 		return
 	}
-	useCoordinator, hedgeActive := rt.shouldUseCoordinatedForward(group, validator, hedgeRequest{
+	useCoordinator, hedgeActive, virtualCacheEligible := rt.shouldUseCoordinatedForward(group, validator, hedgeRequest{
 		Path: path, Model: requestedModel, Header: c.Request.Header, Body: body, Stream: stream,
 		Realtime: strings.Contains(strings.ToLower(path), "realtime"),
+		BodyMediaAnalyzed: requestInfo.Parsed, BodyGeneratesMedia: requestInfo.MediaGeneration,
 	})
 	if mappedMediaModel {
 		hedgeActive = false
+		virtualCacheEligible = false
 		// Response validation may still perform its configured sequential
 		// failover; only concurrent media hedging is prohibited.
 		useCoordinator = validator != nil && validator.Enabled()
@@ -105,6 +110,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			reasoningEffort: reasoningEffort, thinkingEnabled: thinkingEnabled,
 			routes: routes, validator: validator, requestID: reqID, affinity: affinity,
 			firstToken: firstTokenTimeout, hedgeActive: hedgeActive,
+			hedgeEligibilityKnown: true, virtualCacheEligible: virtualCacheEligible,
 			prepareCache: &upstreamRequestPrepareCache{},
 		})
 		return

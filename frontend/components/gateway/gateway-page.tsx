@@ -429,6 +429,9 @@ export function GatewayPage() {
           page: String(pageNum),
           page_size: String(size),
         })
+        // The page renders aggregate stats separately; avoid a duplicate full
+        // SUM(actual_cost) scan in the list endpoint.
+        qs.set("include_sum", "0")
         const gid = opts?.groupID
         if (gid != null && gid !== "" && gid !== "all" && Number(gid) > 0) {
           qs.set("group_id", String(gid))
@@ -452,9 +455,11 @@ export function GatewayPage() {
           const iso = usageTimeToRFC3339(opts.to)
           if (iso) qs.set("to", iso)
         }
+        const statsQS = new URLSearchParams(qs)
+        statsQS.set("include_endpoints", "0")
         const [page, stats] = await Promise.all([
           apiFetch<GatewayUsagePage>(`/gateway/usage?${qs}`),
-          apiFetch<GatewayUsageStats>(`/gateway/usage/stats?${qs}`),
+          apiFetch<GatewayUsageStats>(`/gateway/usage/stats?${statsQS}`),
         ])
         if (seq !== usageSeqRef.current) return
         setUsage(page)

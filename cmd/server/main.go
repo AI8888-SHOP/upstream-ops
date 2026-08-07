@@ -45,7 +45,11 @@ func main() {
 	resolvedConfigPath := config.ResolvePath(*configPath, usedConfigPath)
 
 	log := logger.New(cfg.Log.Level, cfg.Log.Format)
-	log.Info("starting UpstreamOps", "port", cfg.Server.Port, "mode", cfg.Server.Mode)
+	log.Info("starting UpstreamOps",
+		"port", cfg.Server.Port,
+		"mode", cfg.Server.Mode,
+		"database_driver", cfg.Database.ToStorageConfig().Driver,
+	)
 
 	if _, err := os.Stat(resolvedConfigPath); errors.Is(err, os.ErrNotExist) {
 		if err := config.Save(resolvedConfigPath, cfg); err != nil {
@@ -149,7 +153,7 @@ func main() {
 	syncSvc.SetDispatcher(dispatcher)
 
 	schedulerFactory := func(scfg config.SchedulerConfig, pcfg config.ProxyConfig) *scheduler.Scheduler {
-		return scheduler.New(scfg, monitorSvc, monLogs, syncLogs, rates, notifies, announcements, captchas, cipher, syncSvc, gatewaySvc, pcfg, log)
+		return scheduler.New(scfg, monitorSvc, monLogs, gatewayUsage, syncLogs, rates, notifies, announcements, captchas, cipher, syncSvc, gatewaySvc, pcfg, log)
 	}
 	sch := schedulerFactory(cfg.Scheduler, cfg.Proxy)
 	if err := sch.Start(); err != nil {

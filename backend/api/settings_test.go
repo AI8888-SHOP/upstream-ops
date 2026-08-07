@@ -35,7 +35,7 @@ func TestSaveSettingsKeepsAppVersion(t *testing.T) {
 	body := `{
 		"app":{"title":"New","notificationPrefix":"[New] "},
 		"auth":{"enabled":false,"username":"admin","password":"","tokenSecret":"","sessionTTLHours":168},
-		"scheduler":{"balanceCron":"37 */15 * * * *","rateCron":"13 */30 * * * *","concurrency":4,"retention":{"cron":"0 17 3 * * *","monitorLogsDays":30,"balanceSnapshotsDays":90,"notificationLogsDays":90,"announcementsDays":90}},
+		"scheduler":{"balanceCron":"37 */15 * * * *","rateCron":"13 */30 * * * *","concurrency":4,"retention":{"cron":"0 17 3 * * *","monitorLogsDays":30,"balanceSnapshotsDays":90,"notificationLogsDays":90,"announcementsDays":90,"gatewayUsageLogsDays":45}},
 		"notifications":{"batchRateChanges":true,"minChangePct":0,"balanceLowCooldownMinutes":60,"subscriptionDailyRemainingThresholdPct":0,"subscriptionWeeklyRemainingThresholdPct":0,"subscriptionMonthlyRemainingThresholdPct":0,"subscriptionExpiryThresholdHours":0,"subscriptionAlertCooldownMinutes":1440,"sendMaxAttempts":3},
 		"proxy":{"enabled":true,"versionCheckEnabled":true,"protocol":"socks5","host":"127.0.0.1","port":1080,"username":"u","password":"p"},
 		"upstream":{"timeoutSeconds":45,"userAgent":"custom-agent"},
@@ -64,6 +64,9 @@ func TestSaveSettingsKeepsAppVersion(t *testing.T) {
 	}
 	if got.Upstream.TimeoutSeconds != 45 || got.Upstream.UserAgent != "custom-agent" {
 		t.Fatalf("upstream = %#v", got.Upstream)
+	}
+	if got.Scheduler.Retention.GatewayUsageLogsDays != 45 {
+		t.Fatalf("gateway usage retention = %d", got.Scheduler.Retention.GatewayUsageLogsDays)
 	}
 	if got.Gateway.RouteBatchConcurrency != 8 || got.Gateway.ForwardTimeoutSeconds != 600 {
 		t.Fatalf("gateway = %#v", got.Gateway)

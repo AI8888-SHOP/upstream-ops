@@ -16,35 +16,101 @@ import (
 const maxResponsesLifecycleBufferBytes = 1 << 20
 
 func (rt *Runtime) parseSSEEventLines(lines []string) (eventName, data string) {
-	var dataParts []string
+	eventName, data, _ = rt.parseSSEEventLinesWithPayload(lines)
+	return eventName, data
+}
+
+// parseSSEEventLinesWithPayload parses an event and determines whether it has
+// a non-comment SSE field in one pass. Most events have one data line, so keep
+// that line directly and allocate a builder only for the uncommon multiline
+// form.
+func (rt *Runtime) parseSSEEventLinesWithPayload(lines []string) (eventName, data string, hasPayload bool) {
+	var firstData string
+	var dataBuilder strings.Builder
+	dataSeen := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, ":") {
+			continue
+		}
+		hasPayload = true
 		if strings.HasPrefix(trimmed, "event:") {
 			eventName = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
 			continue
 		}
 		if strings.HasPrefix(trimmed, "data:") {
-			dataParts = append(dataParts, strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+			part := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if !dataSeen {
+				firstData = part
+				dataSeen = true
+				continue
+			}
+			if dataBuilder.Len() == 0 {
+				dataBuilder.Grow(len(firstData) + len(part) + 1)
+				dataBuilder.WriteString(firstData)
+			}
+			dataBuilder.WriteByte('\n')
+			dataBuilder.WriteString(part)
 		}
 	}
-	data = strings.Join(dataParts, "\n")
-	return eventName, data
+	if dataBuilder.Len() > 0 {
+		data = dataBuilder.String()
+	} else {
+		data = firstData
+	}
+	return eventName, data, hasPayload
 }
 
 // responsesSSEEventIsLifecycle reports metadata-only Responses events. They
 // describe request state but do not contain client-visible model output.
 func responsesSSEEventIsLifecycle(eventName, data string) bool {
-	eventType := strings.TrimSpace(eventName)
-	payload := strings.TrimSpace(data)
-	if payload != "" && payload != "[DONE]" {
-		var envelope struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal([]byte(payload), &envelope); err == nil && strings.TrimSpace(envelope.Type) != "" {
-			eventType = envelope.Type
+	lifecycle, _ := classifyResponsesSSEEvent(eventName, data)
+	return lifecycle
+}
+
+// classifyResponsesSSEEvent derives lifecycle and terminal state from one
+// lightweight pass over the event envelope. Some providers send a lifecycle
+// event name while the nested response status is already terminal, so keep the
+// two flags independent.
+func classifyResponsesSSEEvent(eventName, data string) (lifecycle, terminal bool) {
+	eventType := []byte(strings.TrimSpace(eventName))
+	payload := bytes.TrimSpace([]byte(data))
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return false, true
+	}
+	if len(payload) > 0 {
+		if payloadType := responsesPayloadTypeBytes(payload); len(payloadType) > 0 {
+			eventType = payloadType
 		}
 	}
-	return isResponsesLifecycleEvent(eventType)
+	lifecycle = isResponsesLifecycleEventBytes(eventType)
+	terminal = isResponsesTerminalEventBytes(eventType)
+	if terminal || len(payload) == 0 {
+		return lifecycle, terminal
+	}
+	if bytes.Contains(payload, []byte(`"error"`)) {
+		if _, ok := partialJSONRootMember(payload, "error"); ok {
+			return lifecycle, true
+		}
+	}
+	if !bytes.Contains(payload, []byte(`"response"`)) {
+		return lifecycle, false
+	}
+	response, ok := partialJSONRootMember(payload, "response")
+	if !ok {
+		return lifecycle, false
+	}
+	statusValue, ok := partialJSONRootMember(response, "status")
+	if !ok {
+		return lifecycle, false
+	}
+	parser := partialJSONParser{data: statusValue}
+	status, _ := parser.parseString()
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "done", "failed", "incomplete", "error", "canceled", "cancelled":
+		terminal = true
+	}
+	return lifecycle, terminal
 }
 
 // sseEventHasPayload 判断 SSE 事件是否包含可提交的有效载荷（非纯注释）。
