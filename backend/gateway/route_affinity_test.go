@@ -4,12 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/gin-gonic/gin"
 )
 
 func TestRequestRouteAffinityIncrementalHashMatchesLegacy(t *testing.T) {
@@ -61,7 +62,7 @@ func legacyRouteAffinityFingerprints(field string, payload map[string]any, items
 		return nil
 	}
 	hashInput := make([]byte, 0, len(staticJSON)+len(field)+len(items)*32+16)
-	hashInput = append(hashInput, ("body:"+field+"\x00")...)
+	hashInput = append(hashInput, ("body:" + field + "\x00")...)
 	hashInput = append(hashInput, staticJSON...)
 	conversationSeen := false
 	prefixes := make([]string, 0, minInt(len(items), maxRouteAffinityPrefixes))
@@ -110,6 +111,21 @@ func TestRequestRouteAffinityMatchesConversationPrefix(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("continued conversation did not match the previous full history")
+	}
+}
+
+func TestRequestRouteAffinityPrefersExplicitSessionHeader(t *testing.T) {
+	c := &gin.Context{}
+	// The body deliberately contains a conversation and a different body ID.
+	// A stable session header is authoritative and must avoid the expensive
+	// full-body affinity scan.
+	c.Request = &http.Request{Header: make(http.Header)}
+	c.Request.Header.Set("X-Session-ID", "session-id")
+
+	got := requestRouteAffinityFingerprints(c, []byte(`{"conversation_id":"body-id","messages":[{"role":"user","content":"hello"}]}`), "m")
+	want := []string{routeAffinityDigest("header:x-session-id\x00session-id")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("header fingerprints=%v, want %v", got, want)
 	}
 }
 
@@ -210,6 +226,13 @@ func TestRouteAffinityKeepsNewlyCooledPreferredRoute(t *testing.T) {
 	candidates := rt.sortRoutesWithAffinity(routes, nil, "asc", time.Now(), nil, &next, "m")
 	if len(candidates) != 2 || candidates[0].Route.ID != 1 || !next.Recovery {
 		t.Fatalf("next request did not probe cooled preferred route first: candidates=%+v affinity=%+v", candidates, next)
+	}
+	recoveryCooldown, ok := candidates[0].Route.ModelCooldowns["m"]
+	if !ok || recoveryCooldown.TempUnschedulableUntil != nil {
+		t.Fatalf("recovery route did not retain a schedulable cooldown snapshot: %+v", candidates[0].Route.ModelCooldowns)
+	}
+	if recoveryCooldown.Model != "m" {
+		t.Fatalf("recovery route lost cooldown generation metadata: %+v", recoveryCooldown)
 	}
 }
 

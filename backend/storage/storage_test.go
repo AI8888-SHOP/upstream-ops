@@ -1693,6 +1693,51 @@ func TestGatewayUsageFinalizeResponseRuleVirtualCache(t *testing.T) {
 	}
 }
 
+func TestGatewayUsageFinalizeResponseRuleVirtualCacheAllowsHedgeWinner(t *testing.T) {
+	db := openTestDB(t)
+	key := &GatewayKey{Name: "vc-response-rule-hedge-key", KeyHash: "vc-response-rule-hedge-hash", KeyPrefix: "sk-vcrh-", KeyCipher: "cipher"}
+	if err := db.Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	logs := NewGatewayUsageLogs(db)
+	requestID := "vc-response-rule-hedge-request"
+	rejected := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: requestID, RouteID: 11,
+		Attempt: 1, AttemptKind: GatewayAttemptKindRegexReject, AttemptStatus: GatewayAttemptStatusRejected,
+		ValidationPostCommit: false, BillingMode: "token", InputTokens: 50, ActualCost: 1,
+		CreatedAt: time.Now().UTC(),
+	}
+	winner := &GatewayUsageLog{
+		GatewayKeyID: key.ID, RequestID: requestID, RouteID: 22,
+		Attempt: 2, AttemptKind: GatewayAttemptKindHedge, AttemptStatus: GatewayAttemptStatusAccepted,
+		BillingMode: "token", InputTokens: 50, ActualCost: 1, Success: true,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := logs.Create(rejected); err != nil {
+		t.Fatalf("create rejected usage: %v", err)
+	}
+	if err := logs.Create(winner); err != nil {
+		t.Fatalf("create winner usage: %v", err)
+	}
+	first, err := logs.FinalizeRequest(GatewayFinalizeRequestInput{
+		RequestID: requestID, GatewayKeyID: key.ID, Delivered: true,
+		WinnerAttempt: winner.Attempt, WinnerUsageLogID: winner.ID,
+		BilledCost: 0.25, BilledCostSet: true, HedgeTriggered: true,
+		VirtualCacheReadEnabled: true, VirtualCacheReadTokens: 50, VirtualCacheReadCost: 0.01,
+		VirtualCacheReason: GatewayVirtualCacheReasonResponseRuleFailover,
+	})
+	if err != nil || !first {
+		t.Fatalf("response-rule hedge virtual finalize = %v, err=%v", first, err)
+	}
+	var gotUsage GatewayUsageLog
+	if err := db.First(&gotUsage, winner.ID).Error; err != nil {
+		t.Fatalf("load winner usage: %v", err)
+	}
+	if gotUsage.VirtualCacheReason != GatewayVirtualCacheReasonResponseRuleFailover {
+		t.Fatalf("virtual cache reason=%q, want response-rule failover", gotUsage.VirtualCacheReason)
+	}
+}
+
 func TestGatewayUsageFinalizeResponseRuleVirtualCacheRejectsSameRoute(t *testing.T) {
 	db := openTestDB(t)
 	key := &GatewayKey{Name: "vc-response-rule-same-key", KeyHash: "vc-response-rule-same-hash", KeyPrefix: "sk-vcrs-", KeyCipher: "cipher"}
@@ -2106,7 +2151,10 @@ func TestGatewayRouteModelCooldownIsolated(t *testing.T) {
 		t.Fatalf("model-a was not upserted: %+v", got.ModelCooldowns["model-a"])
 	}
 
-	if err := routes.NoteSuccessForModelPauseError(routeID, "model-a"); err != nil {
+	modelACooldown := got.ModelCooldowns["model-a"]
+	if err := routes.NoteSuccessForModelPauseError(
+		routeID, "model-a", modelACooldown.TempUnschedulableAt, modelACooldown.TempUnschedulableRequestID,
+	); err != nil {
 		t.Fatalf("model-a success: %v", err)
 	}
 	got, err = routes.FindByID(routeID)
@@ -2129,6 +2177,52 @@ func TestGatewayRouteModelCooldownIsolated(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("route clear left %d model cooldown rows", count)
+	}
+}
+
+func TestNoteSuccessForModelPauseErrorDoesNotClearNewerFailure(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	if err := routes.SaveForGroup(15, []GatewayRoute{{SourceChannelID: 24, Weight: 1, Enabled: true}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(15)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	routeID := list[0].ID
+	oldAt := time.Now().Add(-2 * time.Minute)
+	if err := routes.SetModelTempUnschedulable(
+		routeID, "model-a", time.Now().Add(time.Minute), "old", oldAt, "old-request",
+	); err != nil {
+		t.Fatalf("set old cooldown: %v", err)
+	}
+	oldRoute, err := routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("load old cooldown: %v", err)
+	}
+	observed := oldRoute.ModelCooldowns["model-a"]
+
+	newAt := time.Now().Add(-time.Second)
+	newUntil := time.Now().Add(5 * time.Minute)
+	if err := routes.SetModelTempUnschedulable(
+		routeID, "model-a", newUntil, "new", newAt, "new-request",
+	); err != nil {
+		t.Fatalf("set new cooldown: %v", err)
+	}
+	if err := routes.NoteSuccessForModelPauseError(
+		routeID, "model-a", observed.TempUnschedulableAt, observed.TempUnschedulableRequestID,
+	); err != nil {
+		t.Fatalf("record stale success: %v", err)
+	}
+	got, err := routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("load current cooldown: %v", err)
+	}
+	cooldown := got.ModelCooldowns["model-a"]
+	if cooldown.TempUnschedulableUntil == nil || !cooldown.TempUnschedulableUntil.Equal(newUntil) ||
+		cooldown.TempUnschedulableRequestID != "new-request" || cooldown.RecoverSuccessStreak != 0 {
+		t.Fatalf("stale success changed newer cooldown: %+v", cooldown)
 	}
 }
 

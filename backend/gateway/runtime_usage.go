@@ -232,7 +232,7 @@ func (rt *Runtime) finalizeUsageWinnerWithSettlement(reqID string, key *storage.
 // upstream usage remains in the attempt row; this value is only a user-side
 // settlement override.
 func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, winner *coordinatedForwardAttempt) storage.GatewayFinalizeRequestInput {
-	if rt == nil || rt.Pricing == nil || req == nil || req.group == nil || winner == nil || winner.Tokens.ImageOutputTokens > 0 {
+	if rt == nil || req == nil || req.group == nil || winner == nil || winner.Tokens.ImageOutputTokens > 0 {
 		return storage.GatewayFinalizeRequestInput{}
 	}
 	reason := strings.TrimSpace(req.virtualCacheReason)
@@ -256,24 +256,27 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 	if model == "" {
 		model = strings.TrimSpace(req.requestedModel)
 	}
-	if model == "" {
-		return storage.GatewayFinalizeRequestInput{}
-	}
 	tokens := NormalizeUsageBuckets(winner.Tokens, protocol.Kind(winner.UsageMeta.UpstreamProtocol))
 	virtualTokens := tokens.InputTokens
 	if virtualTokens <= 0 {
 		return storage.GatewayFinalizeRequestInput{}
 	}
-	pricing := rt.Pricing.Resolve(model)
+	pricing := ModelPricing{}
+	if rt.Pricing != nil {
+		pricing = rt.Pricing.Resolve(model)
+	}
 	rawCost := CalculateCost(pricing, tokens, winner.Plan.Candidate.EffectiveRate, winner.Plan.Candidate.BillingRate)
 	virtualized := tokens
 	virtualized.InputTokens = 0
 	virtualized.CacheReadTokens += virtualTokens
 	billedCost := CalculateCost(pricing, virtualized, winner.Plan.Candidate.EffectiveRate, winner.Plan.Candidate.BillingRate)
-	// A malformed/overridden price must never make the virtual option increase
-	// what the caller pays. Keep the real winner charge in that case.
-	if billedCost.ActualCost >= rawCost.ActualCost {
-		return storage.GatewayFinalizeRequestInput{}
+	// Downstream virtual-cache signalling is a routing policy, not a function
+	// of this process's optional price catalog. Unknown/equal/inverted local
+	// prices must not suppress the usage rewrite that Sub2API bills from.
+	// Keep the local charge non-increasing when an override is malformed.
+	billedActual := billedCost.ActualCost
+	if billedActual > rawCost.ActualCost {
+		billedActual = rawCost.ActualCost
 	}
 	accountRate := billedCost.ActualCost
 	virtualReadCost := float64(virtualTokens) * pricing.CacheReadPricePerToken
@@ -283,8 +286,11 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 		accountRate = 0
 	}
 	virtualReadCost *= accountRate
+	if virtualReadCost > billedActual {
+		virtualReadCost = billedActual
+	}
 	return storage.GatewayFinalizeRequestInput{
-		BilledCost:              billedCost.ActualCost,
+		BilledCost:              billedActual,
 		BilledCostSet:           true,
 		HedgeTriggered:          reason == storage.GatewayVirtualCacheReasonHedge,
 		VirtualCacheReadEnabled: true,
@@ -292,21 +298,6 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 		VirtualCacheReadCost:    virtualReadCost,
 		VirtualCacheReason:      reason,
 	}
-}
-
-func (rt *Runtime) virtualCachePricingEligible(req *coordinatedForwardRequest, winner *coordinatedForwardAttempt) bool {
-	if rt == nil || rt.Pricing == nil || req == nil || winner == nil {
-		return false
-	}
-	model := strings.TrimSpace(winner.UpstreamModel)
-	if model == "" {
-		model = strings.TrimSpace(req.requestedModel)
-	}
-	if model == "" {
-		return false
-	}
-	pricing := rt.Pricing.Resolve(model)
-	return pricing.InputPricePerToken > pricing.CacheReadPricePerToken
 }
 
 func (rt *Runtime) finalizeUsageFailure(reqID string, key *storage.GatewayKey) {

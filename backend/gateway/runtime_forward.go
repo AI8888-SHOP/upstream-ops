@@ -71,6 +71,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		routes = rt.recoverWhenAllRoutesCooling(routes, requestedModel, groupMapping, time.Now())
 	}
 	routes = bindModelCooldownAliases(routes, requestedModel, groupMapping)
+	// A model alias can map to a media-generation model only after route
+	// selection. Disable concurrent hedge scheduling for such a request even
+	// when the client-facing name itself looks like a text model.
+	mappedMediaModel := mappedRouteContainsMediaModel(routes, requestedModel, groupMapping)
 	affinity := rt.routeAffinityForRequest(c, key.ID, group.ID, string(kind), requestedModel, body)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	validator, validationErr := rt.responseValidatorForGroup(group)
@@ -83,6 +87,12 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		Path: path, Model: requestedModel, Header: c.Request.Header, Body: body, Stream: stream,
 		Realtime: strings.Contains(strings.ToLower(path), "realtime"),
 	})
+	if mappedMediaModel {
+		hedgeActive = false
+		// Response validation may still perform its configured sequential
+		// failover; only concurrent media hedging is prohibited.
+		useCoordinator = validator != nil && validator.Enabled()
+	}
 	if useCoordinator {
 		ftTimeoutSec := rt.clampFirstTokenTimeoutSec(group.FirstTokenTimeoutSec)
 		var firstTokenTimeout time.Duration
@@ -387,7 +397,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					}
 				}
 				if success {
-					_ = rt.Routes.NoteSuccessForModelPauseError(route.ID, upstreamModel)
+					rt.noteRouteModelSuccess(&route, upstreamModel)
 					rt.finishRouteAffinityProbe(&affinity, route.ID, true, nil, time.Now())
 					if affinity.shouldRememberRoute(route.ID) {
 						rt.rememberRouteAffinity(affinity.Keys, route.ID, time.Now())
@@ -550,7 +560,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				return
 			}
 			// 成功：立刻恢复调度；连续成功达到阈值后自动清除错误残留展示
-			_ = rt.Routes.NoteSuccessForModelPauseError(route.ID, upstreamModel)
+			rt.noteRouteModelSuccess(&route, upstreamModel)
 			rt.finishRouteAffinityProbe(&affinity, route.ID, true, nil, time.Now())
 			if affinity.shouldRememberRoute(route.ID) {
 				rt.rememberRouteAffinity(affinity.Keys, route.ID, time.Now())

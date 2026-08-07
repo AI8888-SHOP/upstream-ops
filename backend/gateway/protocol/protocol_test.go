@@ -36,6 +36,147 @@ func TestOpenAIToAnthropicRequestBasic(t *testing.T) {
 	}
 }
 
+func TestNonStreamUsageConversionsPreserveCacheCreation(t *testing.T) {
+	chat := []byte(`{"id":"c1","model":"gpt-x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":4,"total_tokens":104,"prompt_tokens_details":{"cached_tokens":20},"cache_creation_tokens":10}}`)
+	responses, err := OpenAIChatToResponsesResponse(chat, "gpt-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(responses, &response); err != nil {
+		t.Fatal(err)
+	}
+	responseUsage, _ := response["usage"].(map[string]any)
+	if got, _ := asInt(responseUsage["cache_creation_tokens"]); got != 10 {
+		t.Fatalf("chat -> responses lost cache creation: %#v", responseUsage)
+	}
+	back, err := ResponsesToOpenAIChatResponse(responses, "gpt-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chatBack map[string]any
+	if err := json.Unmarshal(back, &chatBack); err != nil {
+		t.Fatal(err)
+	}
+	backUsage, _ := chatBack["usage"].(map[string]any)
+	if got, _ := asInt(backUsage["cache_creation_tokens"]); got != 10 {
+		t.Fatalf("responses -> chat lost cache creation: %#v", backUsage)
+	}
+
+	anthropic, err := ResponsesToAnthropicResponse(responses, "claude-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(anthropic, &message); err != nil {
+		t.Fatal(err)
+	}
+	anthropicUsage, _ := message["usage"].(map[string]any)
+	if got, _ := asInt(anthropicUsage["input_tokens"]); got != 70 {
+		t.Fatalf("responses -> anthropic fresh input=%d, want 70: %#v", got, anthropicUsage)
+	}
+	if got, _ := asInt(anthropicUsage["cache_read_input_tokens"]); got != 20 {
+		t.Fatalf("responses -> anthropic cache read=%d, want 20: %#v", got, anthropicUsage)
+	}
+	if got, _ := asInt(anthropicUsage["cache_creation_input_tokens"]); got != 10 {
+		t.Fatalf("responses -> anthropic cache creation=%d, want 10: %#v", got, anthropicUsage)
+	}
+
+	openAIAnthropic, err := OpenAIToAnthropicResponse(chat, "claude-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var openAIMessage map[string]any
+	if err := json.Unmarshal(openAIAnthropic, &openAIMessage); err != nil {
+		t.Fatal(err)
+	}
+	openAIUsage, _ := openAIMessage["usage"].(map[string]any)
+	if got, _ := asInt(openAIUsage["input_tokens"]); got != 70 {
+		t.Fatalf("chat -> anthropic fresh input=%d, want 70: %#v", got, openAIUsage)
+	}
+}
+
+func TestNonStreamUsageConversionsPreserveCompatibilityAliases(t *testing.T) {
+	chat := []byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"input_tokens":100,"output_tokens":4,"input_tokens_details":{"cached_tokens":0},"cache_read_tokens":20,"cache_write_tokens":10,"cache_creation_5m_tokens":4,"cache_creation_1h_tokens":6}}`)
+	responses, err := OpenAIChatToResponsesResponse(chat, "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(responses, &payload); err != nil {
+		t.Fatal(err)
+	}
+	usage, _ := payload["usage"].(map[string]any)
+	if got := openAIInputTokens(usage); got != 100 {
+		t.Fatalf("input tokens=%d, want 100: %#v", got, usage)
+	}
+	if got := openAICachedTokens(usage); got != 20 {
+		t.Fatalf("cache read=%d, want 20: %#v", got, usage)
+	}
+	if got := openAICacheCreationTokens(usage); got != 10 {
+		t.Fatalf("cache creation=%d, want 10: %#v", got, usage)
+	}
+	for _, key := range []string{"cache_read_tokens", "cache_write_tokens", "cache_creation_5m_tokens", "cache_creation_1h_tokens"} {
+		if _, exists := usage[key]; !exists {
+			t.Fatalf("lost %s: %#v", key, usage)
+		}
+	}
+}
+
+func TestCacheCreationConversionsUseSub2APIPriorityAndPreserveDurationTotal(t *testing.T) {
+	conflicting := map[string]any{
+		"input_tokens_details":  map[string]any{"cache_creation_tokens": 5},
+		"prompt_tokens_details": map[string]any{"cache_write_tokens": 7},
+	}
+	if got := openAICacheCreationTokens(conflicting); got != 7 {
+		t.Fatalf("cache creation=%d, want higher-priority prompt cache_write_tokens=7", got)
+	}
+
+	anthropic := map[string]any{
+		"input_tokens": 70, "output_tokens": 4, "cache_creation_input_tokens": 0,
+		"cache_creation": map[string]any{
+			"ephemeral_5m_input_tokens": 4,
+			"ephemeral_1h_input_tokens": 6,
+		},
+	}
+	converted := anthropicUsageToOpenAI(anthropic)
+	if got, _ := asInt(converted["prompt_tokens"]); got != 80 {
+		t.Fatalf("total input=%d, want 80: %#v", got, converted)
+	}
+	if got, _ := asInt(converted["cache_creation_input_tokens"]); got != 10 {
+		t.Fatalf("canonical cache creation=%d, want 10: %#v", got, converted)
+	}
+}
+
+func TestUsageConversionCanonicalizesConflictingNestedCacheAliases(t *testing.T) {
+	usage := map[string]any{
+		"input_tokens": 100, "output_tokens": 4,
+		"input_tokens_details":  map[string]any{"cached_tokens": 0, "cache_write_tokens": 0},
+		"prompt_tokens_details": map[string]any{"cached_tokens": 20, "cache_write_tokens": 10},
+	}
+	converted := openAIUsageToResponses(usage)
+	details, _ := converted["input_tokens_details"].(map[string]any)
+	if cached, _ := asInt(details["cached_tokens"]); cached != 20 {
+		t.Fatalf("canonical cached tokens=%d, want 20: %#v", cached, converted)
+	}
+	if created, _ := asInt(details["cache_write_tokens"]); created != 10 {
+		t.Fatalf("canonical cache creation=%d, want 10: %#v", created, converted)
+	}
+}
+
+func TestAnthropicUsageConversionKeepsSynthesizedCreationTotal(t *testing.T) {
+	converted := anthropicUsageToOpenAI(map[string]any{
+		"input_tokens": 70, "output_tokens": 4, "cache_creation_input_tokens": 0,
+		"cache_creation": map[string]any{
+			"ephemeral_5m_input_tokens": 4,
+			"ephemeral_1h_input_tokens": 6,
+		},
+	})
+	if created, _ := asInt(converted["cache_creation_input_tokens"]); created != 10 {
+		t.Fatalf("synthesized cache creation=%d, want 10: %#v", created, converted)
+	}
+}
+
 func TestAnthropicToOpenAIRequestBasic(t *testing.T) {
 	in := []byte(`{
 		"model":"claude-x",

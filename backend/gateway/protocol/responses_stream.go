@@ -16,21 +16,23 @@ type ResponsesToAnthropicStream struct {
 	messageStopSent  bool
 	done             bool
 
-	contentBlockIndex int
-	contentBlockOpen  bool
-	currentBlockType  string // text | thinking | tool_use
-	currentToolName   string
-	currentToolArgs   string
+	contentBlockIndex   int
+	contentBlockOpen    bool
+	currentBlockType    string // text | thinking | tool_use
+	currentToolName     string
+	currentToolArgs     string
 	currentToolHadDelta bool
-	hasToolCall       bool
+	hasToolCall         bool
 
 	// output_index → anthropic content block index
 	outputIndexToBlockIdx map[int]int
 
-	inputTokens  int
-	outputTokens int
-	cacheRead    int
-	cacheCreate  int
+	inputTokens   int
+	outputTokens  int
+	cacheRead     int
+	cacheCreate   int
+	cacheCreate5m int
+	cacheCreate1h int
 }
 
 func NewResponsesToAnthropicStream(model string) *ResponsesToAnthropicStream {
@@ -525,8 +527,8 @@ func (s *ResponsesToAnthropicStream) synthesizeFromOutput(resp map[string]any) [
 			s.contentBlockOpen = true
 			s.currentBlockType = "thinking"
 			frames = append(frames, encodeSSEFrame("content_block_start", map[string]any{
-				"type":  "content_block_start",
-				"index": idx,
+				"type":          "content_block_start",
+				"index":         idx,
 				"content_block": map[string]any{"type": "thinking", "thinking": ""},
 			}))
 			frames = append(frames, encodeSSEFrame("content_block_delta", map[string]any{
@@ -560,8 +562,8 @@ func (s *ResponsesToAnthropicStream) synthesizeFromOutput(resp map[string]any) [
 			s.contentBlockOpen = true
 			s.currentBlockType = "text"
 			frames = append(frames, encodeSSEFrame("content_block_start", map[string]any{
-				"type":  "content_block_start",
-				"index": idx,
+				"type":          "content_block_start",
+				"index":         idx,
 				"content_block": map[string]any{"type": "text", "text": ""},
 			}))
 			frames = append(frames, encodeSSEFrame("content_block_delta", map[string]any{
@@ -643,6 +645,12 @@ func (s *ResponsesToAnthropicStream) finalize(stopReason string) [][]byte {
 	if s.cacheCreate > 0 {
 		usage["cache_creation_input_tokens"] = s.cacheCreate
 	}
+	if s.cacheCreate5m > 0 || s.cacheCreate1h > 0 {
+		usage["cache_creation"] = map[string]any{
+			"ephemeral_5m_input_tokens": s.cacheCreate5m,
+			"ephemeral_1h_input_tokens": s.cacheCreate1h,
+		}
+	}
 	frames = append(frames, encodeSSEFrame("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
@@ -694,23 +702,12 @@ func (s *ResponsesToAnthropicStream) ingestUsage(m map[string]any) {
 	if u == nil {
 		return
 	}
-	if v, ok := asInt(u["input_tokens"]); ok {
-		s.inputTokens = v
-	}
-	if v, ok := asInt(u["output_tokens"]); ok {
-		s.outputTokens = v
-	}
-	if d, ok := u["input_tokens_details"].(map[string]any); ok {
-		if v, ok := asInt(d["cached_tokens"]); ok {
-			s.cacheRead = v
-			if s.inputTokens >= v {
-				s.inputTokens -= v
-			}
-		}
-	}
-	if v, ok := asInt(u["cache_creation_input_tokens"]); ok {
-		s.cacheCreate = v
-	}
+	converted := openAIUsageToAnthropic(u)
+	s.inputTokens, _ = asInt(converted["input_tokens"])
+	s.outputTokens, _ = asInt(converted["output_tokens"])
+	s.cacheRead, _ = asInt(converted["cache_read_input_tokens"])
+	s.cacheCreate, _ = asInt(converted["cache_creation_input_tokens"])
+	s.cacheCreate5m, s.cacheCreate1h = anthropicCacheCreationBreakdown(converted)
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,29 +1112,7 @@ func (s *ResponsesToOpenAIStream) handleCompleted(payload map[string]any) [][]by
 
 func responsesUsageToOpenAI(response map[string]any) map[string]any {
 	usage, _ := response["usage"].(map[string]any)
-	if usage == nil {
-		return nil
-	}
-	input, _ := asInt(usage["input_tokens"])
-	output, _ := asInt(usage["output_tokens"])
-	out := map[string]any{
-		"prompt_tokens":     input,
-		"completion_tokens": output,
-		"total_tokens":      input + output,
-	}
-	if details, ok := usage["input_tokens_details"].(map[string]any); ok {
-		copied := make(map[string]any, len(details))
-		for key, value := range details {
-			copied[key] = value
-		}
-		out["prompt_tokens_details"] = copied
-	}
-	for _, key := range []string{"cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens"} {
-		if value, exists := usage[key]; exists {
-			out[key] = value
-		}
-	}
-	return out
+	return openAIUsageToChat(usage)
 }
 
 func openAIUsageFrame(id, model string, usage map[string]any) []byte {

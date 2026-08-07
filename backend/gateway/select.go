@@ -306,7 +306,7 @@ func (rt *Runtime) recoverWhenAllRoutesCooling(
 			index: index, model: modelKey, failedAt: *failedAt,
 			cooldownAt: cooldownAt, cooldownUntil: *cooldown.TempUnschedulableUntil,
 			requestID: cooldown.TempUnschedulableRequestID,
-			position: route.Position, routeID: route.ID,
+			position:  route.Position, routeID: route.ID,
 			identity: identity, identityOK: identityOK,
 		})
 	}
@@ -448,7 +448,14 @@ func (rt *Runtime) sortRoutesWithAffinity(
 		candidate := route
 		candidate.TempUnschedulableUntil = nil
 		if key := storage.NormalizeGatewayModel(model); key != "" && len(candidate.ModelCooldowns) > 0 {
-			candidate.ModelCooldowns = cloneModelCooldownsWithout(candidate.ModelCooldowns, key)
+			candidate.ModelCooldowns = cloneModelCooldowns(candidate.ModelCooldowns)
+			if cooldown, ok := candidate.ModelCooldowns[key]; ok {
+				// Keep the observed failure generation on the request-local
+				// recovery copy. A later success uses it as a CAS guard so an
+				// older probe cannot clear a newer concurrent cooldown.
+				cooldown.TempUnschedulableUntil = nil
+				candidate.ModelCooldowns[key] = cooldown
+			}
 		}
 		if !IsRouteSchedulableForModel(&candidate, model, now) {
 			return normal
@@ -484,17 +491,4 @@ func routeModelCooldownUntil(route *storage.GatewayRoute, model string, now time
 		return &until
 	}
 	return nil
-}
-
-func cloneModelCooldownsWithout(source map[string]storage.GatewayRouteModelCooldown, excluded string) map[string]storage.GatewayRouteModelCooldown {
-	if len(source) == 0 {
-		return nil
-	}
-	out := make(map[string]storage.GatewayRouteModelCooldown, len(source))
-	for key, value := range source {
-		if key != excluded {
-			out[key] = value
-		}
-	}
-	return out
 }

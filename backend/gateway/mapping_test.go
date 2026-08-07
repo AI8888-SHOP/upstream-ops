@@ -62,6 +62,36 @@ func TestParseOpenAIUsage_InputTokensDetailsCached(t *testing.T) {
 	}
 }
 
+func TestOpenAICacheReadSkipsStaleNestedZero(t *testing.T) {
+	usage := map[string]any{
+		"input_tokens_details":  map[string]any{"cached_tokens": 0},
+		"prompt_tokens_details": map[string]any{"cached_tokens": 5},
+		"cache_read_tokens":     12,
+	}
+	if got := openAICacheReadTokensFromUsage(usage); got != 5 {
+		t.Fatalf("cache read=%d, want later nested positive value=5", got)
+	}
+}
+
+func TestOpenAICacheCreationPriorityAndStaleZeroFallback(t *testing.T) {
+	usage := map[string]any{
+		"input_tokens_details":  map[string]any{"cache_creation_tokens": 5},
+		"prompt_tokens_details": map[string]any{"cache_write_tokens": 7},
+	}
+	if got := openAICacheCreationTokensFromUsage(usage); got != 7 {
+		t.Fatalf("cache creation=%d, want prompt cache_write_tokens=7", got)
+	}
+	usage["input_tokens_details"] = map[string]any{
+		"cache_write_tokens":    0,
+		"cache_creation_tokens": 5,
+	}
+	usage["prompt_tokens_details"] = map[string]any{}
+	usage["cache_creation_tokens"] = 11
+	if got := openAICacheCreationTokensFromUsage(usage); got != 11 {
+		t.Fatalf("cache creation=%d, want top-level stale-zero fallback=11", got)
+	}
+}
+
 func TestParseOpenAISSEUsage_LastUsageChunk(t *testing.T) {
 	sse := "" +
 		"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +

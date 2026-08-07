@@ -17,6 +17,7 @@ import (
 const (
 	defaultValidationPrefixBytes   = 8192
 	defaultValidationPrefixTimeout = 2 * time.Second
+	initialValidationScanBytes     = 64
 	maxValidationPrefixBytes       = 1 << 20
 	postCommitValidationBytes      = 64 << 10
 	// Responses may emit lifecycle-only SSE frames for a long time before the
@@ -395,6 +396,9 @@ type streamResponseValidator struct {
 	postStart               int
 	prefixDirty             bool
 	preCommitDirty          bool
+	preCommitBytesSeen      int
+	nextPreCommitScanBytes  int
+	scanEveryChunk          bool
 	prefixResult            validationResult
 	postAuditDone           bool
 	result                  validationResult
@@ -429,6 +433,9 @@ func (v *responseValidator) NewStreamValidator(protocolName, model string) *stre
 				continue
 			}
 			s.rules = append(s.rules, rule)
+			if responseRuleNeedsEveryChunkScan(rule.Pattern) {
+				s.scanEveryChunk = true
+			}
 			switch rule.Target {
 			case "assistant_text":
 				s.needsAssistant = true
@@ -470,6 +477,7 @@ func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
 		s.appendPost(chunk)
 		return s.currentResult()
 	}
+	s.preCommitBytesSeen += len(chunk)
 	observation := s.observeResponsesSSE(chunk)
 	if observation.overflow {
 		s.responsesPrefixOverflow = true
@@ -498,24 +506,27 @@ func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
 		s.prefixRaw = append(s.prefixRaw, chunk[:prefixLen]...)
 		s.prefixDirty = true
 		s.preCommitDirty = true
-		if result := s.matchPrefix(); result.IsRejected() {
-			s.result = result
-			return result
-		}
 	}
 	if prefixLen < len(chunk) {
 		s.appendPost(chunk[prefixLen:])
 	}
 	s.bytesSeen += observation.contentBytes
-	// Check every complete Responses content or terminal frame while all bytes
-	// are still held. Waiting for the release threshold can miss a retryable
-	// frame when an earlier lifecycle event consumed the raw prefix.
-	if len(observation.candidateRaw) > 0 {
+	if s.shouldScanPreCommit() {
 		if result := s.matchPreCommitBuffered(); result.IsRejected() {
 			s.result = result
 			return result
 		}
+	}
+	// Check every complete Responses content or terminal frame while all bytes
+	// are still held. First scan the isolated candidate, which is normally much
+	// smaller than the accumulated prefix. Only a possible match pays for the
+	// authoritative full-buffer scan needed to preserve global rule priority.
+	if len(observation.candidateRaw) > 0 {
 		if result := s.matchPreCommitCandidate(observation.candidateRaw); result.IsRejected() {
+			if fullResult := s.matchPreCommitBuffered(); fullResult.IsRejected() {
+				s.result = fullResult
+				return fullResult
+			}
 			s.result = result
 			return result
 		}
@@ -678,6 +689,7 @@ func (s *streamResponseValidator) matchPrefix() validationResult {
 	assistant, errorMessage := s.cachedPrefixCandidates()
 	s.prefixResult = s.validator.matchCompiledWithPrefilters(s.rules, s.prefilters, s.prefixRaw, assistant, errorMessage, false)
 	s.prefixDirty = false
+	s.markPreCommitScanned()
 	if len(s.postRaw) == 0 {
 		s.preCommitDirty = false
 	}
@@ -722,7 +734,43 @@ func (s *streamResponseValidator) matchPreCommitBuffered() validationResult {
 	s.prefixResult = s.validator.matchCompiledWithPrefilters(s.rules, s.prefilters, combined, assistant, errorMessage, false)
 	s.prefixDirty = false
 	s.preCommitDirty = false
+	s.markPreCommitScanned()
 	return s.prefixResult
+}
+
+// shouldScanPreCommit keeps stable no-match streams near-linear: the
+// complete accumulated prefix is scanned when it first arrives and then only
+// after crossing 64, 128, 256, ... bytes. Ready, Finalize, and the commit path
+// still call matchPreCommitBuffered directly, so no bytes can be released
+// without one final authoritative scan.
+func (s *streamResponseValidator) shouldScanPreCommit() bool {
+	if s == nil || !s.preCommitDirty {
+		return false
+	}
+	return s.scanEveryChunk || s.nextPreCommitScanBytes == 0 || s.preCommitBytesSeen >= s.nextPreCommitScanBytes
+}
+
+func (s *streamResponseValidator) markPreCommitScanned() {
+	if s == nil {
+		return
+	}
+	threshold := initialValidationScanBytes
+	for threshold <= s.preCommitBytesSeen && threshold < maxResponsesPreCommitBytes {
+		threshold <<= 1
+	}
+	if threshold <= s.preCommitBytesSeen {
+		threshold = s.preCommitBytesSeen + 1
+	}
+	s.nextPreCommitScanBytes = threshold
+}
+
+// Matches involving the end of the currently buffered text can be transient:
+// for example, blocked$ matches one write and stops matching after the next.
+// Keep exact per-write semantics for these uncommon rules while batching the
+// ordinary phrase-matching rules used for capacity and overload detection.
+func responseRuleNeedsEveryChunkScan(pattern string) bool {
+	return strings.Contains(pattern, "$") || strings.Contains(pattern, `\z`) ||
+		strings.Contains(pattern, `\b`) || strings.Contains(pattern, `\B`)
 }
 
 func (s *streamResponseValidator) matchPreCommitCandidate(raw []byte) validationResult {

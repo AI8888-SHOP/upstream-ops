@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bejix/upstream-ops/backend/storage"
 )
 
 const (
@@ -214,6 +216,19 @@ func mediaGenerationModel(value string) bool {
 		"video_generation", "kling", "wan2", "wan-", "cogvideo", "luma", "runway", "pika",
 	} {
 		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func mappedRouteContainsMediaModel(routes []storage.GatewayRoute, requested string, groupMapping ModelMap) bool {
+	if mediaGenerationModel(requested) {
+		return true
+	}
+	for _, route := range routes {
+		upstream, _ := ResolveModel(requested, ParseModelMapping(route.ModelMappingJSON), groupMapping)
+		if mediaGenerationModel(upstream) {
 			return true
 		}
 	}

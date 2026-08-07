@@ -14,11 +14,11 @@ import (
 const (
 	// Route affinity is deliberately short lived. It protects prompt-cache
 	// continuity without permanently pinning a key to one upstream.
-	routeAffinityTTL       = 45 * time.Minute
-	routeAffinityProbeHold = 15 * time.Minute
+	routeAffinityTTL             = 45 * time.Minute
+	routeAffinityProbeHold       = 15 * time.Minute
 	routeAffinityCleanupInterval = time.Minute
-	maxRouteAffinityEntries  = 4096
-	maxRouteAffinityPrefixes = 64
+	maxRouteAffinityEntries      = 4096
+	maxRouteAffinityPrefixes     = 64
 )
 
 type routeAffinityKey struct {
@@ -39,12 +39,12 @@ type routeAffinityEntry struct {
 // routeAffinityContext is request-local. The service map stores only hashed
 // identifiers and the last route; request bodies are never retained.
 type routeAffinityContext struct {
-	Keys             []routeAffinityKey
-	LookupKey        routeAffinityKey
-	PreferredRouteID uint
-	RecoveryRouteID  uint
-	Recovery         bool
-	PreservePreferred bool
+	Keys                  []routeAffinityKey
+	LookupKey             routeAffinityKey
+	PreferredRouteID      uint
+	RecoveryRouteID       uint
+	Recovery              bool
+	PreservePreferred     bool
 	RecoveryCooldownUntil time.Time
 }
 
@@ -98,6 +98,13 @@ func requestRouteAffinityFingerprints(c *gin.Context, body []byte, model string)
 			if value := strings.TrimSpace(c.GetHeader(header)); value != "" {
 				add("header:"+strings.ToLower(header), value)
 			}
+		}
+		// An explicit session/conversation identifier is the strongest affinity
+		// signal. Do not also decode and hash the full conversation body: clients
+		// that provide this header already expect it to define the session, and
+		// skipping the body scan keeps long-context requests off the hot path.
+		if len(fingerprints) > 0 {
+			return fingerprints
 		}
 	}
 

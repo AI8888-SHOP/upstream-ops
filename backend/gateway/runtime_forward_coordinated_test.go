@@ -41,6 +41,88 @@ func TestBuildVirtualCacheSettlementPreservesAnthropicFreshInput(t *testing.T) {
 	}
 }
 
+func TestBuildVirtualCacheSettlementDoesNotRequireLocalPricing(t *testing.T) {
+	const model = "provider-private-model"
+	rt := &Runtime{Service: &Service{}}
+	req := &coordinatedForwardRequest{
+		group:              &storage.GatewayGroup{HedgeVirtualCacheEnabled: true},
+		virtualCacheReason: storage.GatewayVirtualCacheReasonHedge,
+		requestedModel:     model,
+	}
+	winner := &coordinatedForwardAttempt{
+		UpstreamModel: model,
+		UsageMeta:     usageRecordMeta{UpstreamProtocol: string(protocol.KindAnthropic)},
+		Tokens:        UsageTokens{InputTokens: 100, OutputTokens: 1},
+		Plan: coordinatedRoutePlan{Candidate: ScoredRoute{
+			EffectiveRate: 1, BillingRate: 1,
+		}},
+	}
+	settlement := rt.buildVirtualCacheSettlement(req, winner)
+	if !settlement.VirtualCacheReadEnabled || !settlement.BilledCostSet || settlement.VirtualCacheReadTokens != 100 {
+		t.Fatalf("settlement=%+v, want a token settlement without local pricing", settlement)
+	}
+	if settlement.BilledCost != 0 || settlement.VirtualCacheReadCost != 0 {
+		t.Fatalf("unknown local pricing must keep monetary estimates at zero: %+v", settlement)
+	}
+}
+
+func TestVirtualCacheReasonDoesNotRequireLocalPricing(t *testing.T) {
+	rt := &Runtime{Service: &Service{}}
+	req := &coordinatedForwardRequest{
+		path: "/v1/chat/completions", requestedModel: "provider-private-model",
+		group: &storage.GatewayGroup{HedgeVirtualCacheEnabled: true},
+	}
+	winner := &coordinatedForwardAttempt{
+		Info:  hedgeAttemptInfo{Number: 1, Kind: attemptKindPrimary},
+		Route: storage.GatewayRoute{ID: 1},
+	}
+	winner.markUpstreamStarted()
+	hedge := &coordinatedForwardAttempt{
+		Info:  hedgeAttemptInfo{Number: 2, Kind: attemptKindHedge, Concurrent: true},
+		Route: storage.GatewayRoute{ID: 2},
+	}
+	hedge.markUpstreamStarted()
+	var states sync.Map
+	states.Store(1, winner)
+	states.Store(2, hedge)
+	if reason := rt.virtualCacheReasonForWinner(req, winner, &states); reason != storage.GatewayVirtualCacheReasonHedge {
+		t.Fatalf("reason=%q, want hedge even when local pricing is unavailable", reason)
+	}
+}
+
+func TestFinishCoordinatedNonStreamWritesVirtualCacheUsageDownstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req := &coordinatedForwardRequest{
+		c: context, kind: protocol.KindOpenAIChat, requestedModel: "provider-private-model",
+		group:              &storage.GatewayGroup{HedgeVirtualCacheEnabled: true},
+		virtualCacheReason: storage.GatewayVirtualCacheReasonHedge,
+	}
+	winner := &coordinatedForwardAttempt{
+		Info: hedgeAttemptInfo{Number: 1}, Status: http.StatusOK,
+		Headers:       http.Header{"Content-Length": []string{"999"}},
+		ClientBody:    []byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":100,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":20},"cache_creation_input_tokens":10}}`),
+		UpstreamModel: "provider-private-model",
+		UsageMeta:     usageRecordMeta{UpstreamProtocol: string(protocol.KindOpenAIChat)},
+		Tokens:        UsageTokens{InputTokens: 100, OutputTokens: 4, CacheReadTokens: 20, CacheCreationTokens: 10},
+		Plan: coordinatedRoutePlan{Candidate: ScoredRoute{
+			EffectiveRate: 1, BillingRate: 1,
+		}},
+	}
+
+	(&Runtime{Service: &Service{}}).finishCoordinatedNonStream(req, winner, 0)
+
+	tokens := NormalizeUsageBuckets(ParseOpenAIUsage(recorder.Body.Bytes()), protocol.KindOpenAIChat)
+	if tokens.InputTokens != 0 || tokens.CacheReadTokens != 90 || tokens.CacheCreationTokens != 10 {
+		t.Fatalf("downstream usage=%+v, want fresh=0 cache_read=90 cache_creation=10; body=%s", tokens, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("rewritten response retained Content-Length=%q", got)
+	}
+}
+
 func TestCoordinatedHedgeCreditRequiresActualUpstreamStart(t *testing.T) {
 	attempt := &coordinatedForwardAttempt{Info: hedgeAttemptInfo{
 		Number: 2, Kind: attemptKindHedge, Concurrent: true,
@@ -83,13 +165,13 @@ func TestVirtualCacheReasonForResponseRuleFailover(t *testing.T) {
 		group: &storage.GatewayGroup{ResponseValidationVirtualCacheEnabled: true},
 	}
 	rejected := &coordinatedForwardAttempt{
-		Info: hedgeAttemptInfo{Number: 1, Kind: attemptKindPrimary},
-		Route: storage.GatewayRoute{ID: 1},
+		Info:       hedgeAttemptInfo{Number: 1, Kind: attemptKindPrimary},
+		Route:      storage.GatewayRoute{ID: 1},
 		Validation: validationResult{Decision: validationRejected, RuleID: 7},
 	}
 	rejected.markUpstreamStarted()
 	winner := &coordinatedForwardAttempt{
-		Info: hedgeAttemptInfo{Number: 2, Kind: attemptKindFailover},
+		Info:  hedgeAttemptInfo{Number: 2, Kind: attemptKindFailover},
 		Route: storage.GatewayRoute{ID: 2}, UpstreamModel: model,
 	}
 	winner.markUpstreamStarted()
@@ -138,6 +220,63 @@ func TestVirtualCacheReasonForSequentialResponseRuleFailoverWithHedgeEnabled(t *
 	states.Store(2, winner)
 	if reason := rt.virtualCacheReasonForWinner(req, winner, &states); reason != storage.GatewayVirtualCacheReasonResponseRuleFailover {
 		t.Fatalf("reason=%q, want response-rule failover", reason)
+	}
+}
+
+func TestResponseRuleVirtualCacheRequiresItsOwnSwitch(t *testing.T) {
+	req := &coordinatedForwardRequest{
+		path: "/v1/chat/completions", requestedModel: "gpt-test",
+		group: &storage.GatewayGroup{HedgeVirtualCacheEnabled: true},
+	}
+	rejected := &coordinatedForwardAttempt{
+		Info:       hedgeAttemptInfo{Number: 1, Kind: attemptKindPrimary},
+		Route:      storage.GatewayRoute{ID: 1},
+		Validation: validationResult{Decision: validationRejected, RuleID: 8},
+	}
+	rejected.markUpstreamStarted()
+	winner := &coordinatedForwardAttempt{
+		Info:  hedgeAttemptInfo{Number: 2, Kind: attemptKindFailover},
+		Route: storage.GatewayRoute{ID: 2}, UpstreamModel: "gpt-test",
+	}
+	winner.markUpstreamStarted()
+	var states sync.Map
+	states.Store(1, rejected)
+	states.Store(2, winner)
+	if reason := (&Runtime{Service: &Service{}}).virtualCacheReasonForWinner(req, winner, &states); reason != "" {
+		t.Fatalf("hedge-only switch granted response-rule virtual read: %q", reason)
+	}
+}
+
+func TestVirtualCacheReasonForConcurrentResponseRuleFailover(t *testing.T) {
+	const model = "claude-3-7-sonnet-20250219"
+	rt := &Runtime{Service: &Service{Pricing: NewPricingCatalog(nil)}}
+	req := &coordinatedForwardRequest{
+		path: "/v1/chat/completions", requestedModel: model, hedgeActive: true,
+		group: &storage.GatewayGroup{ResponseValidationVirtualCacheEnabled: true},
+	}
+	rejected := &coordinatedForwardAttempt{
+		Info:       hedgeAttemptInfo{Number: 1, Kind: attemptKindPrimary},
+		Route:      storage.GatewayRoute{ID: 1},
+		Validation: validationResult{Decision: validationRejected, RuleID: 7},
+	}
+	rejected.markUpstreamStarted()
+	winner := &coordinatedForwardAttempt{
+		Info: hedgeAttemptInfo{
+			Number: 2, Kind: attemptKindHedge, Concurrent: true,
+		},
+		Route: storage.GatewayRoute{ID: 2}, UpstreamModel: model,
+	}
+	winner.markUpstreamStarted()
+	var states sync.Map
+	states.Store(1, rejected)
+	states.Store(2, winner)
+
+	if reason := rt.virtualCacheReasonForWinner(req, winner, &states); reason != storage.GatewayVirtualCacheReasonResponseRuleFailover {
+		t.Fatalf("response-only reason=%q, want response-rule failover", reason)
+	}
+	req.group.HedgeVirtualCacheEnabled = true
+	if reason := rt.virtualCacheReasonForWinner(req, winner, &states); reason != storage.GatewayVirtualCacheReasonHedge {
+		t.Fatalf("both-enabled reason=%q, want hedge precedence", reason)
 	}
 }
 

@@ -155,6 +155,31 @@ func TestStreamResponseValidatorDoesNotSkipTransientAnchoredMatch(t *testing.T) 
 	}
 }
 
+func TestStreamResponseValidatorBatchesStablePrefixScansAndForcesFinalize(t *testing.T) {
+	v := mustResponseValidator(t, 4096, time.Hour,
+		responseRuleSpec{ID: 34, Name: "stable", Enabled: true, Pattern: `blocked`, Target: "raw_body"},
+	)
+	stream := v.NewStreamValidator("openai_chat", "gpt-test")
+	if result := stream.Consume([]byte("safe")); !result.IsPending() {
+		t.Fatalf("first result=%+v, want pending", result)
+	}
+	if stream.nextPreCommitScanBytes != initialValidationScanBytes {
+		t.Fatalf("next scan=%d, want %d", stream.nextPreCommitScanBytes, initialValidationScanBytes)
+	}
+	for _, part := range []string{"b", "l", "o", "c", "k", "e", "d"} {
+		if result := stream.Consume([]byte(part)); !result.IsPending() {
+			t.Fatalf("batched result=%+v, want pending before a release boundary", result)
+		}
+	}
+	if !stream.preCommitDirty {
+		t.Fatal("small writes unexpectedly triggered another full-prefix scan")
+	}
+	result := stream.Finalize()
+	if !result.IsRejected() || result.RuleID != 34 || result.PostCommit {
+		t.Fatalf("final result=%+v, want forced pre-commit rejection", result)
+	}
+}
+
 func TestStreamResponseValidatorRejectsAcrossSSEFrames(t *testing.T) {
 	v := mustResponseValidator(t, 4096, time.Second, responseRuleSpec{
 		ID: 4, Name: "cross-frame", Enabled: true, Pattern: `forbidden`, Target: "assistant_text",

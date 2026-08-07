@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/gin-gonic/gin"
 )
 
@@ -44,6 +45,47 @@ func TestStreamPrefixGateDoesNotWriteBeforeWinnerSelection(t *testing.T) {
 	}
 	if got := recorder.Body.String(); got != "safe" {
 		t.Fatalf("body=%q", got)
+	}
+}
+
+func TestStreamPrefixGateRewritesWinnerUsageForDownstreamBilling(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	context, _ := gin.CreateTestContext(recorder)
+	gate := newStreamPrefixGateWriter(context.Writer, nil)
+	content := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+	written := make(chan error, 1)
+	go func() {
+		_, err := gate.Write(content)
+		written <- err
+	}()
+	select {
+	case result := <-gate.Ready():
+		if !result.IsAccepted() {
+			t.Fatalf("prefix result=%+v, want accepted", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("gate did not become ready")
+	}
+	gate.EnableVirtualCache(protocol.KindOpenAIChat)
+	if err := gate.Win(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	usage := []byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":4,\"prompt_tokens_details\":{\"cached_tokens\":20},\"cache_creation_input_tokens\":10}}\n\n")
+	if _, err := gate.Write(usage); err != nil {
+		t.Fatal(err)
+	}
+	gate.Finish()
+
+	tokens := NormalizeUsageBuckets(ParseOpenAISSEUsage(recorder.Body.Bytes()), protocol.KindOpenAIChat)
+	if tokens.InputTokens != 0 || tokens.CacheReadTokens != 90 || tokens.CacheCreationTokens != 10 {
+		t.Fatalf("downstream stream usage=%+v, want fresh=0 cache_read=90 cache_creation=10; body=%s", tokens, recorder.Body.String())
+	}
+	if !gate.VirtualCacheApplied() {
+		t.Fatal("winner gate did not record the virtual-cache rewrite")
 	}
 }
 
@@ -209,8 +251,8 @@ func TestCleanupCoordinatedStreamLosersWaitsForResult(t *testing.T) {
 	hedgeCleanupTimeout = time.Second
 	t.Cleanup(func() { hedgeCleanupTimeout = originalCleanup })
 	loser := &coordinatedForwardAttempt{
-		Info: hedgeAttemptInfo{Number: 2},
-		StartedAt: time.Now(),
+		Info:       hedgeAttemptInfo{Number: 2},
+		StartedAt:  time.Now(),
 		streamDone: make(chan streamAttemptResult, 1),
 	}
 	var states sync.Map

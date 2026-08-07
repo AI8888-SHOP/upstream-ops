@@ -147,6 +147,36 @@ func TestChatToResponsesStream_Incremental(t *testing.T) {
 	}
 }
 
+func TestStreamUsageConversionsPreserveCacheAliases(t *testing.T) {
+	chat := NewChatToResponsesStream("m")
+	chatFrames := chat.FeedData(`{"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"input_tokens":100,"output_tokens":4,"input_tokens_details":{"cached_tokens":0},"cache_read_input_tokens":20,"cache_write_tokens":10}}`)
+	chatFrames = append(chatFrames, chat.Close()...)
+	chatBody := string(JoinSSEFrames(chatFrames))
+	for _, want := range []string{`"input_tokens":100`, `"cached_tokens":20`, `"cache_write_tokens":10`} {
+		if !strings.Contains(chatBody, want) {
+			t.Fatalf("chat -> responses lost %s: %s", want, chatBody)
+		}
+	}
+
+	responses := NewResponsesToAnthropicStream("m")
+	frames := responses.Feed("response.completed", `{"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":100,"output_tokens":4,"input_tokens_details":{"cached_tokens":20},"cache_write_tokens":10}}}`)
+	responsesBody := string(JoinSSEFrames(frames))
+	for _, want := range []string{`"input_tokens":70`, `"cache_read_input_tokens":20`, `"cache_creation_input_tokens":10`} {
+		if !strings.Contains(responsesBody, want) {
+			t.Fatalf("responses -> anthropic lost %s: %s", want, responsesBody)
+		}
+	}
+
+	anthropic := NewAnthropicToResponsesStream("m")
+	anthropic.Feed("message_start", `{"type":"message_start","message":{"id":"m1","usage":{"input_tokens":70,"cache_read_input_tokens":20,"cache_creation_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":6}}}}`)
+	anthropicBody := string(JoinSSEFrames(anthropic.Feed("message_stop", `{"type":"message_stop"}`)))
+	for _, want := range []string{`"input_tokens":100`, `"cached_tokens":20`, `"ephemeral_5m_input_tokens":4`, `"ephemeral_1h_input_tokens":6`} {
+		if !strings.Contains(anthropicBody, want) {
+			t.Fatalf("anthropic -> responses lost %s: %s", want, anthropicBody)
+		}
+	}
+}
+
 func TestSupportsIncrementalStream(t *testing.T) {
 	if !SupportsIncrementalStream(KindOpenAIChat, KindOpenAIChat, false) {
 		t.Fatal("passthrough should be incremental")

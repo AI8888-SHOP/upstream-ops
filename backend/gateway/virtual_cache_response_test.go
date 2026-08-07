@@ -21,32 +21,32 @@ func TestRewriteVirtualCacheResponseProtocols(t *testing.T) {
 	}{
 		{
 			name: "chat", kind: protocol.KindOpenAIChat,
-			body: `{"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":20},"cache_creation_input_tokens":10}}`,
+			body:  `{"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":20},"cache_creation_input_tokens":10}}`,
 			parse: ParseOpenAIUsage, wantRead: 90, inputKey: "prompt_tokens", wantTotal: 100,
 		},
 		{
 			name: "responses", kind: protocol.KindOpenAIResponses,
-			body: `{"usage":{"input_tokens":80,"output_tokens":4,"total_tokens":84,"input_tokens_details":{"cached_tokens":15},"cache_creation_input_tokens":5}}`,
+			body:  `{"usage":{"input_tokens":80,"output_tokens":4,"total_tokens":84,"input_tokens_details":{"cached_tokens":15},"cache_creation_input_tokens":5}}`,
 			parse: ParseOpenAIUsage, wantRead: 75, inputKey: "input_tokens", wantTotal: 80,
 		},
 		{
 			name: "anthropic", kind: protocol.KindAnthropic,
-			body: `{"usage":{"input_tokens":70,"output_tokens":3,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}`,
+			body:  `{"usage":{"input_tokens":70,"output_tokens":3,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}`,
 			parse: ParseAnthropicUsage, wantRead: 80,
 		},
 		{
 			name: "chat input_tokens alias", kind: protocol.KindOpenAIChat,
-			body: `{"usage":{"input_tokens":60,"output_tokens":2,"input_tokens_details":{"cached_tokens":10}}}`,
+			body:  `{"usage":{"input_tokens":60,"output_tokens":2,"input_tokens_details":{"cached_tokens":10}}}`,
 			parse: ParseOpenAIUsage, wantRead: 60, inputKey: "input_tokens", wantTotal: 60,
 		},
 		{
 			name: "responses prompt_tokens alias", kind: protocol.KindOpenAIResponses,
-			body: `{"usage":{"prompt_tokens":55,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":5}}}`,
+			body:  `{"usage":{"prompt_tokens":55,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":5}}}`,
 			parse: ParseOpenAIUsage, wantRead: 55, inputKey: "prompt_tokens", wantTotal: 55,
 		},
 		{
 			name: "stale input details cannot mask chat rewrite", kind: protocol.KindOpenAIChat,
-			body: `{"usage":{"prompt_tokens":40,"completion_tokens":1,"input_tokens_details":{"cached_tokens":0},"prompt_tokens_details":{"cached_tokens":5}}}`,
+			body:  `{"usage":{"prompt_tokens":40,"completion_tokens":1,"input_tokens_details":{"cached_tokens":0},"prompt_tokens_details":{"cached_tokens":5}}}`,
 			parse: ParseOpenAIUsage, wantRead: 40, inputKey: "prompt_tokens", wantTotal: 40,
 		},
 	}
@@ -96,5 +96,39 @@ func TestRewriteVirtualCacheResponseLeavesZeroFreshInputUntouched(t *testing.T) 
 	rewritten, changed := rewriteVirtualCacheResponse(body, protocol.KindOpenAIChat)
 	if changed || !bytes.Equal(rewritten, body) {
 		t.Fatalf("zero-fresh response changed: %s", rewritten)
+	}
+}
+
+func TestRewriteVirtualCacheResponseKeepsCompatibilityAliasesInSync(t *testing.T) {
+	body := []byte(`{"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":20,"cache_write_tokens":0},"cache_read_tokens":20,"cache_hit_tokens":20,"cache_creation_tokens":10}}`)
+	rewritten, changed := rewriteVirtualCacheResponse(body, protocol.KindOpenAIChat)
+	if !changed {
+		t.Fatal("response was not rewritten")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rewritten, &payload); err != nil {
+		t.Fatal(err)
+	}
+	usage, _ := payload["usage"].(map[string]any)
+	for _, key := range []string{"cache_read_input_tokens", "cache_read_tokens", "cache_hit_tokens"} {
+		if got := mapInt(usage, key); got != 90 {
+			t.Fatalf("%s=%d, want 90: %s", key, got, rewritten)
+		}
+	}
+	details, _ := usage["prompt_tokens_details"].(map[string]any)
+	if got := mapInt(details, "cache_write_tokens"); got != 10 {
+		t.Fatalf("nested cache creation=%d, want 10: %s", got, rewritten)
+	}
+}
+
+func TestVirtualCacheSSETransformerNoUsageFastPath(t *testing.T) {
+	transformer := newVirtualCacheSSETransformer(protocol.KindOpenAIChat)
+	chunk := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+	out := transformer.Transform(chunk, false)
+	if len(out) == 0 || &out[0] != &chunk[0] {
+		t.Fatal("usage-free complete SSE frame was copied")
+	}
+	if transformer.Applied() {
+		t.Fatal("usage-free frame unexpectedly marked as rewritten")
 	}
 }

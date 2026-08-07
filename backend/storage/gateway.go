@@ -19,10 +19,15 @@ import (
 // ---------- GatewayProviders（直连渠道） ----------
 
 // GatewayProviders 直连上游仓储。
-type GatewayProviders struct{ db *gorm.DB }
+type GatewayProviders struct {
+	db         *gorm.DB
+	readCaches *storageReadCaches
+}
 
 // NewGatewayProviders 构造直连渠道仓储。
-func NewGatewayProviders(db *gorm.DB) *GatewayProviders { return &GatewayProviders{db: db} }
+func NewGatewayProviders(db *gorm.DB) *GatewayProviders {
+	return &GatewayProviders{db: db, readCaches: readCachesForDB(db)}
+}
 
 // GatewayProviderQuery 分页列表查询。
 type GatewayProviderQuery struct {
@@ -99,8 +104,12 @@ func (r *GatewayProviders) ListOptions(q string) ([]GatewayProvider, error) {
 
 // FindByID 按主键查询。
 func (r *GatewayProviders) FindByID(id uint) (*GatewayProvider, error) {
-	var item GatewayProvider
-	if err := r.db.First(&item, id).Error; err != nil {
+	item, err := r.readCaches.gatewayProviders.load(id, func() (GatewayProvider, error) {
+		var loaded GatewayProvider
+		err := r.db.First(&loaded, id).Error
+		return loaded, err
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
 	return &item, nil
@@ -116,21 +125,42 @@ func (r *GatewayProviders) FindByName(name string) (*GatewayProvider, error) {
 }
 
 // Create 插入记录。
-func (r *GatewayProviders) Create(item *GatewayProvider) error { return r.db.Create(item).Error }
+func (r *GatewayProviders) Create(item *GatewayProvider) error {
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.readCaches.gatewayProviders.invalidate(item.ID)
+	}
+	return err
+}
 
 // Update 全量保存。
-func (r *GatewayProviders) Update(item *GatewayProvider) error { return r.db.Save(item).Error }
+func (r *GatewayProviders) Update(item *GatewayProvider) error {
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.readCaches.gatewayProviders.invalidate(item.ID)
+	}
+	return err
+}
 
 // Delete 按主键删除。
 func (r *GatewayProviders) Delete(id uint) error {
-	return r.db.Delete(&GatewayProvider{}, id).Error
+	err := r.db.Delete(&GatewayProvider{}, id).Error
+	if err == nil {
+		r.readCaches.gatewayProviders.invalidate(id)
+	}
+	return err
 }
 
 // GatewayGroups 网关组仓储。
-type GatewayGroups struct{ db *gorm.DB }
+type GatewayGroups struct {
+	db         *gorm.DB
+	readCaches *storageReadCaches
+}
 
 // NewGatewayGroups 构造网关分组仓储。
-func NewGatewayGroups(db *gorm.DB) *GatewayGroups { return &GatewayGroups{db: db} }
+func NewGatewayGroups(db *gorm.DB) *GatewayGroups {
+	return &GatewayGroups{db: db, readCaches: readCachesForDB(db)}
+}
 
 // List 分页列表。
 func (r *GatewayGroups) List() ([]GatewayGroup, error) {
@@ -159,7 +189,7 @@ func (r *GatewayGroups) Reorder(ids []uint) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		seen := make(map[uint]struct{}, len(ids))
 		for i, id := range ids {
 			if id == 0 {
@@ -176,12 +206,20 @@ func (r *GatewayGroups) Reorder(ids []uint) error {
 		}
 		return nil
 	})
+	if err == nil {
+		r.readCaches.gatewayGroups.clear()
+	}
+	return err
 }
 
 // FindByID 按主键查询。
 func (r *GatewayGroups) FindByID(id uint) (*GatewayGroup, error) {
-	var item GatewayGroup
-	if err := r.db.First(&item, id).Error; err != nil {
+	item, err := r.readCaches.gatewayGroups.load(id, func() (GatewayGroup, error) {
+		var loaded GatewayGroup
+		err := r.db.First(&loaded, id).Error
+		return loaded, err
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
 	return &item, nil
@@ -197,14 +235,26 @@ func (r *GatewayGroups) FindByName(name string) (*GatewayGroup, error) {
 }
 
 // Create 插入记录。
-func (r *GatewayGroups) Create(item *GatewayGroup) error { return r.db.Create(item).Error }
+func (r *GatewayGroups) Create(item *GatewayGroup) error {
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.readCaches.gatewayGroups.invalidate(item.ID)
+	}
+	return err
+}
 
 // Update 全量保存。
-func (r *GatewayGroups) Update(item *GatewayGroup) error { return r.db.Save(item).Error }
+func (r *GatewayGroups) Update(item *GatewayGroup) error {
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.readCaches.gatewayGroups.invalidate(item.ID)
+	}
+	return err
+}
 
 // Delete 按主键删除。
 func (r *GatewayGroups) Delete(id uint) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayResponseRule{}).Error; err != nil {
 			return err
 		}
@@ -225,6 +275,14 @@ func (r *GatewayGroups) Delete(id uint) error {
 		}
 		return tx.Delete(&GatewayGroup{}, id).Error
 	})
+	if err == nil {
+		r.readCaches.gatewayGroups.invalidate(id)
+		r.readCaches.gatewayRoutes.invalidate(id)
+		// Group deletion is an administrative operation. Clearing this small
+		// cache also covers in-flight lookups for keys removed by the transaction.
+		r.readCaches.clearGatewayKeys()
+	}
+	return err
 }
 
 // GatewayGroupCloneKey contains the newly generated credential material for a
@@ -395,6 +453,12 @@ func (r *GatewayGroups) Clone(id uint, requestedName string, keyTemplates []Gate
 	})
 	if err != nil {
 		return nil, err
+	}
+	r.readCaches.gatewayGroups.invalidate(result.Group.ID)
+	r.readCaches.gatewayRoutes.invalidate(result.Group.ID)
+	for _, key := range result.Keys {
+		r.readCaches.rememberGatewayKey(key)
+		r.readCaches.gatewayKeys.invalidate(key.KeyHash)
 	}
 	return result, nil
 }
@@ -887,7 +951,8 @@ func normalizeResponseRuleListJSON(raw string, lower bool, maxItemBytes int) (st
 const gatewayKeyLastUsedWriteInterval = 30 * time.Second
 
 type GatewayKeys struct {
-	db *gorm.DB
+	db         *gorm.DB
+	readCaches *storageReadCaches
 
 	// LastUsedAt is informational metadata. Keeping a short in-process write
 	// throttle prevents every streamed request from becoming a SQLite UPDATE;
@@ -904,7 +969,19 @@ type gatewayKeyLastUsedState struct {
 
 // NewGatewayKeys 构造网关密钥仓储。
 func NewGatewayKeys(db *gorm.DB) *GatewayKeys {
-	return &GatewayKeys{db: db, lastUsed: make(map[uint]*gatewayKeyLastUsedState)}
+	return &GatewayKeys{
+		db:         db,
+		readCaches: readCachesForDB(db),
+		lastUsed:   make(map[uint]*gatewayKeyLastUsedState),
+	}
+}
+
+func (r *GatewayKeys) invalidateReadCache(id uint, currentHash ...string) {
+	hash := ""
+	if len(currentHash) > 0 {
+		hash = currentHash[0]
+	}
+	r.readCaches.invalidateGatewayKey(id, hash)
 }
 
 // List 分页列表。
@@ -936,10 +1013,17 @@ func (r *GatewayKeys) FindByID(id uint) (*GatewayKey, error) {
 
 // FindByHash 按密钥哈希查询。
 func (r *GatewayKeys) FindByHash(hash string) (*GatewayKey, error) {
-	var item GatewayKey
-	if err := r.db.Where("key_hash = ?", hash).First(&item).Error; err != nil {
+	item, err := r.readCaches.gatewayKeys.load(hash, func() (GatewayKey, error) {
+		var loaded GatewayKey
+		err := r.db.Where("key_hash = ?", hash).First(&loaded).Error
+		return loaded, err
+	}, func(item GatewayKey) bool {
+		return item.Quota <= 0
+	})
+	if err != nil {
 		return nil, err
 	}
+	r.readCaches.rememberGatewayKey(item)
 	return &item, nil
 }
 
@@ -953,10 +1037,22 @@ func (r *GatewayKeys) FindByName(name string) (*GatewayKey, error) {
 }
 
 // Create 插入记录。
-func (r *GatewayKeys) Create(item *GatewayKey) error { return r.db.Create(item).Error }
+func (r *GatewayKeys) Create(item *GatewayKey) error {
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.invalidateReadCache(item.ID, item.KeyHash)
+	}
+	return err
+}
 
 // Update 全量保存。
-func (r *GatewayKeys) Update(item *GatewayKey) error { return r.db.Save(item).Error }
+func (r *GatewayKeys) Update(item *GatewayKey) error {
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.invalidateReadCache(item.ID, item.KeyHash)
+	}
+	return err
+}
 
 // Delete 按主键删除。
 func (r *GatewayKeys) Delete(id uint) error {
@@ -965,6 +1061,7 @@ func (r *GatewayKeys) Delete(id uint) error {
 		r.lastUsedMu.Lock()
 		delete(r.lastUsed, id)
 		r.lastUsedMu.Unlock()
+		r.invalidateReadCache(id)
 	}
 	return err
 }
@@ -994,6 +1091,7 @@ func (r *GatewayKeys) TouchLastUsed(id uint, at time.Time) error {
 	}).Error
 	if err == nil {
 		state.at = at
+		r.invalidateReadCache(id)
 	}
 	return err
 }
@@ -1003,25 +1101,41 @@ func (r *GatewayKeys) AddQuotaUsed(id uint, amount float64) error {
 	if amount == 0 {
 		return nil
 	}
-	return r.db.Model(&GatewayKey{}).Where("id = ?", id).
+	err := r.db.Model(&GatewayKey{}).Where("id = ?", id).
 		UpdateColumn("quota_used", gorm.Expr("quota_used + ?", amount)).Error
+	if err == nil {
+		r.invalidateReadCache(id)
+	}
+	return err
 }
 
 // GatewayRoutes 网关路由仓储。
-type GatewayRoutes struct{ db *gorm.DB }
+type GatewayRoutes struct {
+	db         *gorm.DB
+	readCaches *storageReadCaches
+}
 
 // NewGatewayRoutes 构造网关路由仓储。
-func NewGatewayRoutes(db *gorm.DB) *GatewayRoutes { return &GatewayRoutes{db: db} }
+func NewGatewayRoutes(db *gorm.DB) *GatewayRoutes {
+	return &GatewayRoutes{db: db, readCaches: readCachesForDB(db)}
+}
 
 // ListByGroupID 列出某分组下资源。
 func (r *GatewayRoutes) ListByGroupID(groupID uint) ([]GatewayRoute, error) {
-	var list []GatewayRoute
-	if err := r.db.Where("gateway_group_id = ?", groupID).Order("position ASC, id ASC").Find(&list).Error; err != nil {
+	list, err := r.readCaches.gatewayRoutes.load(groupID, func() ([]GatewayRoute, error) {
+		var loaded []GatewayRoute
+		if err := r.db.Where("gateway_group_id = ?", groupID).Order("position ASC, id ASC").Find(&loaded).Error; err != nil {
+			return nil, err
+		}
+		if err := r.loadModelCooldowns(loaded); err != nil {
+			return nil, err
+		}
+		return loaded, nil
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
-	if err := r.loadModelCooldowns(list); err != nil {
-		return nil, err
-	}
+	r.readCaches.rememberGatewayRoutes(groupID, list)
 	// 不过期即清 reason：调度层用 until 判断是否仍暂停；reason 作为「上次错误」保留供管理端查看
 	return list, nil
 }
@@ -1037,6 +1151,7 @@ func (r *GatewayRoutes) FindByID(id uint) (*GatewayRoute, error) {
 		return nil, err
 	}
 	item = list[0]
+	r.readCaches.rememberGatewayRoutes(item.GatewayGroupID, list)
 	return &item, nil
 }
 
@@ -1084,7 +1199,7 @@ func (r *GatewayRoutes) loadModelCooldowns(routes []GatewayRoute) error {
 //
 // position 有 (group_id, position) 唯一索引：先写临时 position 再写最终值，避免换序冲突。
 func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var existing []GatewayRoute
 		if err := tx.Where("gateway_group_id = ?", groupID).Find(&existing).Error; err != nil {
 			return err
@@ -1176,6 +1291,11 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 		}
 		return nil
 	})
+	if err == nil {
+		r.readCaches.rememberGatewayRoutes(groupID, list)
+		r.readCaches.gatewayRoutes.invalidate(groupID)
+	}
+	return err
 }
 
 func normalizeGatewayRoute(item *GatewayRoute) {
@@ -1238,35 +1358,55 @@ func normalizeGatewayRoute(item *GatewayRoute) {
 }
 
 // Update 全量保存。
-func (r *GatewayRoutes) Update(item *GatewayRoute) error { return r.db.Save(item).Error }
+func (r *GatewayRoutes) Update(item *GatewayRoute) error {
+	err := r.db.Save(item).Error
+	if err == nil {
+		r.readCaches.rememberGatewayRoutes(item.GatewayGroupID, []GatewayRoute{*item})
+		r.readCaches.invalidateGatewayRoute(item.ID)
+		r.readCaches.gatewayRoutes.invalidate(item.GatewayGroupID)
+	}
+	return err
+}
 
 // SetRateLimitAutoDisabled updates only the derived multiplier guard state.
 // Keeping this as a targeted update avoids overwriting concurrent cooldown or
 // upstream-key changes with a stale route snapshot.
 func (r *GatewayRoutes) SetRateLimitAutoDisabled(id uint, disabled bool, reason string) error {
-	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
 		"rate_limit_auto_disabled":        disabled,
 		"rate_limit_auto_disabled_reason": strings.TrimSpace(reason),
-	}).Error
+	})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // SetProviderBillingSnapshot updates the persisted provider billing fields
 // without overwriting concurrent cooldown, key, or route-policy fields.
 func (r *GatewayRoutes) SetProviderBillingSnapshot(id uint, rate, convertValue float64) error {
-	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).
 		Updates(map[string]any{
 			"billing_rate_multiplier": rate,
 			"rate_convert_value":      convertValue,
-		}).Error
+		})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // UpdateSourceKey 更新路由绑定的上游密钥密文。
 func (r *GatewayRoutes) UpdateSourceKey(id uint, keyID int64, keyName, keyCipher string) error {
-	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
 		"source_api_key_id":     keyID,
 		"source_api_key_name":   keyName,
 		"source_api_key_cipher": keyCipher,
-	}).Error
+	})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // UpdateSourceGroupSnapshot 补全源分组显示名（保留 source_group_id）。
@@ -1277,7 +1417,11 @@ func (r *GatewayRoutes) UpdateSourceGroupSnapshot(id uint, groupID *int64, group
 	if groupID != nil {
 		updates["source_group_id"] = *groupID
 	}
-	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(updates).Error
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(updates)
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // SetTempUnschedulable 写入冷却截止时间、错误详情，以及触发失败的请求时间/ request_id。
@@ -1285,13 +1429,17 @@ func (r *GatewayRoutes) SetTempUnschedulable(id uint, until time.Time, reason st
 	if failedAt.IsZero() {
 		failedAt = time.Now()
 	}
-	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
+	result := r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
 		"temp_unschedulable_until":      until,
 		"temp_unschedulable_reason":     reason,
 		"temp_unschedulable_at":         failedAt,
 		"temp_unschedulable_request_id": strings.TrimSpace(requestID),
 		"recover_success_streak":        0,
-	}).Error
+	})
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // SetModelTempUnschedulable writes automatic cooldown state for one model on a
@@ -1305,7 +1453,7 @@ func (r *GatewayRoutes) SetModelTempUnschedulable(id uint, model string, until t
 		failedAt = time.Now()
 	}
 	requestID = strings.TrimSpace(requestID)
-	return r.db.Clauses(clause.OnConflict{
+	err := r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "route_id"}, {Name: "model"}},
 		DoUpdates: clause.Assignments(map[string]any{
 			"temp_unschedulable_until":      until,
@@ -1320,6 +1468,10 @@ func (r *GatewayRoutes) SetModelTempUnschedulable(id uint, model string, until t
 		TempUnschedulableReason: reason, TempUnschedulableAt: &failedAt,
 		TempUnschedulableRequestID: requestID,
 	}).Error
+	if err == nil {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return err
 }
 
 // ClearModelTempUnschedulable clears one model's automatic cooldown state.
@@ -1328,14 +1480,18 @@ func (r *GatewayRoutes) ClearModelTempUnschedulable(id uint, model string) error
 	if id == 0 || model == "" {
 		return nil
 	}
-	return r.db.Exec(
+	result := r.db.Exec(
 		`UPDATE gateway_route_model_cooldowns
 		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
 		     temp_unschedulable_at = NULL, temp_unschedulable_request_id = '',
 		     recover_success_streak = 0, updated_at = ?
 		 WHERE route_id = ? AND model = ?`,
 		time.Now(), id, model,
-	).Error
+	)
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // ClearModelTempUnschedulableUntil ends one model's automatic pause while
@@ -1347,12 +1503,16 @@ func (r *GatewayRoutes) ClearModelTempUnschedulableUntil(id uint, model string) 
 	if id == 0 || model == "" {
 		return nil
 	}
-	return r.db.Exec(
+	result := r.db.Exec(
 		`UPDATE gateway_route_model_cooldowns
 		 SET temp_unschedulable_until = NULL, updated_at = ?
 		 WHERE route_id = ? AND model = ?`,
 		time.Now(), id, model,
-	).Error
+	)
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
+	return result.Error
 }
 
 // ClearModelTempUnschedulableUntilIfMatch ends one model's automatic pause
@@ -1383,18 +1543,37 @@ func (r *GatewayRoutes) ClearModelTempUnschedulableUntilIfMatch(
 	query += ` AND temp_unschedulable_request_id = ?`
 	args = append(args, requestID)
 	result := r.db.Exec(query, args...)
+	if result.Error == nil && result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(id)
+	}
 	return result.RowsAffected > 0, result.Error
 }
 
 // NoteSuccessForModelPauseError mirrors route-level recovery bookkeeping for
-// one model and leaves every other model cooldown untouched.
-func (r *GatewayRoutes) NoteSuccessForModelPauseError(id uint, model string) error {
+// one model and leaves every other model cooldown untouched. The observed
+// failure generation is required so an older successful request cannot clear
+// a newer cooldown written concurrently for the same route and model.
+func (r *GatewayRoutes) NoteSuccessForModelPauseError(
+	id uint,
+	model string,
+	failedAt *time.Time,
+	requestID string,
+) error {
 	model = NormalizeGatewayModel(model)
 	if id == 0 || model == "" {
 		return nil
 	}
+	requestID = strings.TrimSpace(requestID)
+	generationSQL := ` AND temp_unschedulable_request_id = ?`
+	generationArgs := []any{requestID}
+	if failedAt == nil || failedAt.IsZero() {
+		generationSQL += ` AND temp_unschedulable_at IS NULL`
+	} else {
+		generationSQL += ` AND temp_unschedulable_at = ?`
+		generationArgs = append(generationArgs, *failedAt)
+	}
 	now := time.Now()
-	if err := r.db.Exec(
+	updateSQL :=
 		`UPDATE gateway_route_model_cooldowns
 		 SET recover_success_streak = recover_success_streak + 1,
 		     temp_unschedulable_until = NULL, updated_at = ?
@@ -1404,19 +1583,28 @@ func (r *GatewayRoutes) NoteSuccessForModelPauseError(id uint, model string) err
 		     OR temp_unschedulable_until IS NOT NULL
 		     OR (temp_unschedulable_request_id IS NOT NULL AND temp_unschedulable_request_id != '')
 		     OR temp_unschedulable_at IS NOT NULL
-		   )`,
-		now, id, model,
-	).Error; err != nil {
-		return err
+		   )` + generationSQL
+	updateArgs := append([]any{now, id, model}, generationArgs...)
+	result := r.db.Exec(updateSQL, updateArgs...)
+	if result.Error != nil {
+		return result.Error
 	}
-	return r.db.Exec(
+	// Healthy routes do not have a cooldown row to recover. Avoid issuing the
+	// second UPDATE in that overwhelmingly common case; this method is called
+	// after every successful gateway request.
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	clearSQL :=
 		`UPDATE gateway_route_model_cooldowns
 		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
 		     temp_unschedulable_at = NULL, temp_unschedulable_request_id = '',
 		     recover_success_streak = 0, updated_at = ?
-		 WHERE route_id = ? AND model = ? AND recover_success_streak >= ?`,
-		now, id, model, RouteRecoverSuccessClearStreak,
-	).Error
+		 WHERE route_id = ? AND model = ? AND recover_success_streak >= ?` + generationSQL
+	clearArgs := append([]any{now, id, model, RouteRecoverSuccessClearStreak}, generationArgs...)
+	clearResult := r.db.Exec(clearSQL, clearArgs...)
+	r.readCaches.invalidateGatewayRoute(id)
+	return clearResult.Error
 }
 
 // ClearTempUnschedulable 手动清除暂停时间与错误信息。
@@ -1428,7 +1616,9 @@ func (r *GatewayRoutes) ClearTempUnschedulable(id uint) error {
 	).Error; err != nil {
 		return err
 	}
-	return r.db.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{}).Error
+	result := r.db.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{})
+	r.readCaches.invalidateGatewayRoute(id)
+	return result.Error
 }
 
 // ClearTempUnschedulableUntil 仅结束临时暂停（恢复调度），保留 reason / request_id / at 供排查。
@@ -1439,10 +1629,12 @@ func (r *GatewayRoutes) ClearTempUnschedulableUntil(id uint) error {
 	).Error; err != nil {
 		return err
 	}
-	return r.db.Exec(
+	result := r.db.Exec(
 		`UPDATE gateway_route_model_cooldowns SET temp_unschedulable_until = NULL, updated_at = ? WHERE route_id = ?`,
 		time.Now(), id,
-	).Error
+	)
+	r.readCaches.invalidateGatewayRoute(id)
+	return result.Error
 }
 
 // NoteSuccessForPauseError 路由请求成功时调用：
@@ -1455,7 +1647,7 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 	}
 	now := time.Now()
 	// 仅处理仍有暂停/错误残留的路由，避免无意义写放大
-	if err := r.db.Exec(
+	result := r.db.Exec(
 		`UPDATE gateway_routes
 		 SET recover_success_streak = recover_success_streak + 1,
 		     temp_unschedulable_until = NULL,
@@ -1468,10 +1660,14 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 		     OR temp_unschedulable_at IS NOT NULL
 		   )`,
 		now, id,
-	).Error; err != nil {
-		return err
+	)
+	if result.Error != nil {
+		return result.Error
 	}
-	return r.db.Exec(
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	clearResult := r.db.Exec(
 		`UPDATE gateway_routes
 		 SET temp_unschedulable_until = NULL,
 		     temp_unschedulable_reason = '',
@@ -1481,7 +1677,9 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 		     updated_at = ?
 		 WHERE id = ? AND recover_success_streak >= ?`,
 		now, id, RouteRecoverSuccessClearStreak,
-	).Error
+	)
+	r.readCaches.invalidateGatewayRoute(id)
+	return clearResult.Error
 }
 
 // GatewayUsageLogs 使用记录仓储。
@@ -1526,7 +1724,7 @@ const (
 	// Allow a short stale window under sustained write load so every request
 	// attempt does not force the expensive aggregate query back onto SQLite.
 	gatewayStatsCacheTTL        = 10 * time.Second
-	gatewayStatsRefreshInterval = 1 * time.Second
+	gatewayStatsRefreshInterval = 5 * time.Second
 	gatewayStatsCacheMaxEntries = 256
 )
 
@@ -1675,8 +1873,8 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 					return fmt.Errorf("virtual cache hedge settlement requires a recorded hedge attempt")
 				}
 			case GatewayVirtualCacheReasonResponseRuleFailover:
-				if usage.AttemptKind != GatewayAttemptKindFailover {
-					return fmt.Errorf("virtual cache response-rule settlement requires a failover winner")
+				if usage.AttemptKind != GatewayAttemptKindFailover && usage.AttemptKind != GatewayAttemptKindHedge {
+					return fmt.Errorf("virtual cache response-rule settlement requires a failover or hedge winner")
 				}
 				hasCompanion, err := gatewayUsageHasResponseRuleCompanion(tx, input.RequestID, input.GatewayKeyID, usage)
 				if err != nil {

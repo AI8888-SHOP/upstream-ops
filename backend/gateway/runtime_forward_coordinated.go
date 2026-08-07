@@ -80,14 +80,14 @@ type coordinatedForwardAttempt struct {
 	Validation   validationResult
 	Recovery     bool
 
-	Gate          *streamPrefixGateWriter
-	Cancel        context.CancelFunc
-	runnerDone    chan struct{}
-	streamDone    chan streamAttemptResult
-	streamMu      sync.Mutex
-	streamResult  streamAttemptResult
-	streamReady   bool
-	gateCommitErr error
+	Gate            *streamPrefixGateWriter
+	Cancel          context.CancelFunc
+	runnerDone      chan struct{}
+	streamDone      chan streamAttemptResult
+	streamMu        sync.Mutex
+	streamResult    streamAttemptResult
+	streamReady     bool
+	gateCommitErr   error
 	upstreamStarted atomic.Bool
 }
 
@@ -277,7 +277,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	hooks := hedgeHooks[*coordinatedForwardAttempt]{
 		OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
 			if result.Value != nil {
-			req.virtualCacheReason = rt.virtualCacheReasonForWinner(&req, result.Value, &states)
+				req.virtualCacheReason = rt.virtualCacheReasonForWinner(&req, result.Value, &states)
 				gate, _, _, _ := result.Value.streamControlSnapshot()
 				if gate != nil {
 					if req.virtualCacheReason != "" {
@@ -935,7 +935,7 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		if attempt.Recovery {
 			if success {
 				if !isWinner {
-					_ = rt.Routes.NoteSuccessForModelPauseError(attempt.Route.ID, attempt.UpstreamModel)
+					rt.noteRouteModelSuccess(&attempt.Route, attempt.UpstreamModel)
 				}
 				rt.finishRouteAffinityProbe(&req.affinity, attempt.Route.ID, true, nil, time.Now())
 				if req.affinity.shouldRememberRoute(attempt.Route.ID) {
@@ -1052,10 +1052,14 @@ func (rt *Runtime) virtualCacheReasonForWinner(req *coordinatedForwardRequest, w
 	if req.c != nil && req.c.Request != nil {
 		header = req.c.Request.Header
 	}
+	modelForEligibility := strings.TrimSpace(winner.UpstreamModel)
+	if modelForEligibility == "" {
+		modelForEligibility = req.requestedModel
+	}
 	if !hedgeEligible(hedgeRequest{
-		Path: req.path, Model: req.requestedModel, Header: header,
+		Path: req.path, Model: modelForEligibility, Header: header,
 		Body: req.body, Stream: req.stream, Realtime: strings.Contains(strings.ToLower(req.path), "realtime"),
-	}) || !rt.virtualCachePricingEligible(req, winner) {
+	}) {
 		return ""
 	}
 	if req.group.HedgeVirtualCacheEnabled && states != nil {
@@ -1072,9 +1076,11 @@ func (rt *Runtime) virtualCacheReasonForWinner(req *coordinatedForwardRequest, w
 			return storage.GatewayVirtualCacheReasonHedge
 		}
 	}
-	if !req.group.ResponseValidationVirtualCacheEnabled ||
-		coordinatedAttemptKind(winner, req.hedgeActive, winner.Info.Number) != storage.GatewayAttemptKindFailover ||
-		states == nil {
+	if !req.group.ResponseValidationVirtualCacheEnabled || states == nil {
+		return ""
+	}
+	winnerKind := coordinatedAttemptKind(winner, req.hedgeActive, winner.Info.Number)
+	if winnerKind != storage.GatewayAttemptKindFailover && winnerKind != storage.GatewayAttemptKindHedge {
 		return ""
 	}
 	priorRejectedRoute := false
@@ -1128,7 +1134,7 @@ func (rt *Runtime) finishCoordinatedNonStream(req *coordinatedForwardRequest, wi
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		return
 	}
-	_ = rt.Routes.NoteSuccessForModelPauseError(winner.Route.ID, winner.UpstreamModel)
+	rt.noteRouteModelSuccess(&winner.Route, winner.UpstreamModel)
 	rt.finishRouteAffinityProbe(&req.affinity, winner.Route.ID, true, nil, time.Now())
 	if req.affinity.shouldRememberRoute(winner.Route.ID) {
 		rt.rememberRouteAffinity(req.affinity.Keys, winner.Route.ID, time.Now())
@@ -1166,7 +1172,7 @@ func (rt *Runtime) finishCoordinatedStream(req *coordinatedForwardRequest, winne
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		return
 	}
-	_ = rt.Routes.NoteSuccessForModelPauseError(winner.Route.ID, winner.UpstreamModel)
+	rt.noteRouteModelSuccess(&winner.Route, winner.UpstreamModel)
 	rt.finishRouteAffinityProbe(&req.affinity, winner.Route.ID, true, nil, time.Now())
 	if req.affinity.shouldRememberRoute(winner.Route.ID) {
 		rt.rememberRouteAffinity(req.affinity.Keys, winner.Route.ID, time.Now())

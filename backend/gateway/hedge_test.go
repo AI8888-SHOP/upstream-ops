@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bejix/upstream-ops/backend/storage"
 )
 
 func TestRunHedgeTerminalFailureStopsWithoutWinner(t *testing.T) {
@@ -231,5 +233,22 @@ func TestHedgeEligibleExcludesGeneratedMediaAndRealtime(t *testing.T) {
 	}
 	if !hedgeEligible(ordinaryMultimodal) {
 		t.Fatal("ordinary image-input text request should remain hedge eligible")
+	}
+}
+
+func TestMappedRouteContainsMediaModel(t *testing.T) {
+	routes := []storage.GatewayRoute{
+		{ModelMappingJSON: `{"friendly-text-model":"gpt-image-1"}`},
+	}
+	if !mappedRouteContainsMediaModel(routes, "friendly-text-model", nil) {
+		t.Fatal("mapped image-generation model must disable concurrent hedging")
+	}
+	routes[0].ModelMappingJSON = `{"friendly-text-model":"sora-2"}`
+	if !mappedRouteContainsMediaModel(routes, "friendly-text-model", nil) {
+		t.Fatal("mapped video-generation model must disable concurrent hedging")
+	}
+	routes[0].ModelMappingJSON = `{"friendly-text-model":"gpt-5.6-terra"}`
+	if mappedRouteContainsMediaModel(routes, "friendly-text-model", nil) {
+		t.Fatal("mapped text model unexpectedly disabled concurrent hedging")
 	}
 }

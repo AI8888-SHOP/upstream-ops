@@ -222,9 +222,9 @@ type OpenAIToAnthropicStream struct {
 	done    bool
 
 	// 当前内容块
-	textOpen      bool
-	textIndex     int
-	nextBlockIdx  int
+	textOpen     bool
+	textIndex    int
+	nextBlockIdx int
 	// chat tool index → anthropic content block index
 	toolBlockIdx map[int]int
 	toolOpened   map[int]bool
@@ -411,8 +411,8 @@ func (s *OpenAIToAnthropicStream) Close() [][]byte {
 	// 若全程无内容，补一个空 text block（Anthropic 要求 content 非空列表更稳）
 	if s.nextBlockIdx == 0 {
 		out = append(out, encodeSSEFrame("content_block_start", map[string]any{
-			"type":  "content_block_start",
-			"index": 0,
+			"type":          "content_block_start",
+			"index":         0,
 			"content_block": map[string]any{"type": "text", "text": ""},
 		}))
 		out = append(out, encodeSSEFrame("content_block_stop", map[string]any{
@@ -437,32 +437,51 @@ func (s *OpenAIToAnthropicStream) Close() [][]byte {
 }
 
 func openAIUsageToAnthropic(usage map[string]any) map[string]any {
-	totalInput, _ := asInt(usage["prompt_tokens"])
-	if totalInput == 0 {
-		totalInput, _ = asInt(usage["input_tokens"])
-	}
-	output, _ := asInt(usage["completion_tokens"])
-	if output == 0 {
-		output, _ = asInt(usage["output_tokens"])
-	}
+	totalInput := openAIInputTokens(usage)
+	output := openAIOutputTokens(usage)
 	cacheRead := openAICachedTokens(usage)
 	cacheCreation := openAICacheCreationTokens(usage)
+	if cacheCreation == 0 {
+		fiveMinute, oneHour := anthropicCacheCreationBreakdown(usage)
+		cacheCreation = fiveMinute + oneHour
+	}
 	fresh := totalInput - cacheRead - cacheCreation
 	if fresh < 0 {
 		fresh = 0
 	}
-	return map[string]any{
+	out := map[string]any{
 		"input_tokens":                fresh,
 		"output_tokens":               output,
 		"cache_read_input_tokens":     cacheRead,
 		"cache_creation_input_tokens": cacheCreation,
 	}
+	copyAnthropicCacheCreationBreakdown(out, usage)
+	return out
+}
+
+// OpenAI-compatible providers use both Chat and Responses aliases. Match the
+// downstream Sub2API parser: input_tokens/output_tokens win when positive,
+// with prompt_tokens/completion_tokens as compatibility fallbacks.
+func openAIInputTokens(usage map[string]any) int {
+	if value, ok := asInt(usage["input_tokens"]); ok && value > 0 {
+		return value
+	}
+	value, _ := asInt(usage["prompt_tokens"])
+	return value
+}
+
+func openAIOutputTokens(usage map[string]any) int {
+	if value, ok := asInt(usage["output_tokens"]); ok && value > 0 {
+		return value
+	}
+	value, _ := asInt(usage["completion_tokens"])
+	return value
 }
 
 func openAICachedTokens(usage map[string]any) int {
-	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+	for _, key := range []string{"input_tokens_details", "prompt_tokens_details"} {
 		if details, ok := usage[key].(map[string]any); ok {
-			if value, ok := asInt(details["cached_tokens"]); ok {
+			if value, ok := asInt(details["cached_tokens"]); ok && value > 0 {
 				return value
 			}
 		}
@@ -476,7 +495,115 @@ func openAICachedTokens(usage map[string]any) int {
 }
 
 func openAICacheCreationTokens(usage map[string]any) int {
-	for _, key := range []string{"cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens"} {
+	for _, nested := range [][2]string{
+		{"input_tokens_details", "cache_write_tokens"},
+		{"prompt_tokens_details", "cache_write_tokens"},
+		{"input_tokens_details", "cache_creation_tokens"},
+		{"prompt_tokens_details", "cache_creation_tokens"},
+	} {
+		if details, ok := usage[nested[0]].(map[string]any); ok {
+			if value, exists := details[nested[1]]; exists {
+				if parsed, ok := asInt(value); ok && parsed > 0 {
+					return parsed
+				}
+			}
+		}
+	}
+	for _, key := range []string{"cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens", "cache_write_input_tokens"} {
+		if value, ok := asInt(usage[key]); ok && value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func copyUsageDetails(dst map[string]any, target string, usage map[string]any) {
+	for _, key := range []string{"input_tokens_details", "prompt_tokens_details"} {
+		if details, ok := usage[key].(map[string]any); ok {
+			copied := make(map[string]any, len(details))
+			for field, value := range details {
+				copied[field] = value
+			}
+			if cached := openAICachedTokens(usage); cached > 0 {
+				copied["cached_tokens"] = cached
+			}
+			if created := openAICacheCreationTokens(usage); created > 0 {
+				// Sub2API checks nested cache_write_tokens before flat
+				// compatibility aliases, including an explicit stale zero.
+				copied["cache_write_tokens"] = created
+			}
+			dst[target] = copied
+			return
+		}
+	}
+	details := make(map[string]any, 2)
+	if cached := openAICachedTokens(usage); cached > 0 {
+		details["cached_tokens"] = cached
+	}
+	if created := openAICacheCreationTokens(usage); created > 0 {
+		details["cache_write_tokens"] = created
+	}
+	if len(details) > 0 {
+		dst[target] = details
+	}
+}
+
+func openAIUsageToResponses(usage map[string]any) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	input := openAIInputTokens(usage)
+	output := openAIOutputTokens(usage)
+	out := map[string]any{
+		"input_tokens":  input,
+		"output_tokens": output,
+		"total_tokens":  input + output,
+	}
+	copyUsageDetails(out, "input_tokens_details", usage)
+	copyOpenAICacheUsageFields(out, usage)
+	return out
+}
+
+func openAIUsageToChat(usage map[string]any) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	input := openAIInputTokens(usage)
+	output := openAIOutputTokens(usage)
+	out := map[string]any{
+		"prompt_tokens":     input,
+		"completion_tokens": output,
+		"total_tokens":      input + output,
+	}
+	copyUsageDetails(out, "prompt_tokens_details", usage)
+	copyOpenAICacheUsageFields(out, usage)
+	return out
+}
+
+func copyAnthropicCacheCreationBreakdown(dst, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	if breakdown, ok := src["cache_creation"].(map[string]any); ok {
+		copied := make(map[string]any, len(breakdown))
+		for key, value := range breakdown {
+			copied[key] = value
+		}
+		dst["cache_creation"] = copied
+		return
+	}
+	fiveMinute := firstPositiveUsageInt(src, "cache_creation_5m_input_tokens", "cache_creation_5m_tokens")
+	oneHour := firstPositiveUsageInt(src, "cache_creation_1h_input_tokens", "cache_creation_1h_tokens")
+	if fiveMinute > 0 || oneHour > 0 {
+		dst["cache_creation"] = map[string]any{
+			"ephemeral_5m_input_tokens": fiveMinute,
+			"ephemeral_1h_input_tokens": oneHour,
+		}
+	}
+}
+
+func firstPositiveUsageInt(usage map[string]any, keys ...string) int {
+	for _, key := range keys {
 		if value, ok := asInt(usage[key]); ok && value > 0 {
 			return value
 		}
