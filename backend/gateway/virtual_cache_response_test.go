@@ -133,6 +133,78 @@ func TestVirtualCacheSSETransformerNoUsageFastPath(t *testing.T) {
 	}
 }
 
+func TestVirtualCacheSSETransformerSkipsNonObjectUsageAndTokenText(t *testing.T) {
+	tests := [][]byte{
+		[]byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{\"usage\":null}}\n\n"),
+		[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"output_tokens is only text\"}}]}\n\n"),
+	}
+	for _, payload := range tests {
+		transformer := newVirtualCacheSSETransformerPercent(protocol.KindOpenAIResponses, 50)
+		out := transformer.Transform(payload, false)
+		if len(out) == 0 || &out[0] != &payload[0] {
+			t.Fatalf("unchanged event was copied: %s", payload)
+		}
+		if transformer.Applied() {
+			t.Fatalf("unchanged event was marked as rewritten: %s", payload)
+		}
+	}
+}
+
+func TestVirtualCacheSSETransformerRewritesCompleteEventBatch(t *testing.T) {
+	transformer := newVirtualCacheSSETransformerPercent(protocol.KindOpenAIChat, 50)
+	payload := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":20}}}\n\ndata: [DONE]\n\n")
+	out := transformer.Transform(payload, false)
+	if !transformer.Applied() {
+		t.Fatal("complete event batch was not rewritten")
+	}
+	got := NormalizeUsageBuckets(ParseOpenAISSEUsage(out), protocol.KindOpenAIChat)
+	if got.InputTokens != 40 || got.CacheReadTokens != 60 || got.OutputTokens != 2 {
+		t.Fatalf("rewritten batch usage=%+v, want fresh=40 read=60 output=2", got)
+	}
+	if !bytes.Contains(out, []byte(`"content":"ok"`)) || !bytes.Contains(out, []byte("data: [DONE]")) {
+		t.Fatalf("rewritten batch lost content or terminal event: %s", out)
+	}
+}
+
+func TestRewriteVirtualCacheResponsePreservesOuterJSON(t *testing.T) {
+	body := []byte(`{ "type" : "response.completed", "response" : { "output" : [ { "text" : "keep formatting" } ], "usage" : {"input_tokens":100,"output_tokens":2,"input_tokens_details":{"cached_tokens":20}} }, "metadata" : {"usage":null} }`)
+	rewritten, changed := rewriteVirtualCacheResponsePercent(body, protocol.KindOpenAIResponses, 50)
+	if !changed {
+		t.Fatal("nested response usage was not rewritten")
+	}
+	if !bytes.Contains(rewritten, []byte(`"output" : [ { "text" : "keep formatting" } ]`)) || !bytes.Contains(rewritten, []byte(`"metadata" : {"usage":null}`)) {
+		t.Fatalf("outer response JSON was unnecessarily re-encoded: %s", rewritten)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rewritten, &payload); err != nil {
+		t.Fatal(err)
+	}
+	response, _ := payload["response"].(map[string]any)
+	usage, _ := response["usage"].(map[string]any)
+	details, _ := usage["input_tokens_details"].(map[string]any)
+	if got := mapInt(details, "cached_tokens"); got != 60 {
+		t.Fatalf("nested cached_tokens=%d, want 60: %s", got, rewritten)
+	}
+}
+
+func TestRewriteVirtualCacheResponseSupportsEscapedUsageKey(t *testing.T) {
+	body := []byte(`{"response":{"us\u0061ge":{"input_tokens":10,"output_tokens":1}}}`)
+	rewritten, changed := rewriteVirtualCacheResponse(body, protocol.KindOpenAIResponses)
+	if !changed {
+		t.Fatal("escaped usage key was not rewritten")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rewritten, &payload); err != nil {
+		t.Fatal(err)
+	}
+	response, _ := payload["response"].(map[string]any)
+	usage, _ := response["usage"].(map[string]any)
+	details, _ := usage["input_tokens_details"].(map[string]any)
+	if got := mapInt(details, "cached_tokens"); got != 10 {
+		t.Fatalf("escaped usage cached_tokens=%d, want 10: %s", got, rewritten)
+	}
+}
+
 func TestRewriteVirtualCacheResponsePercent(t *testing.T) {
 	openAI := []byte(`{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":20,"cache_write_tokens":10}}}`)
 	rewritten, changed := rewriteVirtualCacheResponsePercent(openAI, protocol.KindOpenAIResponses, 50)
@@ -171,4 +243,56 @@ func TestVirtualCacheSSETransformerPercent(t *testing.T) {
 	if got.InputTokens != 40 || got.CacheReadTokens != 60 {
 		t.Fatalf("partial SSE usage=%+v, want fresh=40 read=60", got)
 	}
+}
+
+func BenchmarkVirtualCacheSSETransformer(b *testing.B) {
+	benchmarks := []struct {
+		name    string
+		kind    protocol.Kind
+		payload []byte
+	}{
+		{
+			name:    "chat_content",
+			kind:    protocol.KindOpenAIChat,
+			payload: []byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hello world\"}}]}\n\n"),
+		},
+		{
+			name:    "chat_content_with_token_field",
+			kind:    protocol.KindOpenAIChat,
+			payload: []byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"the output_tokens field is documented here\"}}]}\n\n"),
+		},
+		{
+			name:    "responses_lifecycle_null_usage",
+			kind:    protocol.KindOpenAIResponses,
+			payload: []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp-1\",\"status\":\"in_progress\",\"usage\":null}}\n\n"),
+		},
+	}
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			transformer := newVirtualCacheSSETransformerPercent(benchmark.kind, 50)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(benchmark.payload)))
+			for i := 0; i < b.N; i++ {
+				out := transformer.Transform(benchmark.payload, false)
+				if len(out) != len(benchmark.payload) {
+					b.Fatalf("transformed payload length=%d, want %d", len(out), len(benchmark.payload))
+				}
+			}
+		})
+	}
+
+	b.Run("responses_completed_large", func(b *testing.B) {
+		payload := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"")
+		payload = append(payload, bytes.Repeat([]byte("x"), 64<<10)...)
+		payload = append(payload, []byte("\"}]}],\"usage\":{\"input_tokens\":1000,\"output_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":100}}}}\n\n")...)
+		transformer := newVirtualCacheSSETransformerPercent(protocol.KindOpenAIResponses, 50)
+		b.ReportAllocs()
+		b.SetBytes(int64(len(payload)))
+		for i := 0; i < b.N; i++ {
+			out := transformer.Transform(payload, false)
+			if len(out) == 0 || !transformer.Applied() {
+				b.Fatal("large completed response was not rewritten")
+			}
+		}
+	})
 }
