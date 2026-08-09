@@ -245,6 +245,30 @@ func TestVirtualCacheSSETransformerPercent(t *testing.T) {
 	}
 }
 
+func TestVirtualCachePercentAfterAnthropicToResponsesConversion(t *testing.T) {
+	converter := protocol.NewAnthropicToResponsesStream("m")
+	transformer := newVirtualCacheSSETransformerPercent(protocol.KindOpenAIResponses, 25)
+	var out bytes.Buffer
+	write := func(frames [][]byte) {
+		for _, frame := range frames {
+			out.Write(transformer.Transform(frame, false))
+		}
+	}
+
+	write(converter.Feed("message_start", `{"type":"message_start","message":{"id":"m1","usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":10}}}`))
+	write(converter.Feed("message_delta", `{"type":"message_delta","usage":{"input_tokens":0,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`))
+	write(converter.Feed("message_stop", `{"type":"message_stop"}`))
+	out.Write(transformer.Transform(nil, true))
+
+	if !transformer.Applied() {
+		t.Fatal("virtual cache was not applied to the converted Responses usage")
+	}
+	got := NormalizeUsageBuckets(ParseOpenAISSEUsage(out.Bytes()), protocol.KindOpenAIResponses)
+	if got.InputTokens != 75 || got.CacheReadTokens != 45 || got.CacheCreationTokens != 10 || got.OutputTokens != 4 {
+		t.Fatalf("converted Responses usage=%+v, want fresh=75 read=45 creation=10 output=4; body=%s", got, out.String())
+	}
+}
+
 func BenchmarkVirtualCacheSSETransformer(b *testing.B) {
 	benchmarks := []struct {
 		name    string

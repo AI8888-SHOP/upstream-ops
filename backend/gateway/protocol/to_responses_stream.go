@@ -326,25 +326,34 @@ func (s *AnthropicToResponsesStream) ingestUsage(usage map[string]any) {
 	if s == nil || usage == nil {
 		return
 	}
-	if value, ok := asInt(usage["input_tokens"]); ok {
+	// Anthropic-compatible providers sometimes repeat omitted counters as zero
+	// in message_delta. Treat stream usage as a partial update so those zero
+	// placeholders cannot erase the values captured from message_start.
+	if value, ok := asInt(usage["input_tokens"]); ok && value > 0 {
 		s.inputTokens = value
 	}
-	if value, ok := asInt(usage["output_tokens"]); ok {
+	if value, ok := asInt(usage["output_tokens"]); ok && value > 0 {
 		s.outputTokens = value
 	}
 	if hasUsageField(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens") {
-		s.cacheRead = firstPositiveUsageInt(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens")
+		if value := firstPositiveUsageInt(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens"); value > 0 {
+			s.cacheRead = value
+		}
 	}
 	fiveMinute, oneHour := anthropicCacheCreationBreakdown(usage)
 	if hasUsageField(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens") || fiveMinute > 0 || oneHour > 0 {
-		s.cacheCreate = firstPositiveUsageInt(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens")
-		if s.cacheCreate == 0 {
-			s.cacheCreate = fiveMinute + oneHour
+		if value := firstPositiveUsageInt(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens"); value > 0 {
+			s.cacheCreate = value
 		}
 	}
-	if fiveMinute > 0 || oneHour > 0 {
+	if fiveMinute > 0 {
 		s.cacheCreate5m = fiveMinute
+	}
+	if oneHour > 0 {
 		s.cacheCreate1h = oneHour
+	}
+	if breakdownTotal := s.cacheCreate5m + s.cacheCreate1h; breakdownTotal > s.cacheCreate {
+		s.cacheCreate = breakdownTotal
 	}
 }
 
