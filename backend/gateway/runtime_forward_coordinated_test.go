@@ -66,6 +66,44 @@ func TestBuildVirtualCacheSettlementDoesNotRequireLocalPricing(t *testing.T) {
 	}
 }
 
+func TestBuildProviderVirtualCacheSettlementPreservesUncachedInput(t *testing.T) {
+	const model = "claude-3-7-sonnet-20250219"
+	provider := &storage.GatewayProvider{
+		VirtualCacheEnabled:    true,
+		VirtualCachePercent:    25,
+		VirtualCacheModelsJSON: `[]`,
+	}
+	rt := &Runtime{Service: &Service{Pricing: NewPricingCatalog(nil)}}
+	req := &coordinatedForwardRequest{
+		group:              &storage.GatewayGroup{},
+		virtualCacheReason: storage.GatewayVirtualCacheReasonProviderGlobal,
+		requestedModel:     model,
+	}
+	winner := &coordinatedForwardAttempt{
+		Target:        &upstreamTarget{Provider: provider},
+		UpstreamModel: model,
+		UsageMeta:     usageRecordMeta{UpstreamProtocol: string(protocol.KindAnthropic)},
+		Tokens:        UsageTokens{InputTokens: 100},
+		Plan: coordinatedRoutePlan{Candidate: ScoredRoute{
+			EffectiveRate: 1, BillingRate: 1,
+		}},
+	}
+
+	settlement := rt.buildVirtualCacheSettlement(req, winner)
+	if !settlement.VirtualCacheReadEnabled || settlement.VirtualCacheReadTokens != 25 {
+		t.Fatalf("settlement=%+v, want 25 virtual cache tokens", settlement)
+	}
+	wantCost := CalculateCost(
+		rt.Pricing.Resolve(model),
+		UsageTokens{InputTokens: 75, CacheReadTokens: 25},
+		1,
+		1,
+	).ActualCost
+	if settlement.BilledCost != wantCost {
+		t.Fatalf("billed cost=%v, want partial-cache cost=%v", settlement.BilledCost, wantCost)
+	}
+}
+
 func TestCoordinatedAttemptSuppressesDeterministicSameRouteRetries(t *testing.T) {
 	attempt := &coordinatedForwardAttempt{
 		Status: http.StatusForbidden,
@@ -139,6 +177,41 @@ func TestFinishCoordinatedNonStreamWritesVirtualCacheUsageDownstream(t *testing.
 	}
 	if got := recorder.Header().Get("Content-Length"); got != "" {
 		t.Fatalf("rewritten response retained Content-Length=%q", got)
+	}
+}
+
+func TestFinishCoordinatedNonStreamUsesProviderVirtualCachePercent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	provider := &storage.GatewayProvider{
+		VirtualCacheEnabled:    true,
+		VirtualCachePercent:    25,
+		VirtualCacheModelsJSON: `[]`,
+	}
+	req := &coordinatedForwardRequest{
+		c: context, kind: protocol.KindOpenAIChat, requestedModel: "provider-private-model",
+		group:              &storage.GatewayGroup{},
+		virtualCacheReason: storage.GatewayVirtualCacheReasonProviderGlobal,
+	}
+	winner := &coordinatedForwardAttempt{
+		Info: hedgeAttemptInfo{Number: 1}, Status: http.StatusOK,
+		Target:        &upstreamTarget{Provider: provider},
+		ClientBody:    []byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":100,"completion_tokens":4}}`),
+		UpstreamModel: "provider-private-model",
+		UsageMeta:     usageRecordMeta{UpstreamProtocol: string(protocol.KindOpenAIChat)},
+		Tokens:        UsageTokens{InputTokens: 100, OutputTokens: 4},
+		Plan: coordinatedRoutePlan{Candidate: ScoredRoute{
+			EffectiveRate: 1, BillingRate: 1,
+		}},
+	}
+
+	(&Runtime{Service: &Service{}}).finishCoordinatedNonStream(req, winner, 0)
+
+	tokens := NormalizeUsageBuckets(ParseOpenAIUsage(recorder.Body.Bytes()), protocol.KindOpenAIChat)
+	if tokens.InputTokens != 75 || tokens.CacheReadTokens != 25 || tokens.OutputTokens != 4 {
+		t.Fatalf("downstream usage=%+v, want fresh=75 cache_read=25 output=4; body=%s", tokens, recorder.Body.String())
 	}
 }
 

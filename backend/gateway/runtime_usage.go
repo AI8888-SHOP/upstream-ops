@@ -279,7 +279,7 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 	}
 	rawCost := CalculateCost(pricing, tokens, winner.Plan.Candidate.EffectiveRate, winner.Plan.Candidate.BillingRate)
 	virtualized := tokens
-	virtualized.InputTokens = 0
+	virtualized.InputTokens -= virtualTokens
 	virtualized.CacheReadTokens += virtualTokens
 	billedCost := CalculateCost(pricing, virtualized, winner.Plan.Candidate.EffectiveRate, winner.Plan.Candidate.BillingRate)
 	// Downstream virtual-cache signalling is a routing policy, not a function

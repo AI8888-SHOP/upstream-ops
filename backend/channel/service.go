@@ -349,11 +349,25 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	if in.BalanceThreshold != nil {
 		c.BalanceThreshold = *in.BalanceThreshold
 	}
+	rechargeMultiplierChanged := false
 	if in.RechargeMultiplier != nil {
-		c.RechargeMultiplier = normalizeMultiplier(in.RechargeMultiplier)
+		nextMultiplier := normalizeMultiplier(in.RechargeMultiplier)
+		rechargeMultiplierChanged = !sameMultiplier(c.RechargeMultiplier, nextMultiplier)
+		c.RechargeMultiplier = nextMultiplier
 	}
 	if in.RechargeMultiplierMode != nil {
-		c.RechargeMultiplierMode = connector.NormalizeRechargeMultiplierMode(*in.RechargeMultiplierMode)
+		nextMode := connector.NormalizeRechargeMultiplierMode(*in.RechargeMultiplierMode)
+		rechargeMultiplierChanged = rechargeMultiplierChanged ||
+			connector.NormalizeRechargeMultiplierMode(c.RechargeMultiplierMode) != nextMode
+		c.RechargeMultiplierMode = nextMode
+	}
+	if rechargeMultiplierChanged {
+		// Current aggregates already contain the old conversion. Clear them
+		// so they cannot be displayed with the new conversion configuration.
+		c.LastBalance = nil
+		c.LastBalanceAt = nil
+		c.TodayCost = nil
+		c.TotalCost = nil
 	}
 	if in.GroupMultiplier != nil {
 		c.GroupMultiplier = normalizeMultiplier(in.GroupMultiplier)
@@ -1150,6 +1164,13 @@ func normalizeConcurrencyLimit(v int) int {
 		return 4096
 	}
 	return v
+}
+
+func sameMultiplier(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (s *Service) ListAPIKeyGroups(ctx context.Context, channelID uint) ([]connector.APIKeyGroup, error) {
