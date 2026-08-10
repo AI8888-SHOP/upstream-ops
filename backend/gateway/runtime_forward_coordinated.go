@@ -1114,6 +1114,15 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			onlyClientDisconnect := rt.isClientDisconnectAfterCommit(streamResult.ClientDisconnected, streamResult.StreamErr)
 			success = success && (streamResult.StreamErr == nil || onlyClientDisconnect)
 		}
+		if isWinner && req.stream && success && tokens.InputTokens == 0 {
+			tokens = rt.recoverMissingStreamInputTokens(
+				req.c.Request.Context(), req.c, attempt.Target, attempt.ForwardBody,
+				attempt.UpstreamKind, tokens,
+			)
+			attempt.streamMu.Lock()
+			attempt.Tokens = tokens
+			attempt.streamMu.Unlock()
+		}
 		if attempt.Recovery {
 			if success {
 				if !isWinner {

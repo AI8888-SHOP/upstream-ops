@@ -358,6 +358,11 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				onlyClientDisconnect := rt.isClientDisconnectAfterCommit(clientDisconnected, streamErr)
 				// 仅客户端断开仍算业务成功；真实 stream 错误才算失败。
 				success := streamErr == nil || onlyClientDisconnect
+				if success && streamTokens.InputTokens == 0 {
+					streamTokens = rt.recoverMissingStreamInputTokens(
+						c.Request.Context(), c, target, fwdBody, upstreamKind, streamTokens,
+					)
+				}
 				errInfo := usageErrorInfo{}
 				gwCfg := rt.gatewayRuntime()
 				headerJSON := rt.formatDebugHeaders(respHeaders, gwCfg.UsageErrorHeadersJSONBytes, gwCfg.UsageErrorHeaderValueRunes)
