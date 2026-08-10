@@ -645,6 +645,8 @@ export interface GatewayGroup {
   retry_enabled?: boolean
   /** 同一路由额外重试次数（不含首次） */
   retry_count?: number
+  /** 正则响应规则拒绝后的同一路由额外重试次数；-1 表示继承 retry_count */
+  response_validation_retry_count?: number
   /** 是否顺延下一条路由 */
   failover_enabled?: boolean
   /** 顺延次数（首条之后最多再换几条） */
@@ -733,6 +735,9 @@ export interface GatewayProvider {
   model_policy?: GatewayProviderModelPolicy
   allowed_models_json?: string
   concurrency_limit?: number
+  virtual_cache_enabled?: boolean
+  virtual_cache_models_json?: string
+  virtual_cache_percent?: number
   default_billing_rate: number
   auth_style?: string
   enabled: boolean
@@ -762,6 +767,8 @@ export interface GatewayProviderOption {
   api_key_hint: string
   upstream_protocol: GatewayUpstreamProtocol
   concurrency_limit?: number
+  virtual_cache_enabled?: boolean
+  virtual_cache_percent?: number
   default_billing_rate: number
   enabled: boolean
 }

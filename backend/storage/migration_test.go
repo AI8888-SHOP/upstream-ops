@@ -78,6 +78,9 @@ func TestAutoMigrateAddsVirtualCacheFlagWithSafeDefault(t *testing.T) {
 	if err := db.Migrator().DropColumn(&GatewayGroup{}, "response_validation_virtual_cache_enabled"); err != nil {
 		t.Fatalf("drop response validation virtual cache column: %v", err)
 	}
+	if err := db.Migrator().DropColumn(&GatewayGroup{}, "response_validation_retry_count"); err != nil {
+		t.Fatalf("drop response validation retry column: %v", err)
+	}
 	if db.Migrator().HasColumn(&GatewayGroup{}, "hedge_virtual_cache_enabled") {
 		t.Fatal("virtual cache column was not removed from legacy schema")
 	}
@@ -90,12 +93,18 @@ func TestAutoMigrateAddsVirtualCacheFlagWithSafeDefault(t *testing.T) {
 	if !db.Migrator().HasColumn(&GatewayGroup{}, "response_validation_virtual_cache_enabled") {
 		t.Fatal("auto migrate did not restore response validation virtual cache column")
 	}
+	if !db.Migrator().HasColumn(&GatewayGroup{}, "response_validation_retry_count") {
+		t.Fatal("auto migrate did not restore response validation retry column")
+	}
 	var restored GatewayGroup
 	if err := db.First(&restored, group.ID).Error; err != nil {
 		t.Fatalf("load migrated group: %v", err)
 	}
 	if restored.HedgeVirtualCacheEnabled || restored.ResponseValidationVirtualCacheEnabled {
 		t.Fatalf("legacy group virtual cache flag = true, want safe default false")
+	}
+	if restored.ResponseValidationRetryCount != -1 {
+		t.Fatalf("legacy response validation retry count = %d, want compatibility default -1", restored.ResponseValidationRetryCount)
 	}
 }
 

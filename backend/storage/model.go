@@ -483,6 +483,7 @@ const (
 
 	GatewayVirtualCacheReasonHedge                = "hedge"
 	GatewayVirtualCacheReasonResponseRuleFailover = "response_rule_failover"
+	GatewayVirtualCacheReasonProviderGlobal      = "provider_global"
 
 	GatewayAttemptStatusAccepted = "accepted"
 	GatewayAttemptStatusRejected = "rejected"
@@ -505,6 +506,11 @@ type GatewayProvider struct {
 	// ConcurrencyLimit is shared by every gateway route that references this provider.
 	// Zero preserves the legacy unlimited behavior.
 	ConcurrencyLimit   int     `gorm:"not null;default:0" json:"concurrency_limit"`
+	// Provider-level virtual cache is an opt-in downstream accounting hint for
+	// text models. The percentage is applied to fresh input tokens only.
+	VirtualCacheEnabled    bool   `gorm:"not null;default:false" json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON  string `gorm:"type:text;not null;default:'[]'" json:"virtual_cache_models_json"`
+	VirtualCachePercent     int    `gorm:"not null;default:0" json:"virtual_cache_percent"`
 	DefaultBillingRate float64 `gorm:"not null;default:1" json:"default_billing_rate"`
 	AuthStyle          string  `gorm:"size:16;not null;default:'both'" json:"auth_style"`
 	Enabled            bool    `gorm:"not null;default:true;index" json:"enabled"`
@@ -567,6 +573,10 @@ type GatewayGroup struct {
 	// 响应校验按组启用；流式响应只在提交客户端前检查 prefix。
 	ResponseValidationEnabled             bool   `gorm:"not null;default:false" json:"response_validation_enabled"`
 	ResponseValidationVirtualCacheEnabled bool   `gorm:"not null;default:false" json:"response_validation_virtual_cache_enabled"`
+	// ResponseValidationRetryCount controls same-route retries after a
+	// pre-commit response-rule rejection. -1 inherits RetryCount; 0 disables
+	// response-rule retries while leaving transport retries unchanged.
+	ResponseValidationRetryCount       int    `gorm:"not null;default:-1" json:"response_validation_retry_count"`
 	ResponseValidationStreamMode      string `gorm:"size:16;not null;default:'prefix'" json:"response_validation_stream_mode"`
 	ResponseValidationPrefixBytes     int    `gorm:"not null;default:8192" json:"response_validation_prefix_bytes"`
 	ResponseValidationPrefixTimeoutMS int    `gorm:"not null;default:2000" json:"response_validation_prefix_timeout_ms"`

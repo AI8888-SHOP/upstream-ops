@@ -78,7 +78,7 @@ UpstreamOps focuses on these problems:
 - **First-token timeout** (optional): fail fast on the first byte when another route can still be tried.
 - **Concurrent fallback (hedging, optional and off by default)**: when the primary has no valid result after the group delay, start other routes up to the configured limits. The first validated attempt wins and in-flight losers are canceled. `maxParallel` includes the primary and `maxAttempts` caps all attempts; image/video generation and Realtime requests are always excluded.
 - **Hedge virtual cache credit (optional and off by default)**: when a real overlapping hedge was launched and a successful winner is delivered, the group can bill the winner's fresh input as cache-read tokens. The gateway charges only the discounted winner amount while retaining every attempt's raw upstream cost and extra-cost audit; image/video generation and Realtime requests never qualify.
-- **Regex response validation (optional and off by default)**: priority-ordered rules inspect `assistant_text`, `raw_body`, or `error_message`, with optional model/protocol filters. A match rejects that attempt and switches directly to another route. Non-stream responses are checked in full; streams are checked through a configurable pre-commit prefix gate.
+- **Regex response validation (optional and off by default)**: priority-ordered rules inspect `assistant_text`, `raw_body`, or `error_message`, with optional model/protocol filters. A match first retries the current route according to the group's `RetryCount`, then fails over to another route. Non-stream responses are checked in full; streams are checked through a configurable pre-commit prefix gate.
 - User-Agent modes: `passthrough` / `group` / `custom`; admin model pull and probe fall back to the default UA.
 - Usage logs aligned with sub2api fields (endpoint, protocol, tokens including cache buckets, cost, latency, first-token latency, attempt kind/status, winner, response rule, and error detail) with list, stats, model filters, and cleanup.
 - Pricing: built-in unit prices (overridable) and `actual_cost = base_cost × account_billing_rate` (same conversion rules as upstream sync).
@@ -330,7 +330,7 @@ Commit only `.env.example` to a public repository. Never commit `.env`, `data/`,
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.20
+IMAGE_TAG=v0.0.27
 ```
 
 ## MySQL Deployment
@@ -368,13 +368,13 @@ helper with the live deployment paths:
 
 ```bash
 chmod +x scripts/upgrade.sh
-TARGET_TAG=v0.0.20 ./scripts/upgrade.sh
+TARGET_TAG=v0.0.27 ./scripts/upgrade.sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-.\scripts\upgrade.ps1 -TargetTag v0.0.20
+.\scripts\upgrade.ps1 -TargetTag v0.0.27
 ```
 
 The helper defaults to `ghcr.io/ai8888-shop/upstream-ops` as the image
@@ -410,12 +410,12 @@ For an old Docker/SQLite deployment that also needs the database migration, run
 the PostgreSQL helper from the kit with explicit live deployment paths:
 
 ```bash
-chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.20/scripts/upgrade-to-postgres.sh
+chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.27/scripts/upgrade-to-postgres.sh
 ENV_FILE=/srv/upstream-ops/.env DATA_DIR=/srv/upstream-ops/data \
 COMPOSE_FILE=/srv/upstream-ops/docker-compose.yml \
-POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.20/docker-compose.postgres.yml \
-TARGET_TAG=v0.0.20 MIGRATION_IMAGE_TAG=v0.0.20 \
-/tmp/upstream-ops-upgrade-kit-v0.0.20/scripts/upgrade-to-postgres.sh
+POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.27/docker-compose.postgres.yml \
+TARGET_TAG=v0.0.27 MIGRATION_IMAGE_TAG=v0.0.27 \
+/tmp/upstream-ops-upgrade-kit-v0.0.27/scripts/upgrade-to-postgres.sh
 ```
 
 On Windows PowerShell:
@@ -423,9 +423,9 @@ On Windows PowerShell:
 ```powershell
 .\scripts\upgrade-to-postgres.ps1 `
   -ComposeFile 'D:\upstream-ops\docker-compose.yml' `
-  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.20\docker-compose.postgres.yml' `
+  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.27\docker-compose.postgres.yml' `
   -EnvFile 'D:\upstream-ops\.env' -DataDir 'D:\upstream-ops\data' `
-  -TargetTag 'v0.0.20' -MigrationImageTag 'v0.0.20'
+  -TargetTag 'v0.0.27' -MigrationImageTag 'v0.0.27'
 ```
 
 The helper validates both Compose files and the external network before stopping
@@ -888,7 +888,7 @@ Client → auth (key / IP / quota) → read body → take model
        → start primary immediately; hedge may start other routes after its delay
        → each attempt: model map → protocol conversion → upstream HTTP → validation
        → first valid result becomes winner; cancel unfinished losers; deliver to client
-       → regex match / upstream failure switches directly to another route per policy
+       → regex match retries the current route first, then switches routes per policy
        → record every attempt; all failed → return last error
 ```
 
@@ -929,12 +929,12 @@ Route field `upstream_protocol`:
 - Default failover: no response, 429, 5xx; with group “failover on 4xx”, all 4xx may failover too.
 - Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
 - Automatic cooldown is isolated by route and final upstream model, so a failure for one model does not pause the channel for other models. Model aliases that resolve to the same upstream model share the cooldown; the management "clear pause" action clears all model cooldowns for that route.
-- Group: `retry_count`, `failover_max`, `cooldown_seconds`.
+- Group: `retry_count`, `response_validation_retry_count`, `failover_max`, `cooldown_seconds`. `response_validation_retry_count` controls extra attempts on the same route after a pre-commit regex rejection; `-1` inherits `retry_count`, while `0` disables only regex-triggered retries.
 - **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
 - **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.
 - Image generation, video generation, and Realtime/WebSocket operations always use the original sequential policy. Multimodal text requests that only include images as input are not excluded.
 - **Regex response validation (off by default)** uses Go RE2 syntax and checks rules in ascending numeric priority. Targets are `assistant_text` (client-visible text after protocol conversion), `raw_body`, and `error_message`. Empty model/protocol filters match all values; `*` / `?` globs are supported.
-- A non-stream response is checked in full before delivery. A match records the attempt as `regex_reject` / `rejected` and switches directly to another route without retrying the same route.
+- A non-stream response is checked in full before delivery. A match records the attempt as `regex_reject` / `rejected`, retries the current route according to `response_validation_retry_count` (or `retry_count` when it is `-1`), and then switches to another route.
 - Streaming uses the fixed `prefix` mode: buffer at most `response_validation_prefix_bytes` or wait `response_validation_prefix_timeout_ms` before first commit. A match after commit cannot safely switch routes and is audit-only with the post-commit marker.
 - Once valid SSE has been committed to the client, the gateway does not switch routes (avoids half-stream dual responses).
 
@@ -1142,6 +1142,8 @@ Group create/update requests accept the policy fields directly, for example:
   "hedge_delay_seconds": 10,
   "hedge_max_parallel": 2,
   "hedge_max_attempts": 4,
+  "retry_count": 2,
+  "response_validation_retry_count": 1,
   "response_validation_enabled": true,
   "response_validation_stream_mode": "prefix",
   "response_validation_prefix_bytes": 8192,

@@ -249,6 +249,10 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 		if !req.group.ResponseValidationVirtualCacheEnabled {
 			return storage.GatewayFinalizeRequestInput{}
 		}
+	case storage.GatewayVirtualCacheReasonProviderGlobal:
+		if winner.Target == nil || winner.Target.Provider == nil {
+			return storage.GatewayFinalizeRequestInput{}
+		}
 	default:
 		return storage.GatewayFinalizeRequestInput{}
 	}
@@ -257,7 +261,15 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 		model = strings.TrimSpace(req.requestedModel)
 	}
 	tokens := NormalizeUsageBuckets(winner.Tokens, protocol.Kind(winner.UsageMeta.UpstreamProtocol))
-	virtualTokens := tokens.InputTokens
+	percent := 100
+	if reason == storage.GatewayVirtualCacheReasonProviderGlobal {
+		var err error
+		percent, err = ProviderVirtualCachePercentForModel(winner.Target.Provider, model)
+		if err != nil || percent <= 0 {
+			return storage.GatewayFinalizeRequestInput{}
+		}
+	}
+	virtualTokens := virtualCacheTokenPercent(tokens.InputTokens, percent)
 	if virtualTokens <= 0 {
 		return storage.GatewayFinalizeRequestInput{}
 	}
@@ -267,7 +279,7 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 	}
 	rawCost := CalculateCost(pricing, tokens, winner.Plan.Candidate.EffectiveRate, winner.Plan.Candidate.BillingRate)
 	virtualized := tokens
-	virtualized.InputTokens = 0
+	virtualized.InputTokens -= virtualTokens
 	virtualized.CacheReadTokens += virtualTokens
 	billedCost := CalculateCost(pricing, virtualized, winner.Plan.Candidate.EffectiveRate, winner.Plan.Candidate.BillingRate)
 	// Downstream virtual-cache signalling is a routing policy, not a function
@@ -298,6 +310,71 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 		VirtualCacheReadCost:    virtualReadCost,
 		VirtualCacheReason:      reason,
 	}
+}
+
+// buildProviderVirtualCacheSettlement creates the accounting override for a
+// normal (non-hedged) provider request. The upstream usage remains untouched
+// in the attempt log; only the winner settlement uses the virtual read bucket.
+func (rt *Runtime) buildProviderVirtualCacheSettlement(
+	provider *storage.GatewayProvider,
+	model string,
+	tokens UsageTokens,
+	upstreamKind protocol.Kind,
+	rate, billingRate float64,
+	eligible bool,
+) storage.GatewayFinalizeRequestInput {
+	if rt == nil || provider == nil || !eligible || tokens.ImageOutputTokens > 0 {
+		return storage.GatewayFinalizeRequestInput{}
+	}
+	percent, err := ProviderVirtualCachePercentForModel(provider, model)
+	if err != nil || percent <= 0 {
+		return storage.GatewayFinalizeRequestInput{}
+	}
+	tokens = NormalizeUsageBuckets(tokens, upstreamKind)
+	virtualTokens := virtualCacheTokenPercent(tokens.InputTokens, percent)
+	if virtualTokens <= 0 {
+		return storage.GatewayFinalizeRequestInput{}
+	}
+	pricing := ModelPricing{}
+	if rt.Pricing != nil {
+		pricing = rt.Pricing.Resolve(model)
+	}
+	rawCost := CalculateCost(pricing, tokens, rate, billingRate)
+	virtualized := tokens
+	virtualized.InputTokens -= virtualTokens
+	virtualized.CacheReadTokens += virtualTokens
+	billedCost := CalculateCost(pricing, virtualized, rate, billingRate)
+	billedActual := billedCost.ActualCost
+	if billedActual > rawCost.ActualCost {
+		billedActual = rawCost.ActualCost
+	}
+	accountRate := billedCost.ActualCost
+	virtualReadCost := float64(virtualTokens) * pricing.CacheReadPricePerToken
+	if billedCost.TotalCost > 0 {
+		accountRate /= billedCost.TotalCost
+	} else {
+		accountRate = 0
+	}
+	virtualReadCost *= accountRate
+	if virtualReadCost > billedActual {
+		virtualReadCost = billedActual
+	}
+	return storage.GatewayFinalizeRequestInput{
+		BilledCost:              billedActual,
+		BilledCostSet:           true,
+		VirtualCacheReadEnabled: true,
+		VirtualCacheReadTokens:  virtualTokens,
+		VirtualCacheReadCost:    virtualReadCost,
+		VirtualCacheReason:      storage.GatewayVirtualCacheReasonProviderGlobal,
+	}
+}
+
+func virtualCachePercentForSettlement(settlement storage.GatewayFinalizeRequestInput, provider *storage.GatewayProvider, model string) int {
+	if settlement.VirtualCacheReason != storage.GatewayVirtualCacheReasonProviderGlobal {
+		return 100
+	}
+	percent, _ := ProviderVirtualCachePercentForModel(provider, model)
+	return percent
 }
 
 func (rt *Runtime) finalizeUsageFailure(reqID string, key *storage.GatewayKey) {

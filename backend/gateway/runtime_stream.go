@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -135,11 +136,38 @@ func (rt *Runtime) forwardStream(
 	converted bool,
 	firstTokenTimeout time.Duration,
 ) streamAttemptResult {
+	return rt.forwardStreamWithVirtualCache(ctx, c, target, path, method, inHeader, body, inboundKind, upstreamKind, model, converted, firstTokenTimeout, 0)
+}
+
+func (rt *Runtime) forwardStreamWithVirtualCache(
+	ctx context.Context,
+	c *gin.Context,
+	target *upstreamTarget,
+	path string,
+	method string,
+	inHeader http.Header,
+	body []byte,
+	inboundKind protocolKind,
+	upstreamKind protocolKind,
+	model string,
+	converted bool,
+	firstTokenTimeout time.Duration,
+	virtualCachePercent ...int,
+) streamAttemptResult {
+	cachePercent := 0
+	if len(virtualCachePercent) > 0 {
+		cachePercent = virtualCachePercent[0]
+	}
 	release, err := rt.acquireUpstreamConcurrency(ctx, target)
 	if err != nil {
 		return streamAttemptResult{Err: err}
 	}
-	defer release()
+	// A missing Anthropic input count is repaired through a follow-up request.
+	// Release this stream's slot before that request so a provider concurrency
+	// limit of one cannot deadlock the recovery call behind the active stream.
+	var releaseOnce sync.Once
+	releaseUpstream := func() { releaseOnce.Do(release) }
+	defer releaseUpstream()
 
 	clientCtx := context.Background()
 	if c != nil && c.Request != nil && c.Request.Context() != nil {
@@ -205,9 +233,17 @@ func (rt *Runtime) forwardStream(
 
 	incremental := protocol.SupportsIncrementalStream(inboundKind, upstreamKind, converted)
 	if !incremental {
-		return rt.forwardStreamBuffered(c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status)
+		return rt.forwardStreamBuffered(c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status, cachePercent)
 	}
-	return rt.forwardStreamIncremental(upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status)
+	recoverInput := func(tokens UsageTokens) UsageTokens {
+		releaseUpstream()
+		return rt.recoverMissingStreamInputTokens(ctx, c, target, body, upstreamKind, tokens)
+	}
+	return rt.forwardStreamIncrementalWithRecovery(
+		upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout,
+		inboundKind, upstreamKind, model, converted, headers, status,
+		cachePercent, recoverInput,
+	)
 }
 
 // forwardStreamBuffered 仅兜底：三协议互转已走增量真流；此处保留给未知协议或未实现转换器。
@@ -223,7 +259,12 @@ func (rt *Runtime) forwardStreamBuffered(
 	converted bool,
 	headers http.Header,
 	status int,
+	virtualCachePercent ...int,
 ) streamAttemptResult {
+	cachePercent := 0
+	if len(virtualCachePercent) > 0 {
+		cachePercent = virtualCachePercent[0]
+	}
 	var ft *int64
 	// 从请求发起起算剩余首字预算（含已花费的等响应头时间）
 	bodyWait, timedOut := rt.remainingFirstTokenWait(start, firstTokenTimeout)
@@ -258,9 +299,20 @@ func (rt *Runtime) forwardStreamBuffered(
 	if len(clientBody) == 0 {
 		clientBody = data
 	}
+	virtualCacheApplied := false
+	if cachePercent > 0 {
+		if rewritten, changed := rewriteVirtualCacheResponsePercent(clientBody, inbound, cachePercent); changed {
+			clientBody = rewritten
+			virtualCacheApplied = true
+		}
+	}
+	if virtualCacheApplied {
+		headers = headers.Clone()
+		headers.Del("Content-Length")
+	}
 
 	if err := rt.commitSSEHeaders(c, headers); err != nil {
-		return streamAttemptResult{Status: status, Headers: headers, Body: clientBody, FirstTokenMS: ft, Tokens: tokens, Err: err}
+		return streamAttemptResult{Status: status, Headers: headers, Body: clientBody, FirstTokenMS: ft, Tokens: tokens, VirtualCacheApplied: virtualCacheApplied, Err: err}
 	}
 	if _, err := c.Writer.Write(clientBody); err != nil {
 		var rejected *responseRejectedError
@@ -280,7 +332,7 @@ func (rt *Runtime) forwardStreamBuffered(
 	// 缓冲路径整包写出成功即视为下游完整交付（含转换后的终端帧）。
 	return streamAttemptResult{
 		Status: status, Headers: headers, FirstTokenMS: ft, Tokens: tokens,
-		Committed: streamWriterActuallyCommitted(c), DownstreamComplete: true,
+		Committed: streamWriterActuallyCommitted(c), DownstreamComplete: true, VirtualCacheApplied: virtualCacheApplied,
 	}
 }
 
@@ -301,6 +353,37 @@ func (rt *Runtime) forwardStreamIncremental(
 	converted bool,
 	headers http.Header,
 	status int,
+	virtualCachePercent ...int,
+) (result streamAttemptResult) {
+	cachePercent := 0
+	if len(virtualCachePercent) > 0 {
+		cachePercent = virtualCachePercent[0]
+	}
+	return rt.forwardStreamIncrementalWithRecovery(
+		upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout,
+		inbound, upstream, model, converted, headers, status, cachePercent, nil,
+	)
+}
+
+// forwardStreamIncrementalWithRecovery is the event loop used by normal
+// streaming. The optional recovery callback is invoked only after an
+// Anthropic stream reaches its usage-bearing tail, so the active upstream slot
+// can be released before count_tokens is issued.
+func (rt *Runtime) forwardStreamIncrementalWithRecovery(
+	upCtx context.Context,
+	clientCtx context.Context,
+	abortReq context.CancelFunc,
+	c *gin.Context,
+	resp *http.Response,
+	start time.Time,
+	firstTokenTimeout time.Duration,
+	inbound, upstream protocolKind,
+	model string,
+	converted bool,
+	headers http.Header,
+	status int,
+	cachePercent int,
+	recoverInput func(UsageTokens) UsageTokens,
 ) (result streamAttemptResult) {
 	if upCtx == nil {
 		upCtx = context.Background()
@@ -312,6 +395,10 @@ func (rt *Runtime) forwardStreamIncremental(
 	result = streamAttemptResult{Status: status, Headers: headers}
 	clientKind := protocol.NormalizeKind(inbound)
 	upKind := protocol.NormalizeKind(upstream)
+	var virtualCache *virtualCacheSSETransformer
+	if cachePercent > 0 {
+		virtualCache = newVirtualCacheSSETransformerPercent(clientKind, cachePercent)
+	}
 
 	var (
 		anth2oai  *protocol.AnthropicToOpenAIStream
@@ -472,6 +559,9 @@ func (rt *Runtime) forwardStreamIncremental(
 		if !result.Committed && len(result.Body) == 0 && responseBuf.Len() > 0 {
 			result.Body = append([]byte(nil), responseBuf.Bytes()...)
 		}
+		if virtualCache != nil {
+			result.VirtualCacheApplied = virtualCache.Applied()
+		}
 	}()
 
 	stopFirstTimer := func() {
@@ -549,6 +639,13 @@ func (rt *Runtime) forwardStreamIncremental(
 				payload = append(payload, f...)
 			}
 		}
+		if virtualCache != nil {
+			payload = virtualCache.Transform(payload, false)
+			payloadLen = len(payload)
+			if len(payload) == 0 {
+				return nil
+			}
+		}
 		if _, err := c.Writer.Write(payload); err != nil {
 			var rejected *responseRejectedError
 			if errors.As(err, &rejected) {
@@ -581,6 +678,21 @@ func (rt *Runtime) forwardStreamIncremental(
 		return nil
 	}
 
+	flushVirtualCache := func() error {
+		if virtualCache == nil {
+			return nil
+		}
+		payload := virtualCache.Transform(nil, true)
+		if len(payload) == 0 {
+			return nil
+		}
+		if _, err := c.Writer.Write(payload); err != nil {
+			result.ClientDisconnected = true
+			return err
+		}
+		return nil
+	}
+
 	type parsedStreamEvent struct {
 		lines              []string
 		eventName          string
@@ -589,10 +701,19 @@ func (rt *Runtime) forwardStreamIncremental(
 		responsesLifecycle bool
 		upstreamTerminal   bool
 	}
+	var (
+		deferredAnthropicUsage []parsedStreamEvent
+		replayingDeferredUsage bool
+		recoveryAttempted      bool
+		flushDeferredUsage     func() error
+	)
 
 	parseStreamEvent := func(lines []string) parsedStreamEvent {
 		eventName, data, hasPayload := rt.parseSSEEventLinesWithPayload(lines)
 		trimmedData := strings.TrimSpace(data)
+		if strings.TrimSpace(eventName) == "" && upKind == protocol.KindAnthropic && trimmedData != "" {
+			eventName = string(responsesPayloadTypeBytes([]byte(trimmedData)))
+		}
 		terminal := trimmedData == "[DONE]"
 		if !terminal {
 			switch strings.ToLower(strings.TrimSpace(eventName)) {
@@ -627,6 +748,34 @@ func (rt *Runtime) forwardStreamIncremental(
 		}
 	}
 
+	applyRecoveredInput := func(event *parsedStreamEvent) {
+		if event == nil || tokens.InputTokens <= 0 {
+			return
+		}
+		if anth2oai != nil {
+			anth2oai.SetInputTokens(tokens.InputTokens)
+		}
+		if anth2resp != nil {
+			anth2resp.SetInputTokens(tokens.InputTokens)
+		}
+		if upKind != protocol.KindAnthropic {
+			return
+		}
+		if rewritten, changed := rewriteAnthropicStreamUsageInput(event.data, tokens.InputTokens); changed {
+			event.data = rewritten
+			event.lines = replaceSSEEventData(event.lines, rewritten)
+		}
+	}
+
+	recoverAnthropicInput := func() {
+		if upKind != protocol.KindAnthropic || tokens.InputTokens > 0 || recoverInput == nil || recoveryAttempted {
+			return
+		}
+		recoveryAttempted = true
+		result.InputUsageRecoveryAttempted = true
+		tokens = recoverInput(tokens)
+	}
+
 	markFirstToken := func(event parsedStreamEvent) bool {
 		counts := event.hasPayload && (upKind != protocol.KindOpenAIResponses || !event.responsesLifecycle || event.upstreamTerminal)
 		if counts && !sawUpstreamData {
@@ -646,6 +795,31 @@ func (rt *Runtime) forwardStreamIncremental(
 		}
 		upstreamTerminal := event.upstreamTerminal
 		eventName, data := event.eventName, event.data
+		// Chat-compatible converters emit usage on message_delta, while the
+		// actual Anthropic terminal marker arrives in the following message_stop.
+		// Hold that one small usage event until the stream tail so a recovered
+		// input count can be included before any downstream usage frame is sent.
+		if !replayingDeferredUsage && upKind == protocol.KindAnthropic &&
+			strings.EqualFold(strings.TrimSpace(eventName), "message_delta") &&
+			tokens.InputTokens <= 0 && mayContainUsageFields(data, upKind) {
+			// Capture output/cache buckets now so count_tokens can subtract real
+			// cache usage before the deferred event is replayed downstream.
+			rt.mergeStreamUsage(&tokens, data, upKind)
+			deferredAnthropicUsage = append(deferredAnthropicUsage, event)
+			return upstreamTerminal, nil
+		}
+		if upstreamTerminal {
+			if flushDeferredUsage != nil {
+				if err := flushDeferredUsage(); err != nil {
+					return upstreamTerminal, err
+				}
+			}
+			if (anth2resp != nil || virtualCache != nil) && !strings.EqualFold(strings.TrimSpace(eventName), "error") {
+				recoverAnthropicInput()
+			}
+			applyRecoveredInput(&event)
+			data = event.data
+		}
 		appendResponseCapture(data)
 		// 旁路 usage：累积原始 data
 		if data != "" && data != "[DONE]" && mayContainUsageFields(data, upKind) {
@@ -730,6 +904,25 @@ func (rt *Runtime) forwardStreamIncremental(
 		}
 		return upstreamTerminal, err
 	}
+	flushDeferredUsage = func() error {
+		if len(deferredAnthropicUsage) == 0 {
+			return nil
+		}
+		recoverAnthropicInput()
+		deferred := deferredAnthropicUsage
+		deferredAnthropicUsage = nil
+		for index := range deferred {
+			applyRecoveredInput(&deferred[index])
+		}
+		replayingDeferredUsage = true
+		defer func() { replayingDeferredUsage = false }()
+		for _, event := range deferred {
+			if _, err := processEvent(event, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 
 	sendTerminalError := func(errType, msg string) {
 		if errorEventSent || result.ClientDisconnected {
@@ -776,6 +969,9 @@ func (rt *Runtime) forwardStreamIncremental(
 			if err := closeConverters(); err != nil {
 				return err
 			}
+		}
+		if err := flushVirtualCache(); err != nil {
+			return err
 		}
 		result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
 		rt.finalizeStreamClientDisconnect(&result)
@@ -943,6 +1139,18 @@ func (rt *Runtime) forwardStreamIncremental(
 				if upKind == protocol.KindOpenAIResponses && !sawUpstreamData {
 					result.Err = errors.New("upstream Responses stream ended before output or terminal event")
 					return result
+				}
+				if len(deferredAnthropicUsage) > 0 {
+					if err := flushDeferredUsage(); err != nil {
+						if result.Err == nil {
+							result.Err = err
+						}
+						return result
+					}
+				}
+				if (anth2resp != nil || virtualCache != nil) && tokens.InputTokens <= 0 {
+					recoverAnthropicInput()
+					applyRecoveredInput(&parsedStreamEvent{})
 				}
 				if !streamStarted {
 					// 空流

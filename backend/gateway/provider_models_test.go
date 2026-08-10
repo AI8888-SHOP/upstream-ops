@@ -72,6 +72,36 @@ func TestProviderAllowsAndFiltersUpstreamModels(t *testing.T) {
 	}
 }
 
+func TestProviderVirtualCachePercentForModel(t *testing.T) {
+	provider := &storage.GatewayProvider{
+		VirtualCacheEnabled:   true,
+		VirtualCachePercent:   50,
+		VirtualCacheModelsJSON: `[]`,
+	}
+	percent, err := ProviderVirtualCachePercentForModel(provider, "gpt-text")
+	if err != nil || percent != 50 {
+		t.Fatalf("all-model policy percent=%d err=%v", percent, err)
+	}
+	percent, err = ProviderVirtualCachePercentForModel(provider, "")
+	if err != nil || percent != 0 {
+		t.Fatalf("empty model percent=%d err=%v", percent, err)
+	}
+	provider.VirtualCacheModelsJSON = `["gpt-text"]`
+	percent, err = ProviderVirtualCachePercentForModel(provider, "other")
+	if err != nil || percent != 0 {
+		t.Fatalf("filtered model percent=%d err=%v", percent, err)
+	}
+	percent, err = ProviderVirtualCachePercentForModel(provider, "gpt-text")
+	if err != nil || percent != 50 {
+		t.Fatalf("selected model percent=%d err=%v", percent, err)
+	}
+	provider.VirtualCachePercent = 0
+	percent, err = ProviderVirtualCachePercentForModel(provider, "gpt-text")
+	if err != nil || percent != 0 {
+		t.Fatalf("disabled percentage=%d err=%v", percent, err)
+	}
+}
+
 func TestProviderCRUDNormalizesModelsAndInvalidatesCache(t *testing.T) {
 	db := openGatewayTestDB(t)
 	providers := storage.NewGatewayProviders(db)

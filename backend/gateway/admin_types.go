@@ -22,6 +22,7 @@ type CreateGroupInput struct {
 	ModelsMode                        string   `json:"models_mode"`
 	RetryEnabled                      *bool    `json:"retry_enabled"`
 	RetryCount                        *int     `json:"retry_count"`
+	ResponseValidationRetryCount      *int     `json:"response_validation_retry_count"`
 	FailoverEnabled                   *bool    `json:"failover_enabled"`
 	FailoverMax                       *int     `json:"failover_max"`
 	FailoverOn4xx                     *bool    `json:"failover_on_4xx"`
@@ -55,6 +56,7 @@ type UpdateGroupInput struct {
 	ModelsMode                        *string  `json:"models_mode"`
 	RetryEnabled                      *bool    `json:"retry_enabled"`
 	RetryCount                        *int     `json:"retry_count"`
+	ResponseValidationRetryCount      *int     `json:"response_validation_retry_count"`
 	FailoverEnabled                   *bool    `json:"failover_enabled"`
 	FailoverMax                       *int     `json:"failover_max"`
 	FailoverOn4xx                     *bool    `json:"failover_on_4xx"`
@@ -133,6 +135,9 @@ type CreateProviderInput struct {
 	ModelPolicy        string  `json:"model_policy"`
 	AllowedModelsJSON  string  `json:"allowed_models_json"`
 	ConcurrencyLimit   int     `json:"concurrency_limit"`
+	VirtualCacheEnabled   *bool  `json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON string `json:"virtual_cache_models_json"`
+	VirtualCachePercent    *int   `json:"virtual_cache_percent"`
 	DefaultBillingRate float64 `json:"default_billing_rate"`
 	AuthStyle          string  `json:"auth_style"`
 	Enabled            *bool   `json:"enabled"`
@@ -150,6 +155,9 @@ type UpdateProviderInput struct {
 	ModelPolicy        *string  `json:"model_policy"`
 	AllowedModelsJSON  *string  `json:"allowed_models_json"`
 	ConcurrencyLimit   *int     `json:"concurrency_limit"`
+	VirtualCacheEnabled   *bool   `json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON *string `json:"virtual_cache_models_json"`
+	VirtualCachePercent    *int    `json:"virtual_cache_percent"`
 	DefaultBillingRate *float64 `json:"default_billing_rate"`
 	AuthStyle          *string  `json:"auth_style"`
 	Enabled            *bool    `json:"enabled"`

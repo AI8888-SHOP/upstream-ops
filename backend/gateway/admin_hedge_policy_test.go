@@ -85,3 +85,50 @@ func TestCreateAndUpdateGroupHedgePolicyBounds(t *testing.T) {
 		t.Fatal("default hedge_virtual_cache_enabled = true, want false")
 	}
 }
+
+func TestResponseValidationRetryCountIsIndependentAndCompatible(t *testing.T) {
+	db := openGatewayTestDB(t)
+	groups := storage.NewGatewayGroups(db)
+	svc := NewService(
+		groups,
+		storage.NewGatewayKeys(db),
+		storage.NewGatewayRoutes(db),
+		storage.NewGatewayUsageLogs(db),
+		storage.NewModelPriceOverrides(db),
+		storage.NewChannels(db),
+		nil,
+		nil,
+		nil,
+	)
+
+	retryCount := 3
+	responseRetries := 99
+	group, err := svc.CreateGroup(CreateGroupInput{
+		Name:                         "response-retry-policy",
+		RetryCount:                   &retryCount,
+		ResponseValidationRetryCount: &responseRetries,
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if group.RetryCount != 3 || group.ResponseValidationRetryCount != 10 {
+		t.Fatalf("retry policy = retry=%d response=%d, want 3/10", group.RetryCount, group.ResponseValidationRetryCount)
+	}
+
+	zero := 0
+	updated, err := svc.UpdateGroup(group.ID, UpdateGroupInput{ResponseValidationRetryCount: &zero})
+	if err != nil {
+		t.Fatalf("UpdateGroup: %v", err)
+	}
+	if updated.ResponseValidationRetryCount != 0 || updated.RetryCount != 3 {
+		t.Fatalf("updated retry policy = retry=%d response=%d, want 3/0", updated.RetryCount, updated.ResponseValidationRetryCount)
+	}
+
+	defaultGroup, err := svc.CreateGroup(CreateGroupInput{Name: "response-retry-default"})
+	if err != nil {
+		t.Fatalf("CreateGroup default: %v", err)
+	}
+	if defaultGroup.ResponseValidationRetryCount != -1 {
+		t.Fatalf("default response retry count = %d, want -1", defaultGroup.ResponseValidationRetryCount)
+	}
+}

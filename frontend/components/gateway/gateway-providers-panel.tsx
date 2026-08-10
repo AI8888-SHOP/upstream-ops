@@ -53,6 +53,9 @@ type ProviderForm = {
   model_policy: GatewayProviderModelPolicy
   allowed_models: string[]
   concurrency_limit: string
+  virtual_cache_enabled: boolean
+  virtual_cache_models: string[]
+  virtual_cache_percent: string
   enabled: boolean
   proxy_enabled: boolean
   notes: string
@@ -68,6 +71,9 @@ const emptyForm = (): ProviderForm => ({
   model_policy: "all",
   allowed_models: [],
   concurrency_limit: "0",
+  virtual_cache_enabled: false,
+  virtual_cache_models: [],
+  virtual_cache_percent: "0",
   enabled: true,
   proxy_enabled: false,
   notes: "",
@@ -141,6 +147,9 @@ export function GatewayProvidersPanel() {
       model_policy: item.model_policy || "all",
       allowed_models: parseAllowedModels(item.allowed_models_json),
       concurrency_limit: String(item.concurrency_limit ?? 0),
+      virtual_cache_enabled: !!item.virtual_cache_enabled,
+      virtual_cache_models: parseAllowedModels(item.virtual_cache_models_json),
+      virtual_cache_percent: String(item.virtual_cache_percent ?? 0),
       enabled: item.enabled !== false,
       proxy_enabled: !!item.proxy_enabled,
       notes: item.notes || "",
@@ -198,6 +207,11 @@ export function GatewayProvidersPanel() {
       toast.error("并发上限须为 0-4096 的整数")
       return
     }
+    const virtualCachePercent = Number(form.virtual_cache_percent)
+    if (!Number.isInteger(virtualCachePercent) || virtualCachePercent < 0 || virtualCachePercent > 100) {
+      toast.error("虚拟缓存百分比必须是 0-100 的整数")
+      return
+    }
     setBusy(true)
     try {
       if (editing) {
@@ -210,6 +224,9 @@ export function GatewayProvidersPanel() {
           model_policy: form.model_policy,
           allowed_models_json: JSON.stringify(form.allowed_models),
           concurrency_limit: concurrencyLimit,
+          virtual_cache_enabled: form.virtual_cache_enabled,
+          virtual_cache_models_json: JSON.stringify(form.virtual_cache_models),
+          virtual_cache_percent: virtualCachePercent,
           enabled: form.enabled,
           proxy_enabled: form.proxy_enabled,
           notes: form.notes.trim(),
@@ -233,6 +250,9 @@ export function GatewayProvidersPanel() {
             model_policy: form.model_policy,
             allowed_models_json: JSON.stringify(form.allowed_models),
             concurrency_limit: concurrencyLimit,
+            virtual_cache_enabled: form.virtual_cache_enabled,
+            virtual_cache_models_json: JSON.stringify(form.virtual_cache_models),
+            virtual_cache_percent: virtualCachePercent,
             enabled: form.enabled,
             proxy_enabled: form.proxy_enabled,
             notes: form.notes.trim(),
@@ -332,6 +352,7 @@ export function GatewayProvidersPanel() {
                   <TableHead>默认倍率</TableHead>
                   <TableHead>并发</TableHead>
                   <TableHead>模型</TableHead>
+                  <TableHead>虚拟缓存</TableHead>
                   <TableHead>Key</TableHead>
                   <TableHead>代理</TableHead>
                   <TableHead>状态</TableHead>
@@ -341,13 +362,13 @@ export function GatewayProvidersPanel() {
               <TableBody>
                 {loading && items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={10} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={11} className="h-24 text-center text-muted-foreground">
                       <Loader2 className="mx-auto size-4 animate-spin" />
                     </TableCell>
                   </TableRow>
                 ) : items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={10} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={11} className="h-24 text-center text-muted-foreground">
                       暂无直连渠道，点击右上角「新建」添加
                     </TableCell>
                   </TableRow>
@@ -378,6 +399,11 @@ export function GatewayProvidersPanel() {
                         {p.model_policy === "allowlist"
                           ? `白名单 ${parseAllowedModels(p.allowed_models_json).length}`
                           : "全部"}
+                      </TableCell>
+                      <TableCell className="text-xs tabular-nums">
+                        {p.virtual_cache_enabled && (p.virtual_cache_percent ?? 0) > 0
+                          ? `${p.virtual_cache_percent}%`
+                          : "关闭"}
                       </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
                         {p.api_key_hint || "—"}
@@ -656,6 +682,83 @@ export function GatewayProvidersPanel() {
                     }
                     placeholder="每行一个上游模型 ID"
                   />
+                </>
+              ) : null}
+            </div>
+            <div className="space-y-3 rounded-lg border border-border px-3 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <Label>渠道全局虚拟缓存</Label>
+                  <p className="text-[11px] text-muted-foreground">
+                    对该直连渠道返回的文本模型用量按比例标记为缓存读取
+                  </p>
+                </div>
+                <Switch
+                  checked={form.virtual_cache_enabled}
+                  onCheckedChange={(value) =>
+                    setForm({ ...form, virtual_cache_enabled: value })
+                  }
+                />
+              </div>
+              {form.virtual_cache_enabled ? (
+                <>
+                  <div className="space-y-1">
+                    <Label>虚拟缓存比例（%）</Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={form.virtual_cache_percent}
+                      onChange={(event) =>
+                        setForm({ ...form, virtual_cache_percent: event.target.value })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div>
+                      <Label>适用模型</Label>
+                      <p className="text-[11px] text-muted-foreground">
+                        留空表示该渠道允许的全部文本模型；匹配最终映射后的上游模型
+                      </p>
+                    </div>
+                    {availableModels.length > 0 ? (
+                      <div className="grid max-h-40 gap-1 overflow-y-auto rounded border p-2 sm:grid-cols-2">
+                        {availableModels.map((model) => {
+                          const checked = form.virtual_cache_models.includes(model)
+                          return (
+                            <label key={`virtual-${model}`} className="flex min-w-0 items-center gap-2 rounded px-1 py-1 text-xs hover:bg-muted">
+                              <Checkbox
+                                checked={checked}
+                                onCheckedChange={(value) =>
+                                  setForm((prev) => ({
+                                    ...prev,
+                                    virtual_cache_models: value
+                                      ? Array.from(new Set([...prev.virtual_cache_models, model]))
+                                      : prev.virtual_cache_models.filter((item) => item !== model),
+                                  }))
+                                }
+                              />
+                              <span className="truncate" title={model}>{model}</span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                    ) : null}
+                    <Textarea
+                      rows={3}
+                      value={form.virtual_cache_models.join("\n")}
+                      onChange={(event) =>
+                        setForm({
+                          ...form,
+                          virtual_cache_models: Array.from(
+                            new Set(event.target.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)),
+                          ),
+                        })
+                      }
+                      placeholder="每行一个上游模型 ID；留空表示全部"
+                    />
+                  </div>
                 </>
               ) : null}
             </div>

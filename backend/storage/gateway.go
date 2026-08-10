@@ -1877,7 +1877,7 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 				if !hasCompanion {
 					return fmt.Errorf("virtual cache hedge settlement requires a recorded hedge attempt")
 				}
-			case GatewayVirtualCacheReasonResponseRuleFailover:
+				case GatewayVirtualCacheReasonResponseRuleFailover:
 				if usage.AttemptKind != GatewayAttemptKindFailover && usage.AttemptKind != GatewayAttemptKindHedge {
 					return fmt.Errorf("virtual cache response-rule settlement requires a failover or hedge winner")
 				}
@@ -1885,10 +1885,17 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 				if err != nil {
 					return fmt.Errorf("check response-rule companion: %w", err)
 				}
-				if !hasCompanion {
-					return fmt.Errorf("virtual cache response-rule settlement requires a prior rejected route")
-				}
-			default:
+					if !hasCompanion {
+						return fmt.Errorf("virtual cache response-rule settlement requires a prior rejected route")
+					}
+				case GatewayVirtualCacheReasonProviderGlobal:
+					if input.HedgeTriggered {
+						return fmt.Errorf("virtual cache provider settlement cannot be marked as a hedge")
+					}
+					if usage.GatewayProviderID == 0 {
+						return fmt.Errorf("virtual cache provider settlement requires a provider-backed winner")
+					}
+				default:
 				return fmt.Errorf("unsupported virtual cache reason %q", virtualReason)
 			}
 			if input.VirtualCacheReadTokens > usage.InputTokens {

@@ -29,6 +29,7 @@ export type GroupFormState = {
   load_balance_route_count: string
   retry_enabled: boolean
   retry_count: string
+  response_validation_retry_count: string
   failover_enabled: boolean
   failover_max: string
   /** 4xx 状态码也走重试/顺延（默认关） */
@@ -511,6 +512,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   load_balance_route_count: "1",
   retry_enabled: true,
   retry_count: "0",
+  response_validation_retry_count: "-1",
   failover_enabled: true,
   failover_max: "8",
   failover_on_4xx: false,

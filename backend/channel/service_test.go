@@ -460,3 +460,78 @@ func TestChannelGroupMultiplierCRUD(t *testing.T) {
 		t.Fatalf("cleared group multiplier = %v, want nil", *updated.GroupMultiplier)
 	}
 }
+
+func TestChannelRechargeMultiplierChangeClearsCollectedMetrics(t *testing.T) {
+	svc, _ := testService(t)
+	multiplier := 2.0
+	created, err := svc.Create(CreateInput{
+		Name:                   "recharge-metrics",
+		Type:                   storage.ChannelTypeNewAPI,
+		SiteURL:                "https://example.com",
+		Username:               "user",
+		Password:               "password",
+		CredentialMode:         storage.CredentialModePassword,
+		RechargeMultiplier:     &multiplier,
+		RechargeMultiplierMode: connector.RechargeMultiplierModeDivide,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	lastBalance := 10.0
+	todayCost := 2.0
+	totalCost := 20.0
+	created.LastBalance = &lastBalance
+	created.LastBalanceAt = ptrTime(time.Now())
+	created.TodayCost = &todayCost
+	created.TotalCost = &totalCost
+	if err := svc.Channels.Update(created); err != nil {
+		t.Fatalf("seed metrics: %v", err)
+	}
+	renamed := "recharge-metrics-renamed"
+	unchanged, err := svc.Update(created.ID, UpdateInput{Name: &renamed})
+	if err != nil {
+		t.Fatalf("update unrelated field: %v", err)
+	}
+	if unchanged.LastBalance == nil || unchanged.TodayCost == nil || unchanged.TotalCost == nil {
+		t.Fatalf("unrelated update cleared collected metrics: %#v", unchanged)
+	}
+
+	updatedMultiplier := 4.0
+	updated, err := svc.Update(created.ID, UpdateInput{RechargeMultiplier: &updatedMultiplier})
+	if err != nil {
+		t.Fatalf("update multiplier: %v", err)
+	}
+	if updated.LastBalance != nil || updated.LastBalanceAt != nil || updated.TodayCost != nil || updated.TotalCost != nil {
+		t.Fatalf("metrics after multiplier change = balance=%v at=%v today=%v total=%v, want cleared",
+			updated.LastBalance, updated.LastBalanceAt, updated.TodayCost, updated.TotalCost)
+	}
+
+	refetched, err := svc.Channels.FindByID(created.ID)
+	if err != nil {
+		t.Fatalf("refetch: %v", err)
+	}
+	if refetched.LastBalance != nil || refetched.TodayCost != nil || refetched.TotalCost != nil {
+		t.Fatalf("persisted metrics after multiplier change = %#v, want cleared", refetched)
+	}
+
+	refetched.LastBalance = &lastBalance
+	refetched.LastBalanceAt = ptrTime(time.Now())
+	refetched.TodayCost = &todayCost
+	refetched.TotalCost = &totalCost
+	if err := svc.Channels.Update(refetched); err != nil {
+		t.Fatalf("reseed metrics: %v", err)
+	}
+	multiplyMode := connector.RechargeMultiplierModeMultiply
+	updated, err = svc.Update(created.ID, UpdateInput{RechargeMultiplierMode: &multiplyMode})
+	if err != nil {
+		t.Fatalf("update multiplier mode: %v", err)
+	}
+	if updated.LastBalance != nil || updated.LastBalanceAt != nil || updated.TodayCost != nil || updated.TotalCost != nil {
+		t.Fatalf("metrics after multiplier mode change = %#v, want cleared", updated)
+	}
+}
+
+func ptrTime(v time.Time) *time.Time {
+	return &v
+}

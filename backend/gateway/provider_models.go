@@ -88,6 +88,54 @@ func normalizeProviderConcurrencyLimit(limit int) int {
 	return limit
 }
 
+func normalizeProviderVirtualCachePercent(percent int) int {
+	return normalizeVirtualCachePercent(percent)
+}
+
+func NormalizeProviderVirtualCacheModelsJSON(raw string) (string, error) {
+	return NormalizeProviderAllowedModelsJSON(raw)
+}
+
+func ParseProviderVirtualCacheModelsJSON(raw string) ([]string, error) {
+	return ParseProviderAllowedModelsJSON(raw)
+}
+
+func ProviderVirtualCacheAllowsModel(provider *storage.GatewayProvider, upstreamModel string) (bool, error) {
+	percent, err := ProviderVirtualCachePercentForModel(provider, upstreamModel)
+	return percent > 0, err
+}
+
+// ProviderVirtualCachePercentForModel resolves the provider-level policy for
+// the final mapped upstream model. An empty model list means all text models;
+// routing eligibility continues to be controlled independently by
+// allowed_models_json.
+func ProviderVirtualCachePercentForModel(provider *storage.GatewayProvider, upstreamModel string) (int, error) {
+	if provider == nil || !provider.VirtualCacheEnabled {
+		return 0, nil
+	}
+	percent := normalizeProviderVirtualCachePercent(provider.VirtualCachePercent)
+	if percent <= 0 {
+		return 0, nil
+	}
+	models, err := ParseProviderVirtualCacheModelsJSON(provider.VirtualCacheModelsJSON)
+	if err != nil {
+		return 0, err
+	}
+	want := strings.TrimSpace(upstreamModel)
+	if want == "" {
+		return 0, nil
+	}
+	if len(models) == 0 {
+		return percent, nil
+	}
+	for _, model := range models {
+		if model == want {
+			return percent, nil
+		}
+	}
+	return 0, nil
+}
+
 // ProviderAllowsUpstreamModel 判断最终上游模型是否符合直连渠道策略。
 // allowlist 使用大小写敏感的精确模型 ID；空 allowlist 明确拒绝全部模型。
 func ProviderAllowsUpstreamModel(provider *storage.GatewayProvider, upstreamModel string) (bool, error) {

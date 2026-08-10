@@ -66,6 +66,44 @@ func TestBuildVirtualCacheSettlementDoesNotRequireLocalPricing(t *testing.T) {
 	}
 }
 
+func TestBuildProviderVirtualCacheSettlementPreservesUncachedInput(t *testing.T) {
+	const model = "claude-3-7-sonnet-20250219"
+	provider := &storage.GatewayProvider{
+		VirtualCacheEnabled:    true,
+		VirtualCachePercent:    25,
+		VirtualCacheModelsJSON: `[]`,
+	}
+	rt := &Runtime{Service: &Service{Pricing: NewPricingCatalog(nil)}}
+	req := &coordinatedForwardRequest{
+		group:              &storage.GatewayGroup{},
+		virtualCacheReason: storage.GatewayVirtualCacheReasonProviderGlobal,
+		requestedModel:     model,
+	}
+	winner := &coordinatedForwardAttempt{
+		Target:        &upstreamTarget{Provider: provider},
+		UpstreamModel: model,
+		UsageMeta:     usageRecordMeta{UpstreamProtocol: string(protocol.KindAnthropic)},
+		Tokens:        UsageTokens{InputTokens: 100},
+		Plan: coordinatedRoutePlan{Candidate: ScoredRoute{
+			EffectiveRate: 1, BillingRate: 1,
+		}},
+	}
+
+	settlement := rt.buildVirtualCacheSettlement(req, winner)
+	if !settlement.VirtualCacheReadEnabled || settlement.VirtualCacheReadTokens != 25 {
+		t.Fatalf("settlement=%+v, want 25 virtual cache tokens", settlement)
+	}
+	wantCost := CalculateCost(
+		rt.Pricing.Resolve(model),
+		UsageTokens{InputTokens: 75, CacheReadTokens: 25},
+		1,
+		1,
+	).ActualCost
+	if settlement.BilledCost != wantCost {
+		t.Fatalf("billed cost=%v, want partial-cache cost=%v", settlement.BilledCost, wantCost)
+	}
+}
+
 func TestCoordinatedAttemptSuppressesDeterministicSameRouteRetries(t *testing.T) {
 	attempt := &coordinatedForwardAttempt{
 		Status: http.StatusForbidden,
@@ -139,6 +177,41 @@ func TestFinishCoordinatedNonStreamWritesVirtualCacheUsageDownstream(t *testing.
 	}
 	if got := recorder.Header().Get("Content-Length"); got != "" {
 		t.Fatalf("rewritten response retained Content-Length=%q", got)
+	}
+}
+
+func TestFinishCoordinatedNonStreamUsesProviderVirtualCachePercent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	provider := &storage.GatewayProvider{
+		VirtualCacheEnabled:    true,
+		VirtualCachePercent:    25,
+		VirtualCacheModelsJSON: `[]`,
+	}
+	req := &coordinatedForwardRequest{
+		c: context, kind: protocol.KindOpenAIChat, requestedModel: "provider-private-model",
+		group:              &storage.GatewayGroup{},
+		virtualCacheReason: storage.GatewayVirtualCacheReasonProviderGlobal,
+	}
+	winner := &coordinatedForwardAttempt{
+		Info: hedgeAttemptInfo{Number: 1}, Status: http.StatusOK,
+		Target:        &upstreamTarget{Provider: provider},
+		ClientBody:    []byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":100,"completion_tokens":4}}`),
+		UpstreamModel: "provider-private-model",
+		UsageMeta:     usageRecordMeta{UpstreamProtocol: string(protocol.KindOpenAIChat)},
+		Tokens:        UsageTokens{InputTokens: 100, OutputTokens: 4},
+		Plan: coordinatedRoutePlan{Candidate: ScoredRoute{
+			EffectiveRate: 1, BillingRate: 1,
+		}},
+	}
+
+	(&Runtime{Service: &Service{}}).finishCoordinatedNonStream(req, winner, 0)
+
+	tokens := NormalizeUsageBuckets(ParseOpenAIUsage(recorder.Body.Bytes()), protocol.KindOpenAIChat)
+	if tokens.InputTokens != 75 || tokens.CacheReadTokens != 25 || tokens.OutputTokens != 4 {
+		t.Fatalf("downstream usage=%+v, want fresh=75 cache_read=25 output=4; body=%s", tokens, recorder.Body.String())
 	}
 }
 
@@ -506,10 +579,11 @@ func TestBuildCoordinatedRoutePlanValidationSwitchesWithoutFailoverToggle(t *tes
 
 func TestBuildCoordinatedRoutePlanValidationIgnoresZeroTransportBudget(t *testing.T) {
 	group := &storage.GatewayGroup{
-		RetryEnabled:    true,
-		RetryCount:      2,
-		FailoverEnabled: true,
-		FailoverMax:     0,
+		RetryEnabled:                true,
+		RetryCount:                  2,
+		ResponseValidationRetryCount: -1,
+		FailoverEnabled:             true,
+		FailoverMax:                 0,
 	}
 	candidates := []ScoredRoute{
 		{Route: storage.GatewayRoute{ID: 1}},
@@ -525,6 +599,40 @@ func TestBuildCoordinatedRoutePlanValidationIgnoresZeroTransportBudget(t *testin
 			t.Fatalf("plan[%d]=route %d try %d max %d, want route %d try %d max 3", i,
 				entry.Candidate.Route.ID, entry.TryOnRoute, entry.MaxTries, wantRoutes[i], i%3)
 		}
+	}
+}
+
+func TestBuildCoordinatedRoutePlanUsesIndependentResponseRetryBudget(t *testing.T) {
+	group := &storage.GatewayGroup{
+		RetryEnabled:                true,
+		RetryCount:                  3,
+		ResponseValidationRetryCount: 1,
+		FailoverEnabled:             true,
+		FailoverMax:                 0,
+	}
+	candidates := []ScoredRoute{
+		{Route: storage.GatewayRoute{ID: 1}},
+		{Route: storage.GatewayRoute{ID: 2}},
+	}
+	plan := buildCoordinatedRoutePlan(candidates, group, false, true)
+	if len(plan) != 8 {
+		t.Fatalf("validation plan length=%d, want 8", len(plan))
+	}
+	for i, entry := range plan {
+		if entry.MaxTries != 4 || entry.ResponseMaxTries != 2 {
+			t.Fatalf("plan[%d] max tries=%d response max=%d, want 4/2", i, entry.MaxTries, entry.ResponseMaxTries)
+		}
+	}
+	if got := effectiveResponseValidationRetryCount(group); got != 1 {
+		t.Fatalf("effective response retries=%d, want 1", got)
+	}
+	group.ResponseValidationRetryCount = -1
+	if got := effectiveResponseValidationRetryCount(group); got != 3 {
+		t.Fatalf("inherited response retries=%d, want 3", got)
+	}
+	group.ResponseValidationRetryCount = 0
+	if got := effectiveResponseValidationRetryCount(group); got != 0 {
+		t.Fatalf("disabled response retries=%d, want 0", got)
 	}
 }
 
@@ -547,16 +655,76 @@ func TestCoordinatedTransportFailurePolicyKeepsRetryIndependent(t *testing.T) {
 	}
 }
 
-func TestValidateCoordinatedAttemptSkipsExcludedRunningRetry(t *testing.T) {
+func TestValidateCoordinatedAttemptSkipsExcludedPrimary(t *testing.T) {
 	attempt := &coordinatedForwardAttempt{
 		Route:  storage.GatewayRoute{ID: 7},
+		Plan:   coordinatedRoutePlan{TryOnRoute: 0, MaxTries: 2},
 		Status: http.StatusOK,
 	}
 	var excluded sync.Map
 	excluded.Store(uint(7), struct{}{})
-	accepted, err := validateCoordinatedAttempt(attempt, &excluded)
-	if accepted || !errors.Is(err, errSkippedRejectedRoute) {
-		t.Fatalf("accepted=%v err=%v, want excluded retry", accepted, err)
+	accepted, err := validateCoordinatedAttempt(attempt, &excluded, nil)
+	if accepted || !errors.Is(err, errSkippedNonRetryableRoute) {
+		t.Fatalf("accepted=%v err=%v, want excluded primary", accepted, err)
+	}
+}
+
+func TestValidateCoordinatedAttemptAllowsPlannedSameRouteRetryAfterRejection(t *testing.T) {
+	attempt := &coordinatedForwardAttempt{
+		Route:  storage.GatewayRoute{ID: 7},
+		Plan:   coordinatedRoutePlan{TryOnRoute: 1, MaxTries: 2},
+		Status: http.StatusOK,
+	}
+	var excluded sync.Map
+	excluded.Store(uint(7), struct{}{})
+	accepted, err := validateCoordinatedAttempt(attempt, nil, &excluded)
+	if !accepted || err != nil {
+		t.Fatalf("accepted=%v err=%v, want same-route retry to remain eligible", accepted, err)
+	}
+}
+
+func TestValidateCoordinatedAttemptDoesNotRetryHardExcludedRoute(t *testing.T) {
+	attempt := &coordinatedForwardAttempt{
+		Route:  storage.GatewayRoute{ID: 7},
+		Plan:   coordinatedRoutePlan{TryOnRoute: 1, MaxTries: 2},
+		Status: http.StatusOK,
+	}
+	var excluded sync.Map
+	excluded.Store(uint(7), struct{}{})
+	accepted, err := validateCoordinatedAttempt(attempt, &excluded, nil)
+	if accepted || !errors.Is(err, errSkippedNonRetryableRoute) {
+		t.Fatalf("accepted=%v err=%v, want hard exclusion", accepted, err)
+	}
+}
+
+func TestCoordinatedPlanSchedulerPromotesSameRouteRetry(t *testing.T) {
+	group := &storage.GatewayGroup{
+		RetryEnabled:                true,
+		RetryCount:                  1,
+		ResponseValidationRetryCount: -1,
+		HedgeMaxAttempts:            3,
+	}
+	candidates := []ScoredRoute{
+		{Route: storage.GatewayRoute{ID: 1}},
+		{Route: storage.GatewayRoute{ID: 2}},
+	}
+	plan := buildCoordinatedRoutePlan(candidates, group, true, true)
+	if len(plan) != 4 {
+		t.Fatalf("plan length=%d, want full retry plan", len(plan))
+	}
+	scheduler := newCoordinatedPlanScheduler(plan, 3)
+	first := scheduler.reserve(1)
+	if first.Candidate.Route.ID != 1 || first.TryOnRoute != 0 {
+		t.Fatalf("first=%+v, want route 1 primary", first)
+	}
+	scheduler.prioritizeRetry(&coordinatedForwardAttempt{Route: first.Candidate.Route, Plan: first})
+	second := scheduler.reserve(2)
+	if second.Candidate.Route.ID != 1 || second.TryOnRoute != 1 {
+		t.Fatalf("second=%+v, want route 1 retry", second)
+	}
+	third := scheduler.reserve(3)
+	if third.Candidate.Route.ID != 2 || third.TryOnRoute != 0 {
+		t.Fatalf("third=%+v, want route 2 primary after retry", third)
 	}
 }
 

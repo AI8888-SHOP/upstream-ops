@@ -834,6 +834,25 @@ export function GroupFormDialog({
                 </p>
               </div>
             </div>
+            <div className="space-y-1 border-t border-border/60 pt-3">
+              <Label>正则拒绝重试次数</Label>
+              <Input
+                type="number"
+                min={-1}
+                max={10}
+                disabled={!groupForm.retry_enabled || !groupForm.response_validation_enabled}
+                value={groupForm.response_validation_retry_count}
+                onChange={(e) =>
+                  setGroupForm({
+                    ...groupForm,
+                    response_validation_retry_count: e.target.value,
+                  })
+                }
+              />
+              <p className="text-[11px] text-muted-foreground">
+                -1 跟随通用重试次数；0 表示命中正则后不在当前渠道重试；最多 10 次。
+              </p>
+            </div>
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <Label>顺延下一个接口</Label>
@@ -1010,7 +1029,7 @@ export function GroupFormDialog({
                 <div className="min-w-0 flex-1">
                   <Label>正则响应校验</Label>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    命中规则后直接切换其它路由。非流式检查完整响应；流式在提交前检查前缀。
+                    命中规则后先按重试次数重试当前路由，再切换其它路由。非流式检查完整响应；流式在提交前检查前缀。
                   </p>
                 </div>
                 <Switch

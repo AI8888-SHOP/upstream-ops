@@ -12,47 +12,267 @@ import (
 // bucket exposed to the downstream caller. OpenAI total input fields include
 // cache tokens, while Anthropic input_tokens is already the fresh-input bucket.
 func rewriteVirtualCacheResponse(body []byte, kind protocol.Kind) ([]byte, bool) {
-	if len(bytes.TrimSpace(body)) == 0 {
-		return body, false
-	}
-	var payload any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return body, false
-	}
-	changed := rewriteVirtualCacheValue(payload, protocol.NormalizeKind(kind))
+	return rewriteVirtualCacheResponsePercent(body, kind, 100)
+}
+
+// rewriteVirtualCacheResponsePercent moves a percentage of fresh input into
+// the cache-read bucket exposed to the downstream caller.
+func rewriteVirtualCacheResponsePercent(body []byte, kind protocol.Kind, percent int) ([]byte, bool) {
+	rewritten, changed := appendVirtualCacheResponsePercent(nil, nil, body, kind, percent, true, 0)
 	if !changed {
 		return body, false
 	}
-	out, err := json.Marshal(payload)
-	if err != nil {
-		return body, false
+	return rewritten, true
+}
+
+func appendVirtualCacheResponsePercent(dst, prefix, body []byte, kind protocol.Kind, percent int, validateJSON bool, extraCapacity int) ([]byte, bool) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return dst, false
 	}
+	percent = normalizeVirtualCachePercent(percent)
+	if percent <= 0 {
+		return dst, false
+	}
+	if !mayContainVirtualCacheUsageObject(body) || (validateJSON && !json.Valid(body)) {
+		return dst, false
+	}
+	return appendVirtualCacheUsageObjects(dst, prefix, body, protocol.NormalizeKind(kind), percent, extraCapacity)
+}
+
+type virtualCacheJSONSpan struct {
+	start int
+	end   int
+}
+
+var (
+	virtualCacheUsageKey       = []byte("usage")
+	virtualCacheQuotedUsageKey = []byte(`"usage"`)
+	jsonUnicodeEscape          = []byte(`\u`)
+)
+
+// mayContainVirtualCacheUsageObject is narrower than the accounting usage
+// prefilter. Virtual-cache rewriting can only change an object-valued "usage"
+// member, so token field names in ordinary model output are irrelevant.
+func mayContainVirtualCacheUsageObject(data []byte) bool {
+	searchFrom := 0
+	for searchFrom < len(data) {
+		relative := bytes.Index(data[searchFrom:], virtualCacheQuotedUsageKey)
+		if relative < 0 {
+			break
+		}
+		pos := searchFrom + relative + len(virtualCacheQuotedUsageKey)
+		skipJSONSpaceBytes(data, &pos)
+		if pos < len(data) && data[pos] == ':' {
+			pos++
+			skipJSONSpaceBytes(data, &pos)
+			if pos < len(data) && data[pos] == '{' {
+				return true
+			}
+		}
+		searchFrom += relative + len(virtualCacheQuotedUsageKey)
+	}
+	// Preserve support for escaped JSON keys such as us\u0061ge. The escaped-key
+	// scanner below remains authoritative for this uncommon form.
+	return bytes.Contains(data, jsonUnicodeEscape)
+}
+
+func appendVirtualCacheUsageObjects(dst, prefix, body []byte, kind protocol.Kind, percent, extraCapacity int) ([]byte, bool) {
+	spans := findVirtualCacheUsageObjectSpans(body)
+	if len(spans) == 0 {
+		return dst, false
+	}
+	out := dst
+	changed := false
+	cursor := 0
+	for _, span := range spans {
+		var usage map[string]any
+		if err := json.Unmarshal(body[span.start:span.end], &usage); err != nil {
+			continue
+		}
+		if !rewriteVirtualCacheUsagePercent(usage, kind, percent) {
+			continue
+		}
+		rewritten, err := json.Marshal(usage)
+		if err != nil {
+			continue
+		}
+		if !changed {
+			if out == nil {
+				out = make([]byte, 0, len(prefix)+len(body)+len(rewritten)-(span.end-span.start)+extraCapacity)
+			}
+			out = append(out, prefix...)
+		}
+		out = append(out, body[cursor:span.start]...)
+		out = append(out, rewritten...)
+		cursor = span.end
+		changed = true
+	}
+	if !changed {
+		return dst, false
+	}
+	out = append(out, body[cursor:]...)
 	return out, true
 }
 
-func rewriteVirtualCacheValue(value any, kind protocol.Kind) bool {
-	changed := false
-	switch current := value.(type) {
-	case map[string]any:
-		if usage, ok := current["usage"].(map[string]any); ok {
-			changed = rewriteVirtualCacheUsage(usage, kind) || changed
+// findVirtualCacheUsageObjectSpans walks JSON strings without materializing
+// the surrounding response. It skips each matched usage object, matching the
+// old recursive implementation's behavior of not descending into usage data.
+func findVirtualCacheUsageObjectSpans(body []byte) []virtualCacheJSONSpan {
+	literal := findLiteralVirtualCacheUsageObjectSpans(body)
+	if !bytes.Contains(body, jsonUnicodeEscape) {
+		return literal
+	}
+	escaped := findEscapedVirtualCacheUsageObjectSpans(body)
+	return mergeVirtualCacheJSONSpans(literal, escaped)
+}
+
+func findLiteralVirtualCacheUsageObjectSpans(body []byte) []virtualCacheJSONSpan {
+	var spans []virtualCacheJSONSpan
+	for searchFrom := 0; searchFrom < len(body); {
+		relative := bytes.Index(body[searchFrom:], virtualCacheQuotedUsageKey)
+		if relative < 0 {
+			break
 		}
-		for key, child := range current {
-			if key == "usage" {
-				continue
-			}
-			changed = rewriteVirtualCacheValue(child, kind) || changed
+		keyStart := searchFrom + relative
+		searchFrom = keyStart + len(virtualCacheQuotedUsageKey)
+		if jsonQuoteIsEscaped(body, keyStart) {
+			continue
 		}
-	case []any:
-		for _, child := range current {
-			changed = rewriteVirtualCacheValue(child, kind) || changed
+		valueStart := searchFrom
+		skipJSONSpaceBytes(body, &valueStart)
+		if valueStart >= len(body) || body[valueStart] != ':' {
+			continue
+		}
+		valueStart++
+		skipJSONSpaceBytes(body, &valueStart)
+		if valueStart >= len(body) || body[valueStart] != '{' {
+			continue
+		}
+		valueEnd := valueStart
+		if !skipJSONValueBytes(body, &valueEnd) {
+			return nil
+		}
+		spans = append(spans, virtualCacheJSONSpan{start: valueStart, end: valueEnd})
+		searchFrom = valueEnd
+	}
+	return spans
+}
+
+func findEscapedVirtualCacheUsageObjectSpans(body []byte) []virtualCacheJSONSpan {
+	var spans []virtualCacheJSONSpan
+	for searchFrom := 0; searchFrom < len(body); {
+		relative := bytes.IndexByte(body[searchFrom:], ':')
+		if relative < 0 {
+			break
+		}
+		colon := searchFrom + relative
+		searchFrom = colon + 1
+		keyEnd := trimJSONSpaceEnd(body, colon)
+		if keyEnd == 0 || body[keyEnd-1] != '"' || jsonQuoteIsEscaped(body, keyEnd-1) {
+			continue
+		}
+		closingQuote := keyEnd - 1
+		openingQuote := previousUnescapedJSONQuote(body, closingQuote)
+		if openingQuote < 0 {
+			continue
+		}
+		rawKey := body[openingQuote+1 : closingQuote]
+		if !bytes.Contains(rawKey, jsonUnicodeEscape) || !virtualCacheJSONKeyIsUsage(body[openingQuote:keyEnd], rawKey) {
+			continue
+		}
+		valueStart := colon + 1
+		skipJSONSpaceBytes(body, &valueStart)
+		if valueStart >= len(body) || body[valueStart] != '{' {
+			continue
+		}
+		valueEnd := valueStart
+		if !skipJSONValueBytes(body, &valueEnd) {
+			return nil
+		}
+		spans = append(spans, virtualCacheJSONSpan{start: valueStart, end: valueEnd})
+		searchFrom = valueEnd
+	}
+	return spans
+}
+
+func trimJSONSpaceEnd(data []byte, end int) int {
+	for end > 0 {
+		switch data[end-1] {
+		case ' ', '\t', '\r', '\n':
+			end--
+		default:
+			return end
 		}
 	}
-	return changed
+	return end
+}
+
+func previousUnescapedJSONQuote(data []byte, before int) int {
+	for before > 0 {
+		quote := bytes.LastIndexByte(data[:before], '"')
+		if quote < 0 {
+			return -1
+		}
+		if !jsonQuoteIsEscaped(data, quote) {
+			return quote
+		}
+		before = quote
+	}
+	return -1
+}
+
+func mergeVirtualCacheJSONSpans(left, right []virtualCacheJSONSpan) []virtualCacheJSONSpan {
+	if len(left) == 0 {
+		return right
+	}
+	if len(right) == 0 {
+		return left
+	}
+	merged := make([]virtualCacheJSONSpan, 0, len(left)+len(right))
+	for len(left) > 0 || len(right) > 0 {
+		var next virtualCacheJSONSpan
+		if len(right) == 0 || len(left) > 0 && left[0].start <= right[0].start {
+			next, left = left[0], left[1:]
+		} else {
+			next, right = right[0], right[1:]
+		}
+		if len(merged) > 0 && next.start < merged[len(merged)-1].end {
+			continue
+		}
+		merged = append(merged, next)
+	}
+	return merged
+}
+
+func jsonQuoteIsEscaped(data []byte, quote int) bool {
+	backslashes := 0
+	for index := quote - 1; index >= 0 && data[index] == '\\'; index-- {
+		backslashes++
+	}
+	return backslashes%2 != 0
+}
+
+func virtualCacheJSONKeyIsUsage(quoted, raw []byte) bool {
+	if bytes.Equal(raw, virtualCacheUsageKey) {
+		return true
+	}
+	if bytes.IndexByte(raw, '\\') < 0 {
+		return false
+	}
+	var key string
+	return json.Unmarshal(quoted, &key) == nil && key == "usage"
 }
 
 func rewriteVirtualCacheUsage(usage map[string]any, kind protocol.Kind) bool {
+	return rewriteVirtualCacheUsagePercent(usage, kind, 100)
+}
+
+func rewriteVirtualCacheUsagePercent(usage map[string]any, kind protocol.Kind, percent int) bool {
 	if usage == nil {
+		return false
+	}
+	percent = normalizeVirtualCachePercent(percent)
+	if percent <= 0 {
 		return false
 	}
 	switch protocol.NormalizeKind(kind) {
@@ -61,17 +281,25 @@ func rewriteVirtualCacheUsage(usage map[string]any, kind protocol.Kind) bool {
 		if fresh <= 0 {
 			return false
 		}
-		usage["input_tokens"] = 0
-		usage["cache_read_input_tokens"] = max0(mapInt(usage, "cache_read_input_tokens")) + fresh
+		virtual := virtualCacheTokenPercent(fresh, percent)
+		if virtual <= 0 {
+			return false
+		}
+		usage["input_tokens"] = fresh - virtual
+		usage["cache_read_input_tokens"] = max0(mapInt(usage, "cache_read_input_tokens")) + virtual
 		return true
 	case protocol.KindOpenAIResponses:
-		return rewriteOpenAIVirtualCacheUsage(usage)
+		return rewriteOpenAIVirtualCacheUsagePercent(usage, percent)
 	default:
-		return rewriteOpenAIVirtualCacheUsage(usage)
+		return rewriteOpenAIVirtualCacheUsagePercent(usage, percent)
 	}
 }
 
 func rewriteOpenAIVirtualCacheUsage(usage map[string]any) bool {
+	return rewriteOpenAIVirtualCacheUsagePercent(usage, 100)
+}
+
+func rewriteOpenAIVirtualCacheUsagePercent(usage map[string]any, percent int) bool {
 	// Match Sub2API's compatibility parser exactly: input_tokens wins when it
 	// is positive, otherwise prompt_tokens is the fallback. Some OpenAI-compatible
 	// providers return the opposite alias for the requested endpoint.
@@ -95,7 +323,11 @@ func rewriteOpenAIVirtualCacheUsage(usage map[string]any) bool {
 	if fresh <= 0 {
 		return false
 	}
-	virtualCacheRead := cacheRead + fresh
+	virtual := virtualCacheTokenPercent(fresh, percent)
+	if virtual <= 0 {
+		return false
+	}
+	virtualCacheRead := cacheRead + virtual
 	// Keep the canonical top-level aliases coherent with the nested details.
 	// Sub2API currently prefers *_tokens_details, while other OpenAI-compatible
 	// clients read one of these top-level fields instead.
@@ -130,6 +362,29 @@ func rewriteOpenAIVirtualCacheUsage(usage map[string]any) bool {
 	return true
 }
 
+func normalizeVirtualCachePercent(percent int) int {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
+func virtualCacheTokenPercent(fresh, percent int) int {
+	if fresh <= 0 || percent <= 0 {
+		return 0
+	}
+	percent = normalizeVirtualCachePercent(percent)
+	// Token counts are normally small, but avoid an integer overflow if a
+	// malformed upstream usage value is received.
+	if percent > 0 && fresh > int(^uint(0)>>1)/percent {
+		return fresh
+	}
+	return fresh * percent / 100
+}
+
 // Sub2API treats the first present nested creation alias as authoritative,
 // including an explicit zero. If a provider also supplies a positive top-level
 // compatibility field, update that first nested alias so the downstream parser
@@ -157,36 +412,45 @@ func syncOpenAICacheCreationDetails(usage map[string]any, cacheCreation int) {
 // rewritten when Finish is called.
 type virtualCacheSSETransformer struct {
 	kind    protocol.Kind
+	percent int
 	pending []byte
 	applied bool
 }
 
 func newVirtualCacheSSETransformer(kind protocol.Kind) *virtualCacheSSETransformer {
-	return &virtualCacheSSETransformer{kind: protocol.NormalizeKind(kind)}
+	return newVirtualCacheSSETransformerPercent(kind, 100)
+}
+
+func newVirtualCacheSSETransformerPercent(kind protocol.Kind, percent int) *virtualCacheSSETransformer {
+	return &virtualCacheSSETransformer{
+		kind:    protocol.NormalizeKind(kind),
+		percent: normalizeVirtualCachePercent(percent),
+	}
 }
 
 func (t *virtualCacheSSETransformer) Transform(payload []byte, final bool) []byte {
 	if t == nil {
 		return payload
 	}
-	// Most stream chunks are complete content events and contain no usage
-	// fields. When no prior partial event is pending, return those bytes
-	// untouched; this avoids both the pending-buffer copy and bytes.Buffer
-	// allocation on the hottest write path. A possible usage marker is still
-	// buffered so a marker split across network writes cannot be missed.
-	if len(t.pending) == 0 && len(payload) > 0 && !mayContainUsageFieldsBytes(payload, protocolKind(t.kind)) {
-		if final || lastSSEEventEnd(payload) == len(payload) {
-			return payload
+	// Runtime writes normally contain complete SSE events. Transform those
+	// directly so a large terminal Responses frame is never copied into pending
+	// and then copied again through bytes.Buffer.
+	if len(t.pending) == 0 && len(payload) > 0 {
+		end := lastSSEEventEnd(payload)
+		if end == len(payload) {
+			return t.transformCompleteEvents(payload)
 		}
-		if end := lastSSEEventEnd(payload); end > 0 {
-			t.pending = append(t.pending[:0], payload[end:]...)
-			return payload[:end]
+		if !mayContainVirtualCacheUsageObject(payload) {
+			if final {
+				return payload
+			}
+			if end > 0 {
+				t.pending = append(t.pending[:0], payload[end:]...)
+				return payload[:end]
+			}
+			t.pending = append(t.pending[:0], payload...)
+			return nil
 		}
-		if final {
-			return payload
-		}
-		t.pending = append(t.pending[:0], payload...)
-		return nil
 	}
 	t.pending = append(t.pending, payload...)
 	var out bytes.Buffer
@@ -196,16 +460,16 @@ func (t *virtualCacheSSETransformer) Transform(payload []byte, final bool) []byt
 			break
 		}
 		event := t.pending[:end]
-		rewritten := rewriteVirtualCacheSSEEvent(event, separator, t.kind)
-		if !bytes.Equal(rewritten, event) {
+		rewritten, changed := rewriteVirtualCacheSSEEventPercent(event, separator, t.kind, t.percent)
+		if changed {
 			t.applied = true
 		}
 		out.Write(rewritten)
 		t.pending = t.pending[end:]
 	}
 	if final && len(t.pending) > 0 {
-		rewritten := rewriteVirtualCacheSSEEvent(t.pending, nil, t.kind)
-		if !bytes.Equal(rewritten, t.pending) {
+		rewritten, changed := rewriteVirtualCacheSSEEventPercent(t.pending, nil, t.kind, t.percent)
+		if changed {
 			t.applied = true
 		}
 		out.Write(rewritten)
@@ -214,12 +478,57 @@ func (t *virtualCacheSSETransformer) Transform(payload []byte, final bool) []byt
 	return out.Bytes()
 }
 
+func (t *virtualCacheSSETransformer) transformCompleteEvents(payload []byte) []byte {
+	if !mayContainVirtualCacheUsageObject(payload) {
+		return payload
+	}
+	var out []byte
+	for cursor := 0; cursor < len(payload); {
+		end, separator := nextSSEEventBoundary(payload[cursor:])
+		if end < 0 {
+			if out == nil {
+				return payload
+			}
+			return append(out, payload[cursor:]...)
+		}
+		event := payload[cursor : cursor+end]
+		rewritten, changed := rewriteVirtualCacheSSEEventPercent(event, separator, t.kind, t.percent)
+		if changed {
+			t.applied = true
+			if out == nil && cursor == 0 && end == len(payload) {
+				return rewritten
+			}
+			if out == nil {
+				out = make([]byte, 0, len(payload))
+				out = append(out, payload[:cursor]...)
+			}
+			out = append(out, rewritten...)
+		} else if out != nil {
+			out = append(out, event...)
+		}
+		cursor += end
+	}
+	if out == nil {
+		return payload
+	}
+	return out
+}
+
+var (
+	sseLFSeparator   = []byte("\n\n")
+	sseCRLFSeparator = []byte("\r\n\r\n")
+	sseDataPrefix    = []byte("data:")
+)
+
 func lastSSEEventEnd(payload []byte) int {
 	if len(payload) == 0 {
 		return 0
 	}
-	lf := bytes.LastIndex(payload, []byte("\n\n"))
-	crlf := bytes.LastIndex(payload, []byte("\r\n\r\n"))
+	if bytes.HasSuffix(payload, sseCRLFSeparator) || bytes.HasSuffix(payload, sseLFSeparator) {
+		return len(payload)
+	}
+	lf := bytes.LastIndex(payload, sseLFSeparator)
+	crlf := bytes.LastIndex(payload, sseCRLFSeparator)
 	end := 0
 	if lf >= 0 {
 		end = lf + 2
@@ -235,31 +544,51 @@ func (t *virtualCacheSSETransformer) Applied() bool {
 }
 
 func nextSSEEventBoundary(payload []byte) (int, []byte) {
-	lf := bytes.Index(payload, []byte("\n\n"))
-	crlf := bytes.Index(payload, []byte("\r\n\r\n"))
+	lf := bytes.Index(payload, sseLFSeparator)
+	crlf := bytes.Index(payload, sseCRLFSeparator)
 	switch {
 	case lf < 0 && crlf < 0:
 		return -1, nil
 	case crlf >= 0 && (lf < 0 || crlf < lf):
-		return crlf + 4, []byte("\r\n\r\n")
+		return crlf + len(sseCRLFSeparator), sseCRLFSeparator
 	default:
-		return lf + 2, []byte("\n\n")
+		return lf + len(sseLFSeparator), sseLFSeparator
 	}
 }
 
 func rewriteVirtualCacheSSEEvent(event, separator []byte, kind protocol.Kind) []byte {
+	rewritten, _ := rewriteVirtualCacheSSEEventPercent(event, separator, kind, 100)
+	return rewritten
+}
+
+func rewriteVirtualCacheSSEEventPercent(event, separator []byte, kind protocol.Kind, percent int) ([]byte, bool) {
 	body := event
 	if len(separator) > 0 && len(body) >= len(separator) {
 		body = body[:len(body)-len(separator)]
 	}
-	lineEnding := "\n"
-	if bytes.Contains(body, []byte("\r\n")) || bytes.Equal(separator, []byte("\r\n\r\n")) {
-		lineEnding = "\r\n"
-	}
 	// Most events are content deltas. Filter before splitting data lines so the
-	// virtual-cache writer adds only a cheap marker scan to those hot writes.
-	if !mayContainUsageFieldsBytes(body, protocolKind(kind)) {
-		return event
+	// virtual-cache writer adds only one targeted marker scan to hot writes.
+	if !mayContainVirtualCacheUsageObject(body) {
+		return event, false
+	}
+	if dataStart, dataEnd, ok := singleSSEDataPayload(body); ok {
+		data := body[dataStart:dataEnd]
+		if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+			return event, false
+		}
+		result, changed := appendVirtualCacheResponsePercent(nil, event[:dataStart], data, kind, percent, false, len(event)-dataEnd)
+		if !changed {
+			return event, false
+		}
+		result = append(result, event[dataEnd:]...)
+		return result, true
+	}
+
+	// Multiline data events are legal but uncommon. Retain the compatibility
+	// path that joins their data fields before rewriting.
+	lineEnding := "\n"
+	if bytes.Contains(body, []byte("\r\n")) || bytes.Equal(separator, sseCRLFSeparator) {
+		lineEnding = "\r\n"
 	}
 	rawBody := string(body)
 	normalized := strings.ReplaceAll(rawBody, "\r\n", "\n")
@@ -276,15 +605,15 @@ func rewriteVirtualCacheSSEEvent(event, separator []byte, kind protocol.Kind) []
 		dataParts = append(dataParts, part)
 	}
 	if len(dataIndexes) == 0 {
-		return event
+		return event, false
 	}
 	data := strings.Join(dataParts, "\n")
 	if strings.TrimSpace(data) == "[DONE]" {
-		return event
+		return event, false
 	}
-	rewritten, changed := rewriteVirtualCacheResponse([]byte(data), kind)
+	rewritten, changed := rewriteVirtualCacheResponsePercent([]byte(data), kind, percent)
 	if !changed {
-		return event
+		return event, false
 	}
 	firstData := dataIndexes[0]
 	lines[firstData] = "data: " + string(rewritten)
@@ -293,5 +622,40 @@ func rewriteVirtualCacheSSEEvent(event, separator []byte, kind protocol.Kind) []
 		lines = append(lines[:lineIndex], lines[lineIndex+1:]...)
 	}
 	result := []byte(strings.Join(lines, lineEnding))
-	return append(result, separator...)
+	return append(result, separator...), true
+}
+
+// singleSSEDataPayload returns the payload span for the common one-data-line
+// event. Multiple data lines fall back to the compatibility join above.
+func singleSSEDataPayload(body []byte) (start, end int, ok bool) {
+	start = -1
+	for lineStart := 0; lineStart <= len(body); {
+		relativeEnd := bytes.IndexByte(body[lineStart:], '\n')
+		lineEnd := len(body)
+		nextLine := len(body) + 1
+		if relativeEnd >= 0 {
+			lineEnd = lineStart + relativeEnd
+			nextLine = lineEnd + 1
+		}
+		contentEnd := lineEnd
+		if contentEnd > lineStart && body[contentEnd-1] == '\r' {
+			contentEnd--
+		}
+		line := body[lineStart:contentEnd]
+		if bytes.HasPrefix(line, sseDataPrefix) {
+			if start >= 0 {
+				return 0, 0, false
+			}
+			start = lineStart + len(sseDataPrefix)
+			if start < contentEnd && body[start] == ' ' {
+				start++
+			}
+			end = contentEnd
+		}
+		if relativeEnd < 0 {
+			break
+		}
+		lineStart = nextLine
+	}
+	return start, end, start >= 0
 }

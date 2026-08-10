@@ -1158,7 +1158,11 @@ function TokenCell({ u }: { u: GatewayUsageLog }) {
   const reasoning = u.reasoning_tokens ?? 0
   const virtualCacheRead = u.virtual_cache_read_tokens ?? 0
   const virtualCacheLabel =
-    u.virtual_cache_reason === "response_rule_failover" ? "正则顺延 virtual read" : "并发兜底 virtual read"
+    u.virtual_cache_reason === "response_rule_failover"
+      ? "正则顺延 virtual read"
+      : u.virtual_cache_reason === "provider_global"
+        ? "渠道级 virtual read"
+        : "并发兜底 virtual read"
   const inputTokens = Math.max(0, (u.input_tokens || 0) - virtualCacheRead)
   return (
     <div className="flex items-start gap-1.5">
@@ -1261,7 +1265,11 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
   const actual = u.actual_cost || 0
   const virtualCacheRead = u.virtual_cache_read_tokens ?? 0
   const virtualCacheLabel =
-    u.virtual_cache_reason === "response_rule_failover" ? "正则顺延 virtual read" : "并发兜底 virtual read"
+    u.virtual_cache_reason === "response_rule_failover"
+      ? "正则顺延 virtual read"
+      : u.virtual_cache_reason === "provider_global"
+        ? "渠道级 virtual read"
+        : "并发兜底 virtual read"
   const billed = u.billed_cost ?? 0
   const displayed = u.winner && (billed > 0 || virtualCacheRead > 0) ? billed : actual
   const virtualCacheSubsidy =
