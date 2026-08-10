@@ -394,6 +394,11 @@ func TestProtocolMatrix_TrueStreamAllDirections(t *testing.T) {
 			)
 
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/messages/count_tokens" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"input_tokens":1}`)
+					return
+				}
 				mu.Lock()
 				gotPath = r.URL.Path
 				gotBody, _ = io.ReadAll(r.Body)

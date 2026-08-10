@@ -107,6 +107,10 @@ type streamAttemptResult struct {
 	Body               []byte
 	FirstTokenMS       *int64
 	Tokens             UsageTokens
+	// InputUsageRecoveryAttempted prevents the outer accounting path from
+	// issuing a second count_tokens request after the stream already tried to
+	// repair a missing Anthropic input count.
+	InputUsageRecoveryAttempted bool
 	Committed          bool
 	ClientDisconnected bool
 	DownstreamComplete bool

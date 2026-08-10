@@ -39,6 +39,21 @@ func NewAnthropicToOpenAIStream(model string) *AnthropicToOpenAIStream {
 	}
 }
 
+// SetInputTokens supplies a recovered request count before the terminal usage
+// chunk is emitted. Some Anthropic-compatible streams report output usage but
+// leave input_tokens at zero; keep a positive upstream value authoritative.
+func (s *AnthropicToOpenAIStream) SetInputTokens(input int) {
+	if s == nil || input <= 0 {
+		return
+	}
+	if s.usage == nil {
+		s.usage = make(map[string]any)
+	}
+	if value, ok := asInt(s.usage["input_tokens"]); !ok || value <= 0 {
+		s.usage["input_tokens"] = input
+	}
+}
+
 // Feed 处理一个完整 SSE 事件的 data 载荷（及可选 event 名）。
 func (s *AnthropicToOpenAIStream) Feed(eventName, data string) [][]byte {
 	if s == nil || s.done {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/bejix/upstream-ops/backend/gateway/protocol"
@@ -124,4 +125,72 @@ func streamUsageProviderID(target *upstreamTarget) uint {
 		return target.Provider.ID
 	}
 	return 0
+}
+
+// rewriteAnthropicStreamUsageInput fills only missing input_tokens fields in
+// an Anthropic SSE payload. Usage may be nested under message.usage or exposed
+// at the event root; compatible providers use both shapes.
+func rewriteAnthropicStreamUsageInput(data string, input int) (string, bool) {
+	if strings.TrimSpace(data) == "" || input <= 0 {
+		return data, false
+	}
+	var root any
+	if err := json.Unmarshal([]byte(data), &root); err != nil {
+		return data, false
+	}
+	changed := false
+	var visit func(any)
+	visit = func(value any) {
+		switch node := value.(type) {
+		case map[string]any:
+			if usage, ok := node["usage"].(map[string]any); ok {
+				if _, exists := usage["input_tokens"]; !exists || mapInt(usage, "input_tokens") <= 0 {
+					usage["input_tokens"] = input
+					changed = true
+				}
+			}
+			for _, child := range node {
+				visit(child)
+			}
+		case []any:
+			for _, child := range node {
+				visit(child)
+			}
+		}
+	}
+	visit(root)
+	if !changed {
+		return data, false
+	}
+	rewritten, err := json.Marshal(root)
+	if err != nil {
+		return data, false
+	}
+	return string(rewritten), true
+}
+
+// replaceSSEEventData keeps event/id/retry lines intact while replacing the
+// JSON data payload after a recovered usage count has been applied.
+func replaceSSEEventData(lines []string, data string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines)+1)
+	inserted := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "data:") {
+			if !inserted {
+				for _, part := range strings.Split(data, "\n") {
+					out = append(out, "data: "+part)
+				}
+				inserted = true
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	if !inserted {
+		out = append(out, "data: "+data)
+	}
+	return out
 }

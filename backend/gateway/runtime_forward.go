@@ -327,6 +327,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					streamErr          error
 					clientDisconnected bool
 					streamVirtualCacheApplied bool
+					streamInputUsageRecoveryAttempted bool
 			)
 			if stream {
 				// 真流式：边读上游 SSE 边写客户端。Committed 后禁止 retry/failover。
@@ -344,6 +345,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					streamErr = res.StreamErr
 					clientDisconnected = res.ClientDisconnected
 					streamVirtualCacheApplied = res.VirtualCacheApplied
+					streamInputUsageRecoveryAttempted = res.InputUsageRecoveryAttempted
 			} else {
 				status, respHeaders, respBody, firstTokenMS, fwdErr = rt.forwardOnce(
 					c.Request.Context(), c, target, upstreamPath, c.Request.Method, c.Request.Header, fwdBody, false, upstreamKind, attemptFTTimeout,
@@ -358,7 +360,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				onlyClientDisconnect := rt.isClientDisconnectAfterCommit(clientDisconnected, streamErr)
 				// 仅客户端断开仍算业务成功；真实 stream 错误才算失败。
 				success := streamErr == nil || onlyClientDisconnect
-				if success && streamTokens.InputTokens == 0 {
+				if success && streamTokens.InputTokens == 0 && !streamInputUsageRecoveryAttempted {
 					streamTokens = rt.recoverMissingStreamInputTokens(
 						c.Request.Context(), c, target, fwdBody, upstreamKind, streamTokens,
 					)

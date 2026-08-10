@@ -53,6 +53,16 @@ func NewAnthropicToResponsesStream(model string) *AnthropicToResponsesStream {
 	}
 }
 
+// SetInputTokens supplies a recovered request count before response.completed
+// is generated. This preserves usage for providers that omit input_tokens from
+// their streaming message_delta.
+func (s *AnthropicToResponsesStream) SetInputTokens(input int) {
+	if s == nil || input <= 0 || s.inputTokens > 0 {
+		return
+	}
+	s.inputTokens = input
+}
+
 func (s *AnthropicToResponsesStream) Feed(eventName, data string) [][]byte {
 	if s == nil || s.done || s.completedSent {
 		return nil
