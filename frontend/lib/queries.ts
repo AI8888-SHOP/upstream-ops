@@ -12,6 +12,7 @@ import type {
   CostTrendPoint,
   DashboardSummary,
   GatewayUsageStats,
+  GatewayCacheHealthResponse,
   NotificationChannel,
   NotificationLogPage,
   RateChangeLogPage,
@@ -146,6 +147,10 @@ export function useGatewayUsageStatsToday() {
   const { from, to } = localDayRangeISO()
   const qs = new URLSearchParams({ from, to, include_endpoints: "0" })
   return useApi<GatewayUsageStats>(`/gateway/usage/stats?${qs}`)
+}
+
+export function useGatewayCacheHealth(sourceKind: "provider" | "monitor" = "provider") {
+  return useApi<GatewayCacheHealthResponse>(`/gateway/cache-health?source_kind=${sourceKind}`)
 }
 
 export function useAppVersion() {

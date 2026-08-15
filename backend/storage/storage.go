@@ -243,6 +243,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&GatewayKey{},
 		&GatewayRoute{},
 		&GatewayRouteModelCooldown{},
+		&GatewayChannelCacheHealth{},
 		&GatewayProvider{},
 		&GatewayResponseRule{},
 		&GatewayUsageLog{},
@@ -271,6 +272,8 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		{name: "idx_gateway_usage_request_key_winner", columns: "request_id, gateway_key_id, winner"},
 		{name: "idx_gateway_usage_key_created", columns: "gateway_key_id, created_at"},
 		{name: "idx_gateway_usage_group_created", columns: "gateway_group_id, created_at"},
+		{name: "idx_gateway_usage_provider_created", columns: "gateway_provider_id, created_at"},
+		{name: "idx_gateway_usage_channel_created", columns: "channel_id, created_at"},
 	}
 	for _, definition := range definitions {
 		if err := ensureGatewayUsageIndex(db, definition.name, definition.columns); err != nil {

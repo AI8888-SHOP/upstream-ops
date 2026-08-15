@@ -29,3 +29,14 @@ func TestParseGatewayUsageQueryAllowsFrontendAggregateOptOut(t *testing.T) {
 		t.Fatalf("explicit aggregate opt-out = sum=%v endpoints=%v, want both disabled", query.IncludeSum, query.IncludeEndpoints)
 	}
 }
+
+func TestParseGatewayUsageQueryAcceptsProviderFilter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	request := httptest.NewRequest("GET", "/api/gateway/usage/stats?provider_id=42", nil)
+	context, _ := gin.CreateTestContext(httptest.NewRecorder())
+	context.Request = request
+	query := parseGatewayUsageQuery(context)
+	if query.GatewayProviderID != 42 {
+		t.Fatalf("provider id = %d, want 42", query.GatewayProviderID)
+	}
+}

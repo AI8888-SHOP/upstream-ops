@@ -298,6 +298,10 @@ export interface SystemGatewayConfig {
   usageErrorMsgRunes: number
   usageErrorHeaderValueRunes: number
   usageErrorHeadersJSONBytes: number
+  cacheHitRateWindowMinutes: number
+  cacheHitRateThresholdPercent: number
+  cacheHitRateBlacklistMinutes: number
+  cacheHitRateMinimumRequests: number
   hedge: {
     enabled: boolean
     delaySeconds: number
@@ -745,8 +749,35 @@ export interface GatewayProvider {
   proxy_enabled?: boolean
   extra_headers?: string
   notes?: string
+  cache_hit_rate?: number
+  cache_health_request_count?: number
+  cache_health_input_tokens?: number
+  cache_health_read_tokens?: number
+  cache_health_creation_tokens?: number
+  cache_health_evaluated_at?: string
+  cache_health_blacklisted_until?: string
+  cache_health_blacklist_reason?: string
   created_at: string
   updated_at: string
+}
+
+export interface GatewayCacheHealthStat {
+  source_kind: GatewayRouteSourceKind
+  source_id: number
+  hit_rate: number
+  request_count: number
+  input_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  window_start: string
+  evaluated_at?: string
+  blacklisted_until?: string
+  blacklist_reason?: string
+}
+
+export interface GatewayCacheHealthResponse {
+  items: GatewayCacheHealthStat[]
+  enabled: boolean
 }
 
 /** 路由 User-Agent：透传客户端 / 用组 UA / 路由自定义 */
@@ -822,6 +853,11 @@ export interface GatewayRoute {
   temp_unschedulable_at?: string | null
   /** 最近一次触发暂停的网关 request_id（与使用记录关联） */
   temp_unschedulable_request_id?: string
+  cache_health_hit_rate?: number
+  cache_health_request_count?: number
+  cache_health_evaluated_at?: string | null
+  cache_health_blacklisted_until?: string | null
+  cache_health_blacklist_reason?: string
   model_cooldowns?: Record<string, GatewayRouteModelCooldown>
   created_at: string
   updated_at: string
@@ -1048,6 +1084,11 @@ export interface GatewayUsageStats {
   total_cache_creation_tokens: number
   /** Actual upstream cache reads plus gateway virtual hedge credits. */
   total_cache_read_tokens: number
+  /** Real upstream cache hit rate; virtual cache credits are excluded. */
+  cache_hit_rate?: number
+  cache_health_input_tokens?: number
+  cache_health_read_tokens?: number
+  cache_health_creation_tokens?: number
   total_tokens: number
   total_cost: number
   total_actual_cost: number

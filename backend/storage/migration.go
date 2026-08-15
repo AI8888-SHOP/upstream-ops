@@ -95,6 +95,7 @@ var gatewayMigrationModels = []migrationModelSpec{
 	{table: "gateway_keys", model: &GatewayKey{}},
 	{table: "gateway_routes", model: &GatewayRoute{}},
 	{table: "gateway_route_model_cooldowns", model: &GatewayRouteModelCooldown{}},
+	{table: "gateway_channel_cache_health", model: &GatewayChannelCacheHealth{}},
 	{table: "gateway_providers", model: &GatewayProvider{}},
 	{table: "gateway_response_rules", model: &GatewayResponseRule{}},
 	{table: "gateway_usage_logs", model: &GatewayUsageLog{}},

@@ -42,18 +42,18 @@ type ChannelAPI interface {
 // Service 网关领域服务组装根。
 // 管理面操作见 Admin；数据面转发见 Runtime；公开方法多为委托以保持调用方兼容。
 type Service struct {
-	Groups     *storage.GatewayGroups
-	Keys       *storage.GatewayKeys
-	Routes     *storage.GatewayRoutes
+	Groups        *storage.GatewayGroups
+	Keys          *storage.GatewayKeys
+	Routes        *storage.GatewayRoutes
 	ResponseRules *storage.GatewayResponseRules
-	Providers  *storage.GatewayProviders
-	Usage      *storage.GatewayUsageLogs
-	Prices     *storage.ModelPriceOverrides
-	Channels   *storage.Channels
-	ChannelAPI ChannelAPI
-	Cipher     *crypto.Cipher
-	Pricing    *PricingCatalog
-	Log        *slog.Logger
+	Providers     *storage.GatewayProviders
+	Usage         *storage.GatewayUsageLogs
+	Prices        *storage.ModelPriceOverrides
+	Channels      *storage.Channels
+	ChannelAPI    ChannelAPI
+	Cipher        *crypto.Cipher
+	Pricing       *PricingCatalog
+	Log           *slog.Logger
 
 	// Admin 管理面；嵌入 *Service 共享依赖。
 	Admin *AdminService
@@ -65,10 +65,10 @@ type Service struct {
 	// httpTransports is keyed by the effective proxy URL. A blank key is the
 	// direct/environment-proxy transport. Clients remain cheap per-request,
 	// while their transports retain idle connections across attempts.
-	httpTransportsMu sync.Mutex
-	httpTransports   map[string]*http.Transport
-	loadBalanceMu         sync.RWMutex
-	loadBalanceStates     map[loadBalancePoolKey]*loadBalancePoolState
+	httpTransportsMu  sync.Mutex
+	httpTransports    map[string]*http.Transport
+	loadBalanceMu     sync.RWMutex
+	loadBalanceStates map[loadBalancePoolKey]*loadBalancePoolState
 
 	mu          sync.RWMutex
 	proxyConfig config.ProxyConfig
@@ -89,9 +89,14 @@ type Service struct {
 
 	// routeAffinities keeps short-lived session-to-route bindings so a cooled
 	// route can receive one controlled recovery probe for its own conversation.
-	routeAffinityMu sync.Mutex
-	routeAffinities map[routeAffinityKey]routeAffinityEntry
+	routeAffinityMu          sync.Mutex
+	routeAffinities          map[routeAffinityKey]routeAffinityEntry
 	routeAffinityLastCleanup time.Time
+
+	// cacheHealthPending coalesces evaluator jobs so a burst of requests on a
+	// channel never turns the usage write path into a query storm.
+	cacheHealthMu      sync.Mutex
+	cacheHealthPending map[cacheHealthSourceKey]time.Time
 }
 
 type modelsCacheEntry struct {
@@ -117,24 +122,25 @@ func NewService(
 	log *slog.Logger,
 ) *Service {
 	s := &Service{
-		Groups:             groups,
-		Keys:               keys,
-		Routes:             routes,
-		Usage:              usage,
-		Prices:             prices,
-		Channels:           channels,
-		ChannelAPI:         channelAPI,
-		Cipher:             cipher,
-		Pricing:            NewPricingCatalog(prices),
-		Log:                log,
-		gatewayCfg:         config.GatewayConfig{}.WithDefaults(),
-		modelsCache:        map[uint]modelsCacheEntry{},
+		Groups:                 groups,
+		Keys:                   keys,
+		Routes:                 routes,
+		Usage:                  usage,
+		Prices:                 prices,
+		Channels:               channels,
+		ChannelAPI:             channelAPI,
+		Cipher:                 cipher,
+		Pricing:                NewPricingCatalog(prices),
+		Log:                    log,
+		gatewayCfg:             config.GatewayConfig{}.WithDefaults(),
+		modelsCache:            map[uint]modelsCacheEntry{},
 		responseValidatorCache: map[uint]responseValidatorCacheEntry{},
-		channelGroupsCache: map[uint]channelGroupsCacheEntry{},
-		routeAffinities:    map[routeAffinityKey]routeAffinityEntry{},
-		upstreamConcurrency: newUpstreamConcurrencyRegistry(),
-		httpTransports:     map[string]*http.Transport{},
-		loadBalanceStates:   map[loadBalancePoolKey]*loadBalancePoolState{},
+		channelGroupsCache:     map[uint]channelGroupsCacheEntry{},
+		routeAffinities:        map[routeAffinityKey]routeAffinityEntry{},
+		cacheHealthPending:     map[cacheHealthSourceKey]time.Time{},
+		upstreamConcurrency:    newUpstreamConcurrencyRegistry(),
+		httpTransports:         map[string]*http.Transport{},
+		loadBalanceStates:      map[loadBalancePoolKey]*loadBalancePoolState{},
 	}
 	s.Admin = &AdminService{Service: s}
 	s.Runtime = &Runtime{Service: s}
@@ -201,6 +207,15 @@ func (s *Service) UpdateUpstreamConfig(cfg config.UpstreamConfig) {
 
 func (s *Service) UpdateGatewayConfig(cfg config.GatewayConfig) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.gatewayCfg = cfg.WithDefaults()
+	updated := s.gatewayCfg
+	s.mu.Unlock()
+	// Turning the feature off must immediately release source snapshots; this
+	// does not touch manual provider/route enable flags.
+	if !cacheHealthProtectionEnabled(updated) && s.Usage != nil {
+		_ = s.Usage.ClearCacheHealthBlacklists()
+		if s.Routes != nil {
+			s.Routes.InvalidateAllCacheHealth()
+		}
+	}
 }

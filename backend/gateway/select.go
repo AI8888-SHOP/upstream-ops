@@ -99,6 +99,12 @@ func IsRouteSchedulableForModel(route *storage.GatewayRoute, model string, now t
 	if route == nil || !route.Enabled || route.RateLimitAutoDisabled {
 		return false
 	}
+	// Cache-health blacklists are source-wide and therefore apply regardless
+	// of the requested model. Expired snapshots are harmless until the next
+	// evaluator refreshes them.
+	if route.CacheHealthBlacklistedUntil != nil && route.CacheHealthBlacklistedUntil.After(now) {
+		return false
+	}
 	key := storage.NormalizeGatewayModel(model)
 	// Legacy route-wide cooldowns have no model identity. Keep them for
 	// model-less management/list requests, but never let them block a

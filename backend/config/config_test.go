@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -20,6 +21,21 @@ func TestLoadAppliesUpstreamDefaults(t *testing.T) {
 	}
 	if cfg.Scheduler.Retention.GatewayUsageLogsDays != 90 {
 		t.Fatalf("gateway usage retention = %d", cfg.Scheduler.Retention.GatewayUsageLogsDays)
+	}
+}
+
+func TestLoadCacheHealthConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("gateway:\n  cacheHitRateWindowMinutes: 15\n  cacheHitRateThresholdPercent: 42.5\n  cacheHitRateBlacklistMinutes: 30\n  cacheHitRateMinimumRequests: 7\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Gateway.CacheHitRateWindowMinutes != 15 || cfg.Gateway.CacheHitRateThresholdPercent != 42.5 ||
+		cfg.Gateway.CacheHitRateBlacklistMinutes != 30 || cfg.Gateway.CacheHitRateMinimumRequests != 7 {
+		t.Fatalf("cache health config = %#v", cfg.Gateway)
 	}
 }
 
@@ -74,6 +90,12 @@ func TestGatewayConfigWithDefaults(t *testing.T) {
 		cfg.ResponseValidation.PrefixBytes != DefaultGatewayResponseValidationBytes ||
 		cfg.ResponseValidation.PrefixTimeoutMS != DefaultGatewayResponseValidationTimeoutMS {
 		t.Fatalf("response validation defaults = %#v", cfg.ResponseValidation)
+	}
+	if cfg.CacheHitRateWindowMinutes != DefaultGatewayCacheHitRateWindowMinutes ||
+		cfg.CacheHitRateThresholdPercent != DefaultGatewayCacheHitRateThresholdPercent ||
+		cfg.CacheHitRateBlacklistMinutes != DefaultGatewayCacheHitRateBlacklistMinutes ||
+		cfg.CacheHitRateMinimumRequests != DefaultGatewayCacheHitRateMinimumRequests {
+		t.Fatalf("cache health defaults = %#v", cfg)
 	}
 }
 

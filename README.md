@@ -596,6 +596,11 @@ gateway:
   usageErrorMsgRunes: 500
   usageErrorHeaderValueRunes: 8192
   usageErrorHeadersJSONBytes: 65536
+  # Cache protection is disabled by default; set all three controls > 0 to enable.
+  cacheHitRateWindowMinutes: 0
+  cacheHitRateThresholdPercent: 0
+  cacheHitRateBlacklistMinutes: 0
+  cacheHitRateMinimumRequests: 1
   hedge:
     enabled: false
     delaySeconds: 10
@@ -1060,7 +1065,7 @@ Exact match first, then `"*"`. When group and route maps both apply, **route map
 
 ### Runtime config (`gateway` section)
 
-Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no process restart). Base runtime values ≤0 fall back to built-in defaults. `hedge` and `responseValidation` are defaults copied when a gateway group is created; they do not overwrite saved groups:
+Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no process restart). Base runtime values ≤0 fall back to built-in defaults. Cache protection is enabled only when all three duration/threshold controls are positive; any zero value disables it. `hedge` and `responseValidation` are defaults copied when a gateway group is created; they do not overwrite saved groups:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -1073,6 +1078,10 @@ Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no pr
 | `usageErrorMsgRunes` | 500 | Max error summary runes |
 | `usageErrorHeaderValueRunes` | 8192 | Per error response-header value truncation |
 | `usageErrorHeadersJSONBytes` | 65536 | Max error headers JSON size |
+| `cacheHitRateWindowMinutes` | 0 (off) | Rolling real-upstream cache hit-rate window (minutes) |
+| `cacheHitRateThresholdPercent` | 0 (off) | Trigger protection below this hit-rate percentage |
+| `cacheHitRateBlacklistMinutes` | 0 (off) | Minutes to pause all routes for the source |
+| `cacheHitRateMinimumRequests` | 1 | Minimum successful requests before auto-blacklisting |
 | `hedge.enabled` | false | Enable hedging by default for new groups |
 | `hedge.delaySeconds` | 10 | Delay ladder for launching additional attempts (0.1-300 seconds) |
 | `hedge.maxParallel` | 2 | Concurrent attempts including the primary (1-32) |

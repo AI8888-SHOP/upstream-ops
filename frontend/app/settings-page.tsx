@@ -68,6 +68,10 @@ const defaultGatewayConfig: SystemGatewayConfig = {
   usageErrorMsgRunes: 500,
   usageErrorHeaderValueRunes: 8192,
   usageErrorHeadersJSONBytes: 65536,
+  cacheHitRateWindowMinutes: 0,
+  cacheHitRateThresholdPercent: 0,
+  cacheHitRateBlacklistMinutes: 0,
+  cacheHitRateMinimumRequests: 1,
   hedge: {
     enabled: false,
     delaySeconds: 10,
@@ -1220,6 +1224,63 @@ export default function SettingsPage() {
                     setForm((prev) =>
                       patchGateway(prev, "usageErrorHeadersJSONBytes", num(e.target.value)),
                     )
+                  }
+                />
+              </Field>
+              <Field
+                label="缓存命中率统计窗口（分钟）"
+                description="填 0 仅展示统计，不自动拉黑；启用保护需同时填写阈值和拉黑时长。"
+              >
+                <Input
+                  type="number"
+                  min={0}
+                  max={10080}
+                  value={String(form.gateway?.cacheHitRateWindowMinutes ?? defaultGatewayConfig.cacheHitRateWindowMinutes)}
+                  onChange={(e) =>
+                    setForm((prev) => patchGateway(prev, "cacheHitRateWindowMinutes", num(e.target.value)))
+                  }
+                />
+              </Field>
+              <Field
+                label="缓存命中率低于（%）"
+                description="最近窗口内真实上游 cache_read /（新鲜输入 + cache_read + cache_creation）。"
+              >
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="0.1"
+                  value={String(form.gateway?.cacheHitRateThresholdPercent ?? defaultGatewayConfig.cacheHitRateThresholdPercent)}
+                  onChange={(e) =>
+                    setForm((prev) => patchGateway(prev, "cacheHitRateThresholdPercent", num(e.target.value)))
+                  }
+                />
+              </Field>
+              <Field
+                label="自动拉黑时长（分钟）"
+                description="命中率低于阈值且达到最小样本后，暂停该来源的全部路由。"
+              >
+                <Input
+                  type="number"
+                  min={0}
+                  max={43200}
+                  value={String(form.gateway?.cacheHitRateBlacklistMinutes ?? defaultGatewayConfig.cacheHitRateBlacklistMinutes)}
+                  onChange={(e) =>
+                    setForm((prev) => patchGateway(prev, "cacheHitRateBlacklistMinutes", num(e.target.value)))
+                  }
+                />
+              </Field>
+              <Field
+                label="缓存保护最小请求数"
+                description="避免少量样本触发拉黑，默认 1 次；可按需调高。"
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  max={100000}
+                  value={String(form.gateway?.cacheHitRateMinimumRequests ?? defaultGatewayConfig.cacheHitRateMinimumRequests)}
+                  onChange={(e) =>
+                    setForm((prev) => patchGateway(prev, "cacheHitRateMinimumRequests", num(e.target.value)))
                   }
                 />
               </Field>

@@ -63,6 +63,10 @@ func (r *Channels) Delete(id uint) error {
 				return err
 			}
 		}
+		if err := tx.Where("source_kind = ? AND source_id = ?", GatewayRouteSourceMonitor, id).
+			Delete(&GatewayChannelCacheHealth{}).Error; err != nil {
+			return err
+		}
 		return tx.Delete(&Channel{}, id).Error
 	})
 	if err == nil {

@@ -191,6 +191,13 @@ func (rt *Runtime) recordUsage(
 		}
 		return 0
 	}
+	// Cache-health evaluation is source-level and debounced; keep it off the
+	// request critical path so usage accounting never waits on aggregate SQL.
+	if providerID > 0 {
+		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceProvider, providerID)
+	} else if channelID > 0 {
+		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceMonitor, channelID)
+	}
 	if settleNow {
 		if _, err := rt.Usage.FinalizeRequest(storage.GatewayFinalizeRequestInput{
 			RequestID: reqID, GatewayKeyID: key.ID, Delivered: true,

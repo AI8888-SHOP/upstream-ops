@@ -300,6 +300,7 @@ export function GatewayProvidersPanel() {
             <div className="min-w-0 flex-1 space-y-1">
               <p className="text-sm leading-6 text-muted-foreground">
                 配置第三方上游的访问地址与密钥，供网关组路由调用；可与监控渠道混用，无需「确保上游密钥」。
+                缓存命中率按设置窗口统计真实上游 cache_read；保护未启用时仅展示最近 60 分钟数据。
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -353,6 +354,7 @@ export function GatewayProvidersPanel() {
                   <TableHead>并发</TableHead>
                   <TableHead>模型</TableHead>
                   <TableHead>虚拟缓存</TableHead>
+                  <TableHead>缓存命中率</TableHead>
                   <TableHead>Key</TableHead>
                   <TableHead>代理</TableHead>
                   <TableHead>状态</TableHead>
@@ -362,13 +364,13 @@ export function GatewayProvidersPanel() {
               <TableBody>
                 {loading && items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={11} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={12} className="h-24 text-center text-muted-foreground">
                       <Loader2 className="mx-auto size-4 animate-spin" />
                     </TableCell>
                   </TableRow>
                 ) : items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={11} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={12} className="h-24 text-center text-muted-foreground">
                       暂无直连渠道，点击右上角「新建」添加
                     </TableCell>
                   </TableRow>
@@ -404,6 +406,34 @@ export function GatewayProvidersPanel() {
                         {p.virtual_cache_enabled && (p.virtual_cache_percent ?? 0) > 0
                           ? `${p.virtual_cache_percent}%`
                           : "关闭"}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap text-xs tabular-nums">
+                        {((p.cache_health_request_count ?? 0) > 0 &&
+                          (p.cache_health_input_tokens ?? 0) +
+                            (p.cache_health_read_tokens ?? 0) +
+                            (p.cache_health_creation_tokens ?? 0) >
+                            0) ||
+                        (p.cache_health_blacklisted_until &&
+                          new Date(p.cache_health_blacklisted_until).getTime() > Date.now()) ? (
+                          <div className="space-y-0.5">
+                            <div>{(p.cache_hit_rate ?? 0).toFixed(2)}%</div>
+                            <div className="text-[10px] text-muted-foreground">
+                              {p.cache_health_request_count ?? 0} 次
+                            </div>
+                            {p.cache_health_blacklisted_until &&
+                            new Date(p.cache_health_blacklisted_until).getTime() > Date.now() ? (
+                              <Badge
+                                variant="destructive"
+                                className="px-1.5 py-0 text-[10px]"
+                                title={p.cache_health_blacklist_reason || "缓存命中率过低"}
+                              >
+                                拉黑至 {new Date(p.cache_health_blacklisted_until).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                              </Badge>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">暂无数据</span>
+                        )}
                       </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
                         {p.api_key_hint || "—"}

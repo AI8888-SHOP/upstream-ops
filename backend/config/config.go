@@ -173,6 +173,12 @@ const (
 	DefaultGatewayResponseValidationMode      = "prefix"
 	DefaultGatewayResponseValidationBytes     = 8 * 1024
 	DefaultGatewayResponseValidationTimeoutMS = 2 * 1000
+	// Cache health protection is opt-in. A zero window, threshold, or
+	// blacklist duration keeps the feature disabled.
+	DefaultGatewayCacheHitRateWindowMinutes    = 0
+	DefaultGatewayCacheHitRateThresholdPercent = 0.0
+	DefaultGatewayCacheHitRateBlacklistMinutes = 0
+	DefaultGatewayCacheHitRateMinimumRequests  = 1
 )
 
 type UpstreamConfig struct {
@@ -191,7 +197,7 @@ func (u UpstreamConfig) WithDefaults() UpstreamConfig {
 }
 
 // GatewayConfig 网关运行时参数（转发超时、批量运维并发、用量错误落库截断等）。
-// 可在设置页保存并「应用配置」后立即生效；字段 ≤0 时回退默认值。
+// 可在设置页保存并「应用配置」后立即生效；缓存保护字段为 0 时表示关闭。
 type GatewayConfig struct {
 	// TempPauseSeconds 新建组默认临时暂停时长（秒），对应路由冷却。
 	TempPauseSeconds int `mapstructure:"tempPauseSeconds" yaml:"tempPauseSeconds" json:"tempPauseSeconds"`
@@ -208,6 +214,12 @@ type GatewayConfig struct {
 	UsageErrorMsgRunes         int `mapstructure:"usageErrorMsgRunes" yaml:"usageErrorMsgRunes" json:"usageErrorMsgRunes"`
 	UsageErrorHeaderValueRunes int `mapstructure:"usageErrorHeaderValueRunes" yaml:"usageErrorHeaderValueRunes" json:"usageErrorHeaderValueRunes"`
 	UsageErrorHeadersJSONBytes int `mapstructure:"usageErrorHeadersJSONBytes" yaml:"usageErrorHeadersJSONBytes" json:"usageErrorHeadersJSONBytes"`
+	// Cache health protection is disabled unless all duration/threshold
+	// controls are configured with positive values.
+	CacheHitRateWindowMinutes    int     `mapstructure:"cacheHitRateWindowMinutes" yaml:"cacheHitRateWindowMinutes" json:"cacheHitRateWindowMinutes"`
+	CacheHitRateThresholdPercent float64 `mapstructure:"cacheHitRateThresholdPercent" yaml:"cacheHitRateThresholdPercent" json:"cacheHitRateThresholdPercent"`
+	CacheHitRateBlacklistMinutes int     `mapstructure:"cacheHitRateBlacklistMinutes" yaml:"cacheHitRateBlacklistMinutes" json:"cacheHitRateBlacklistMinutes"`
+	CacheHitRateMinimumRequests  int     `mapstructure:"cacheHitRateMinimumRequests" yaml:"cacheHitRateMinimumRequests" json:"cacheHitRateMinimumRequests"`
 	// Hedge / ResponseValidation 是新建 GatewayGroup 的默认策略；组内保存后独立生效。
 	Hedge              GatewayHedgeConfig              `mapstructure:"hedge" yaml:"hedge" json:"hedge"`
 	ResponseValidation GatewayResponseValidationConfig `mapstructure:"responseValidation" yaml:"responseValidation" json:"responseValidation"`
@@ -294,6 +306,19 @@ func (v GatewayResponseValidationConfig) PrefixTimeout() time.Duration {
 // Validate 检查显式配置边界；Load 会在 Viper 默认值展开后调用。
 func (g GatewayConfig) Validate() error {
 	var joined error
+	if g.CacheHitRateWindowMinutes < 0 || g.CacheHitRateWindowMinutes > 7*24*60 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.cacheHitRateWindowMinutes must be between 0 and %d", 7*24*60))
+	}
+	if math.IsNaN(g.CacheHitRateThresholdPercent) || math.IsInf(g.CacheHitRateThresholdPercent, 0) ||
+		g.CacheHitRateThresholdPercent < 0 || g.CacheHitRateThresholdPercent > 100 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.cacheHitRateThresholdPercent must be between 0 and 100"))
+	}
+	if g.CacheHitRateBlacklistMinutes < 0 || g.CacheHitRateBlacklistMinutes > 30*24*60 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.cacheHitRateBlacklistMinutes must be between 0 and %d", 30*24*60))
+	}
+	if g.CacheHitRateMinimumRequests < 0 || g.CacheHitRateMinimumRequests > 100000 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.cacheHitRateMinimumRequests must be between 0 and 100000"))
+	}
 	if math.IsNaN(g.Hedge.DelaySeconds) || math.IsInf(g.Hedge.DelaySeconds, 0) ||
 		g.Hedge.DelaySeconds < 0.1 || g.Hedge.DelaySeconds > 300 {
 		joined = errors.Join(joined, fmt.Errorf("gateway.hedge.delaySeconds must be between 0.1 and 300"))
@@ -349,6 +374,30 @@ func (g GatewayConfig) WithDefaults() GatewayConfig {
 	}
 	if g.UsageErrorHeadersJSONBytes <= 0 {
 		g.UsageErrorHeadersJSONBytes = DefaultGatewayUsageErrorHeadersJSONBytes
+	}
+	if g.CacheHitRateMinimumRequests <= 0 {
+		g.CacheHitRateMinimumRequests = DefaultGatewayCacheHitRateMinimumRequests
+	}
+	if g.CacheHitRateMinimumRequests > 100000 {
+		g.CacheHitRateMinimumRequests = 100000
+	}
+	if g.CacheHitRateWindowMinutes < 0 {
+		g.CacheHitRateWindowMinutes = 0
+	}
+	if g.CacheHitRateWindowMinutes > 7*24*60 {
+		g.CacheHitRateWindowMinutes = 7 * 24 * 60
+	}
+	if g.CacheHitRateThresholdPercent < 0 {
+		g.CacheHitRateThresholdPercent = 0
+	}
+	if g.CacheHitRateThresholdPercent > 100 {
+		g.CacheHitRateThresholdPercent = 100
+	}
+	if g.CacheHitRateBlacklistMinutes < 0 {
+		g.CacheHitRateBlacklistMinutes = 0
+	}
+	if g.CacheHitRateBlacklistMinutes > 30*24*60 {
+		g.CacheHitRateBlacklistMinutes = 30 * 24 * 60
 	}
 	g.Hedge = g.Hedge.WithDefaults()
 	g.ResponseValidation = g.ResponseValidation.WithDefaults()
@@ -583,6 +632,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gateway.usageErrorMsgRunes", DefaultGatewayUsageErrorMsgRunes)
 	v.SetDefault("gateway.usageErrorHeaderValueRunes", DefaultGatewayUsageErrorHeaderValueRunes)
 	v.SetDefault("gateway.usageErrorHeadersJSONBytes", DefaultGatewayUsageErrorHeadersJSONBytes)
+	v.SetDefault("gateway.cacheHitRateWindowMinutes", DefaultGatewayCacheHitRateWindowMinutes)
+	v.SetDefault("gateway.cacheHitRateThresholdPercent", DefaultGatewayCacheHitRateThresholdPercent)
+	v.SetDefault("gateway.cacheHitRateBlacklistMinutes", DefaultGatewayCacheHitRateBlacklistMinutes)
+	v.SetDefault("gateway.cacheHitRateMinimumRequests", DefaultGatewayCacheHitRateMinimumRequests)
 	v.SetDefault("gateway.hedge.enabled", false)
 	v.SetDefault("gateway.hedge.delaySeconds", DefaultGatewayHedgeDelaySeconds)
 	v.SetDefault("gateway.hedge.maxParallel", DefaultGatewayHedgeMaxParallel)

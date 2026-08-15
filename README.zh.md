@@ -560,6 +560,11 @@ gateway:
   usageErrorMsgRunes: 500
   usageErrorHeaderValueRunes: 8192
   usageErrorHeadersJSONBytes: 65536
+  # 缓存保护默认关闭；三项时长/阈值均为正数时启用
+  cacheHitRateWindowMinutes: 0
+  cacheHitRateThresholdPercent: 0
+  cacheHitRateBlacklistMinutes: 0
+  cacheHitRateMinimumRequests: 1
   hedge:
     enabled: false
     delaySeconds: 10
@@ -1168,7 +1173,7 @@ curl -sN http://127.0.0.1:8418/v1/responses \
 
 ### 运行时配置（`gateway` 段）
 
-可在 `config.yaml` 或系统设置中调整，**应用配置后热更新**（无需重启进程）。基础运行时字段 ≤0 时回落内置默认；`hedge` 与 `responseValidation` 是创建新网关组时复制的默认策略，不会覆盖已保存的组：
+可在 `config.yaml` 或系统设置中调整，**应用配置后热更新**（无需重启进程）。基础运行时字段 ≤0 时回落内置默认；缓存保护字段全部为正数才启用，窗口/阈值/拉黑时长任一为 0 即关闭；`hedge` 与 `responseValidation` 是创建新网关组时复制的默认策略，不会覆盖已保存的组：
 
 | 配置项 | 默认 | 含义 |
 |--------|------|------|
@@ -1181,6 +1186,10 @@ curl -sN http://127.0.0.1:8418/v1/responses \
 | `usageErrorMsgRunes` | 500 | 用量错误摘要字符上限 |
 | `usageErrorHeaderValueRunes` | 8192 | 单条错误响应头值截断 |
 | `usageErrorHeadersJSONBytes` | 65536 | 错误响应头 JSON 总上限 |
+| `cacheHitRateWindowMinutes` | 0（关闭） | 按最近窗口统计真实上游缓存命中率（分钟） |
+| `cacheHitRateThresholdPercent` | 0（关闭） | 命中率低于该百分比时触发保护 |
+| `cacheHitRateBlacklistMinutes` | 0（关闭） | 触发后暂停该来源全部路由的分钟数 |
+| `cacheHitRateMinimumRequests` | 1 | 触发自动拉黑所需的最少成功请求数 |
 | `hedge.enabled` | false | 新建组是否默认启用并发兜底 |
 | `hedge.delaySeconds` | 10 | 启动后续并发 attempt 的延迟阶梯（0.1-300 秒） |
 | `hedge.maxParallel` | 2 | 最大并发 attempt，包含主请求（1-32） |

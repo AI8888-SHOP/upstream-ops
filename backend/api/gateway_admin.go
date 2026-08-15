@@ -67,6 +67,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		// providers（直连渠道）— options 须在 :id 之前注册
 		gp.GET("/providers/options", func(c *gin.Context) { listGatewayProviderOptions(c, d) })
 		gp.GET("/providers/:id/models/preview", func(c *gin.Context) { previewGatewayProviderModels(c, d) })
+		gp.GET("/providers/:id/cache-health", func(c *gin.Context) { gatewayProviderCacheHealth(c, d) })
 		gp.GET("/providers", func(c *gin.Context) { listGatewayProviders(c, d) })
 		gp.POST("/providers", func(c *gin.Context) { createGatewayProvider(c, d) })
 		gp.PUT("/providers/:id", func(c *gin.Context) { updateGatewayProvider(c, d) })
@@ -78,6 +79,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.GET("/usage/stats", func(c *gin.Context) { statsGatewayUsage(c, d) })
 		gp.GET("/usage/models", func(c *gin.Context) { listGatewayUsageModels(c, d) })
 		gp.POST("/usage/cleanup", func(c *gin.Context) { cleanupGatewayUsage(c, d) })
+		gp.GET("/cache-health", func(c *gin.Context) { listGatewayCacheHealth(c, d) })
 
 		// prices
 		gp.GET("/prices", func(c *gin.Context) { listGatewayPrices(c, d) })
@@ -88,25 +90,25 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 }
 
 type gatewayResponseRuleCreateInput struct {
-	Name          string `json:"name"`
-	Enabled       *bool  `json:"enabled"`
-	Priority      int    `json:"priority"`
-	Pattern       string `json:"pattern"`
-	Target        string `json:"target"`
-	ModelsJSON    string `json:"models_json"`
-	ProtocolsJSON string `json:"protocols_json"`
+	Name          string   `json:"name"`
+	Enabled       *bool    `json:"enabled"`
+	Priority      int      `json:"priority"`
+	Pattern       string   `json:"pattern"`
+	Target        string   `json:"target"`
+	ModelsJSON    string   `json:"models_json"`
+	ProtocolsJSON string   `json:"protocols_json"`
 	Models        []string `json:"models"`
 	Protocols     []string `json:"protocols"`
 }
 
 type gatewayResponseRuleUpdateInput struct {
-	Name          *string `json:"name"`
-	Enabled       *bool   `json:"enabled"`
-	Priority      *int    `json:"priority"`
-	Pattern       *string `json:"pattern"`
-	Target        *string `json:"target"`
-	ModelsJSON    *string `json:"models_json"`
-	ProtocolsJSON *string `json:"protocols_json"`
+	Name          *string   `json:"name"`
+	Enabled       *bool     `json:"enabled"`
+	Priority      *int      `json:"priority"`
+	Pattern       *string   `json:"pattern"`
+	Target        *string   `json:"target"`
+	ModelsJSON    *string   `json:"models_json"`
+	ProtocolsJSON *string   `json:"protocols_json"`
 	Models        *[]string `json:"models"`
 	Protocols     *[]string `json:"protocols"`
 }
@@ -449,7 +451,105 @@ func listGatewayProviders(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// Enrich the direct-channel list with the same rolling cache statistics
+	// exposed by /cache-health. Failure to read optional stats must not hide the
+	// provider list itself.
+	if d.Gateway != nil && d.Gateway.Usage != nil && len(page.Items) > 0 {
+		ids := make([]uint, 0, len(page.Items))
+		for _, item := range page.Items {
+			ids = append(ids, item.ID)
+		}
+		if stats, statErr := d.Gateway.CacheHealthStats(storage.GatewayRouteSourceProvider, ids); statErr == nil {
+			byID := make(map[uint]gateway.CacheHealthStat, len(stats))
+			for _, stat := range stats {
+				byID[stat.SourceID] = stat
+			}
+			for i := range page.Items {
+				if stat, ok := byID[page.Items[i].ID]; ok {
+					page.Items[i].CacheHitRate = stat.HitRate
+					page.Items[i].CacheHealthRequestCount = stat.RequestCount
+					page.Items[i].CacheHealthInputTokens = stat.InputTokens
+					page.Items[i].CacheHealthReadTokens = stat.CacheReadTokens
+					page.Items[i].CacheHealthCreationTokens = stat.CacheCreationTokens
+					page.Items[i].CacheHealthEvaluatedAt = stat.EvaluatedAt
+					page.Items[i].CacheHealthBlacklistedUntil = stat.BlacklistedUntil
+					page.Items[i].CacheHealthBlacklistReason = stat.BlacklistReason
+				}
+			}
+		}
+	}
 	c.JSON(http.StatusOK, page)
+}
+
+func listGatewayCacheHealth(c *gin.Context, d *Deps) {
+	kind := strings.TrimSpace(c.Query("source_kind"))
+	if kind == "" {
+		kind = storage.GatewayRouteSourceProvider
+	}
+	if !strings.EqualFold(kind, storage.GatewayRouteSourceProvider) &&
+		!strings.EqualFold(kind, storage.GatewayRouteSourceMonitor) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid source_kind"})
+		return
+	}
+	var ids []uint
+	if raw := strings.TrimSpace(c.Query("source_id")); raw != "" {
+		if id, err := strconv.ParseUint(raw, 10, 64); err == nil && id > 0 {
+			ids = append(ids, uint(id))
+		}
+	}
+	if raw := strings.TrimSpace(c.Query("source_ids")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			if id, err := strconv.ParseUint(strings.TrimSpace(part), 10, 64); err == nil && id > 0 {
+				ids = append(ids, uint(id))
+			}
+		}
+	}
+	stats, err := d.Gateway.CacheHealthStats(kind, uniqueUintIDs(ids))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items":   stats,
+		"enabled": d.Gateway.CacheHealthEnabled(),
+	})
+}
+
+func gatewayProviderCacheHealth(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid provider id"})
+		return
+	}
+	stats, err := d.Gateway.CacheHealthStats(storage.GatewayRouteSourceProvider, []uint{id})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var item *gateway.CacheHealthStat
+	if len(stats) > 0 {
+		item = &stats[0]
+	}
+	c.JSON(http.StatusOK, gin.H{"item": item, "enabled": d.Gateway.CacheHealthEnabled()})
+}
+
+func uniqueUintIDs(ids []uint) []uint {
+	if len(ids) < 2 {
+		return ids
+	}
+	seen := make(map[uint]struct{}, len(ids))
+	out := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func listGatewayProviderOptions(c *gin.Context, d *Deps) {
@@ -873,8 +973,8 @@ func clearGatewayRoutePause(c *gin.Context, d *Deps) {
 
 func parseGatewayUsageQuery(c *gin.Context) storage.GatewayUsageQuery {
 	q := storage.GatewayUsageQuery{
-		Page:             queryInt(c, "page", 1),
-		PageSize:         queryInt(c, "page_size", 20),
+		Page:     queryInt(c, "page", 1),
+		PageSize: queryInt(c, "page_size", 20),
 		// Keep the legacy response shape for external API callers. The bundled
 		// frontend opts out explicitly because neither aggregate is displayed.
 		IncludeSum:       true,
@@ -899,6 +999,11 @@ func parseGatewayUsageQuery(c *gin.Context) storage.GatewayUsageQuery {
 	if v := c.Query("channel_id"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
 			q.ChannelID = uint(n)
+		}
+	}
+	if v := c.Query("provider_id"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			q.GatewayProviderID = uint(n)
 		}
 	}
 	q.Model = strings.TrimSpace(c.Query("model"))
@@ -1059,6 +1164,9 @@ func cleanupGatewayUsage(c *gin.Context, d *Deps) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if !req.DryRun && count > 0 && d.Gateway != nil && d.Gateway.Routes != nil {
+		d.Gateway.Routes.InvalidateAllCacheHealth()
 	}
 	if req.DryRun {
 		c.JSON(http.StatusOK, gin.H{"dry_run": true, "matched": count})

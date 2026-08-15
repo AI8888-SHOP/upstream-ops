@@ -307,6 +307,8 @@ func cloneGatewayRoute(item GatewayRoute) GatewayRoute {
 	item.SourceGroupID = clonePointer(item.SourceGroupID)
 	item.TempUnschedulableUntil = clonePointer(item.TempUnschedulableUntil)
 	item.TempUnschedulableAt = clonePointer(item.TempUnschedulableAt)
+	item.CacheHealthEvaluatedAt = clonePointer(item.CacheHealthEvaluatedAt)
+	item.CacheHealthBlacklistedUntil = clonePointer(item.CacheHealthBlacklistedUntil)
 	if item.ModelCooldowns == nil {
 		return item
 	}

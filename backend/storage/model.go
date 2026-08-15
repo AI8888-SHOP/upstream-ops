@@ -518,6 +518,16 @@ type GatewayProvider struct {
 	ProxyEnabled     bool      `gorm:"not null;default:false" json:"proxy_enabled"`
 	ExtraHeadersJSON string    `gorm:"type:text" json:"extra_headers,omitempty"`
 	Notes            string    `gorm:"size:512;not null;default:''" json:"notes,omitempty"`
+	// Cache health fields are populated by the admin usage view and are not
+	// persisted on the provider itself.
+	CacheHitRate                float64    `gorm:"-" json:"cache_hit_rate,omitempty"`
+	CacheHealthRequestCount     int64      `gorm:"-" json:"cache_health_request_count,omitempty"`
+	CacheHealthInputTokens      int64      `gorm:"-" json:"cache_health_input_tokens,omitempty"`
+	CacheHealthReadTokens       int64      `gorm:"-" json:"cache_health_read_tokens,omitempty"`
+	CacheHealthCreationTokens   int64      `gorm:"-" json:"cache_health_creation_tokens,omitempty"`
+	CacheHealthEvaluatedAt      *time.Time `gorm:"-" json:"cache_health_evaluated_at,omitempty"`
+	CacheHealthBlacklistedUntil *time.Time `gorm:"-" json:"cache_health_blacklisted_until,omitempty"`
+	CacheHealthBlacklistReason  string     `gorm:"-" json:"cache_health_blacklist_reason,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
@@ -646,6 +656,13 @@ type GatewayRoute struct {
 	TempUnschedulableRequestID string     `gorm:"size:64;not null;default:''" json:"temp_unschedulable_request_id,omitempty"`
 	// RecoverSuccessStreak：失败残留信息存在期间的连续成功次数；达到阈值后自动清空错误展示
 	RecoverSuccessStreak int `gorm:"not null;default:0" json:"recover_success_streak,omitempty"`
+	// CacheHealth* are loaded from gateway_channel_cache_health for scheduling;
+	// they are intentionally not duplicated into gateway_routes.
+	CacheHealthHitRate          float64    `gorm:"-" json:"cache_health_hit_rate,omitempty"`
+	CacheHealthRequestCount     int64      `gorm:"-" json:"cache_health_request_count,omitempty"`
+	CacheHealthEvaluatedAt      *time.Time `gorm:"-" json:"cache_health_evaluated_at,omitempty"`
+	CacheHealthBlacklistedUntil *time.Time `gorm:"-" json:"cache_health_blacklisted_until,omitempty"`
+	CacheHealthBlacklistReason  string     `gorm:"-" json:"cache_health_blacklist_reason,omitempty"`
 	// ModelCooldowns contains automatic cooldowns keyed by normalized model.
 	// It is loaded with routes and is not persisted as part of gateway_routes.
 	ModelCooldowns map[string]GatewayRouteModelCooldown `gorm:"-" json:"model_cooldowns,omitempty"`
@@ -690,6 +707,29 @@ type GatewayRouteModelCooldown struct {
 }
 
 func (GatewayRouteModelCooldown) TableName() string { return "gateway_route_model_cooldowns" }
+
+// GatewayChannelCacheHealth stores rolling cache statistics and the optional
+// automatic blacklist for one upstream source. SourceKind/SourceID identify a
+// monitored channel or a direct provider without changing its manual Enabled
+// flag. The row is also used to hydrate route scheduling snapshots.
+type GatewayChannelCacheHealth struct {
+	ID                  uint       `gorm:"primaryKey" json:"id"`
+	SourceKind          string     `gorm:"size:16;not null;uniqueIndex:idx_gateway_cache_health_source" json:"source_kind"`
+	SourceID            uint       `gorm:"not null;uniqueIndex:idx_gateway_cache_health_source" json:"source_id"`
+	HitRate             float64    `gorm:"not null;default:0" json:"hit_rate"`
+	RequestCount        int64      `gorm:"not null;default:0" json:"request_count"`
+	InputTokens         int64      `gorm:"not null;default:0" json:"input_tokens"`
+	CacheReadTokens     int64      `gorm:"not null;default:0" json:"cache_read_tokens"`
+	CacheCreationTokens int64      `gorm:"not null;default:0" json:"cache_creation_tokens"`
+	WindowStart         *time.Time `json:"window_start,omitempty"`
+	EvaluatedAt         *time.Time `json:"evaluated_at,omitempty"`
+	BlacklistedUntil    *time.Time `json:"blacklisted_until,omitempty"`
+	BlacklistReason     string     `gorm:"size:512;not null;default:''" json:"blacklist_reason,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+func (GatewayChannelCacheHealth) TableName() string { return "gateway_channel_cache_health" }
 
 // NormalizeGatewayModel returns the canonical scheduler key for a model. Model
 // identifiers are trimmed but remain case-sensitive, matching model mapping

@@ -343,6 +343,17 @@ export function UsagePanel({
         hintAlways: `入 ${formatTokens(usageStats.total_input_tokens ?? 0)} · 出 ${formatTokens(usageStats.total_output_tokens ?? 0)} · 读 ${formatTokens(usageStats.total_cache_read_tokens ?? 0)} · 写 ${formatTokens(usageStats.total_cache_creation_tokens ?? 0)}`,
       },
       {
+        label: "真实缓存命中率",
+        value:
+          (usageStats.cache_health_input_tokens ?? 0) +
+            (usageStats.cache_health_read_tokens ?? 0) +
+            (usageStats.cache_health_creation_tokens ?? 0) >
+          0
+            ? `${(usageStats.cache_hit_rate ?? 0).toFixed(2)}%`
+            : "暂无",
+        hint: `读 ${formatTokens(usageStats.cache_health_read_tokens ?? 0)} · 新鲜 ${formatTokens(usageStats.cache_health_input_tokens ?? 0)}`,
+      },
+      {
         label: "上游成本",
         value: money(usageStats.total_upstream_cost ?? usageStats.total_actual_cost),
         hint: `标准 ${money(usageStats.total_cost)}`,

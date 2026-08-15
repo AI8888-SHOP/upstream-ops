@@ -144,11 +144,210 @@ func (r *GatewayProviders) Update(item *GatewayProvider) error {
 
 // Delete 按主键删除。
 func (r *GatewayProviders) Delete(id uint) error {
-	err := r.db.Delete(&GatewayProvider{}, id).Error
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&GatewayProvider{}, id).Error; err != nil {
+			return err
+		}
+		return tx.Where("source_kind = ? AND source_id = ?", GatewayRouteSourceProvider, id).
+			Delete(&GatewayChannelCacheHealth{}).Error
+	})
 	if err == nil {
 		r.readCaches.gatewayProviders.invalidate(id)
 	}
 	return err
+}
+
+// GatewayCacheHealthAggregate is the rolling, real-upstream cache usage
+// summary for one source. Virtual cache credits are deliberately excluded.
+type GatewayCacheHealthAggregate struct {
+	SourceKind          string    `json:"source_kind"`
+	SourceID            uint      `json:"source_id"`
+	HitRate             float64   `json:"hit_rate"`
+	RequestCount        int64     `json:"request_count"`
+	InputTokens         int64     `json:"input_tokens"`
+	CacheReadTokens     int64     `json:"cache_read_tokens"`
+	CacheCreationTokens int64     `json:"cache_creation_tokens"`
+	WindowStart         time.Time `json:"window_start"`
+}
+
+// normalizeCacheHealthSource keeps the storage key stable for old callers.
+func normalizeCacheHealthSource(kind string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), GatewayRouteSourceProvider) {
+		return GatewayRouteSourceProvider
+	}
+	return GatewayRouteSourceMonitor
+}
+
+func cacheHealthSourceWhere(db *gorm.DB, sourceKind string, sourceID uint) *gorm.DB {
+	if normalizeCacheHealthSource(sourceKind) == GatewayRouteSourceProvider {
+		return db.Where("gateway_provider_id = ?", sourceID)
+	}
+	return db.Where("gateway_provider_id = 0 AND channel_id = ?", sourceID)
+}
+
+func cacheHealthFromWhere(db *gorm.DB, from time.Time) *gorm.DB {
+	if isSQLite(db) {
+		return db.Where("CAST(strftime('%s', created_at) AS INTEGER) >= ?", from.Unix())
+	}
+	return db.Where("created_at >= ?", from)
+}
+
+func cacheHitRatePercent(inputTokens, cacheReadTokens, cacheCreationTokens int64) float64 {
+	denominator := inputTokens + cacheReadTokens + cacheCreationTokens
+	if denominator <= 0 || cacheReadTokens <= 0 {
+		return 0
+	}
+	rate := float64(cacheReadTokens) / float64(denominator) * 100
+	if rate > 100 {
+		return 100
+	}
+	return rate
+}
+
+// CacheHealthAggregate computes a rolling aggregate over successful upstream
+// attempts. InputTokens is the fresh-input bucket; cache read/creation buckets
+// are mutually exclusive, so the hit rate is read/(fresh+read+creation).
+func (r *GatewayUsageLogs) CacheHealthAggregate(sourceKind string, sourceID uint, from time.Time) (*GatewayCacheHealthAggregate, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	if sourceID == 0 {
+		return nil, fmt.Errorf("cache health source id is required")
+	}
+	if from.IsZero() {
+		from = time.Now()
+	}
+	kind := normalizeCacheHealthSource(sourceKind)
+	type row struct {
+		RequestCount        int64
+		InputTokens         int64
+		CacheReadTokens     int64
+		CacheCreationTokens int64
+	}
+	query := cacheHealthFromWhere(
+		cacheHealthSourceWhere(r.db.Model(&GatewayUsageLog{}), kind, sourceID), from,
+	).Where("success = ?", true)
+	var value row
+	if err := query.Select(`
+		COUNT(DISTINCT request_id) AS request_count,
+		COALESCE(SUM(input_tokens), 0) AS input_tokens,
+		COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+		COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
+	`).Scan(&value).Error; err != nil {
+		return nil, err
+	}
+	rate := cacheHitRatePercent(value.InputTokens, value.CacheReadTokens, value.CacheCreationTokens)
+	return &GatewayCacheHealthAggregate{
+		SourceKind: kind, SourceID: sourceID, HitRate: rate,
+		RequestCount: value.RequestCount, InputTokens: value.InputTokens,
+		CacheReadTokens: value.CacheReadTokens, CacheCreationTokens: value.CacheCreationTokens,
+		WindowStart: from,
+	}, nil
+}
+
+// CacheHealthAggregates returns grouped rolling aggregates for an optional
+// source id list. An empty list means all sources of the requested kind.
+func (r *GatewayUsageLogs) CacheHealthAggregates(sourceKind string, sourceIDs []uint, from time.Time) ([]GatewayCacheHealthAggregate, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	if from.IsZero() {
+		from = time.Now()
+	}
+	kind := normalizeCacheHealthSource(sourceKind)
+	type row struct {
+		SourceID            uint  `gorm:"column:source_id"`
+		RequestCount        int64 `gorm:"column:request_count"`
+		InputTokens         int64 `gorm:"column:input_tokens"`
+		CacheReadTokens     int64 `gorm:"column:cache_read_tokens"`
+		CacheCreationTokens int64 `gorm:"column:cache_creation_tokens"`
+	}
+	var rows []row
+	db := cacheHealthFromWhere(r.db.Model(&GatewayUsageLog{}), from).Where("success = ?", true)
+	if kind == GatewayRouteSourceProvider {
+		db = db.Where("gateway_provider_id > 0")
+		if len(sourceIDs) > 0 {
+			db = db.Where("gateway_provider_id IN ?", sourceIDs)
+		}
+		db = db.Select(`gateway_provider_id AS source_id,
+			COUNT(DISTINCT request_id) AS request_count,
+			COALESCE(SUM(input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens`).Group("gateway_provider_id")
+	} else {
+		db = db.Where("gateway_provider_id = 0 AND channel_id > 0")
+		if len(sourceIDs) > 0 {
+			db = db.Where("channel_id IN ?", sourceIDs)
+		}
+		db = db.Select(`channel_id AS source_id,
+			COUNT(DISTINCT request_id) AS request_count,
+			COALESCE(SUM(input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens`).Group("channel_id")
+	}
+	if err := db.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]GatewayCacheHealthAggregate, 0, len(rows))
+	for _, row := range rows {
+		rate := cacheHitRatePercent(row.InputTokens, row.CacheReadTokens, row.CacheCreationTokens)
+		out = append(out, GatewayCacheHealthAggregate{
+			SourceKind: kind, SourceID: row.SourceID, HitRate: rate,
+			RequestCount: row.RequestCount, InputTokens: row.InputTokens,
+			CacheReadTokens: row.CacheReadTokens, CacheCreationTokens: row.CacheCreationTokens,
+			WindowStart: from,
+		})
+	}
+	return out, nil
+}
+
+// CacheHealthStates loads persisted evaluator state for the requested sources.
+func (r *GatewayUsageLogs) CacheHealthStates(sourceKind string, sourceIDs []uint) ([]GatewayChannelCacheHealth, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	kind := normalizeCacheHealthSource(sourceKind)
+	db := r.db.Where("source_kind = ?", kind)
+	if len(sourceIDs) > 0 {
+		db = db.Where("source_id IN ?", sourceIDs)
+	}
+	var rows []GatewayChannelCacheHealth
+	if err := db.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// UpsertCacheHealth persists evaluator output atomically by source key.
+func (r *GatewayUsageLogs) UpsertCacheHealth(state *GatewayChannelCacheHealth) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("usage storage is unavailable")
+	}
+	if state == nil || state.SourceID == 0 {
+		return fmt.Errorf("cache health state source is required")
+	}
+	state.SourceKind = normalizeCacheHealthSource(state.SourceKind)
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "source_kind"}, {Name: "source_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"hit_rate", "request_count", "input_tokens", "cache_read_tokens",
+			"cache_creation_tokens", "window_start", "evaluated_at",
+			"blacklisted_until", "blacklist_reason", "updated_at",
+		}),
+	}).Create(state).Error
+}
+
+// ClearCacheHealthBlacklists removes automatic pauses when the feature is
+// disabled. Manual provider/route enabled flags are untouched.
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklists() error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Model(&GatewayChannelCacheHealth{}).Where("1 = 1").Updates(map[string]any{
+		"blacklisted_until": nil,
+		"blacklist_reason":  "",
+		"updated_at":        time.Now(),
+	}).Error
 }
 
 // GatewayGroups 网关组仓储。
@@ -1130,6 +1329,9 @@ func (r *GatewayRoutes) ListByGroupID(groupID uint) ([]GatewayRoute, error) {
 		if err := r.loadModelCooldowns(loaded); err != nil {
 			return nil, err
 		}
+		if err := r.loadCacheHealth(loaded); err != nil {
+			return nil, err
+		}
 		return loaded, nil
 	}, nil)
 	if err != nil {
@@ -1148,6 +1350,9 @@ func (r *GatewayRoutes) FindByID(id uint) (*GatewayRoute, error) {
 	}
 	list := []GatewayRoute{item}
 	if err := r.loadModelCooldowns(list); err != nil {
+		return nil, err
+	}
+	if err := r.loadCacheHealth(list); err != nil {
 		return nil, err
 	}
 	item = list[0]
@@ -1190,6 +1395,90 @@ func (r *GatewayRoutes) loadModelCooldowns(routes []GatewayRoute) error {
 		}
 	}
 	return nil
+}
+
+// loadCacheHealth hydrates the source-level automatic blacklist into the
+// request-local route snapshot. The route cache keeps this for its short TTL;
+// evaluator writes call InvalidateCacheHealthSource immediately afterwards.
+func (r *GatewayRoutes) loadCacheHealth(routes []GatewayRoute) error {
+	if r == nil || r.db == nil || len(routes) == 0 {
+		return nil
+	}
+	ids := make([]uint, 0, len(routes))
+	seen := make(map[uint]struct{}, len(routes))
+	for _, route := range routes {
+		id := route.GatewayProviderID
+		if route.NormalizeSourceKind() != GatewayRouteSourceProvider {
+			id = route.SourceChannelID
+		}
+		if id > 0 {
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var states []GatewayChannelCacheHealth
+	if err := r.db.Where("source_id IN ?", ids).Find(&states).Error; err != nil {
+		return err
+	}
+	bySource := make(map[string]GatewayChannelCacheHealth, len(states))
+	for _, state := range states {
+		bySource[fmt.Sprintf("%s:%d", normalizeCacheHealthSource(state.SourceKind), state.SourceID)] = state
+	}
+	for i := range routes {
+		kind := routes[i].NormalizeSourceKind()
+		id := routes[i].GatewayProviderID
+		if kind != GatewayRouteSourceProvider {
+			id = routes[i].SourceChannelID
+		}
+		state, ok := bySource[fmt.Sprintf("%s:%d", kind, id)]
+		if !ok {
+			continue
+		}
+		routes[i].CacheHealthHitRate = state.HitRate
+		routes[i].CacheHealthRequestCount = state.RequestCount
+		routes[i].CacheHealthEvaluatedAt = clonePointer(state.EvaluatedAt)
+		routes[i].CacheHealthBlacklistedUntil = clonePointer(state.BlacklistedUntil)
+		routes[i].CacheHealthBlacklistReason = state.BlacklistReason
+	}
+	return nil
+}
+
+// InvalidateCacheHealthSource invalidates every cached route referencing a
+// source after its health state changes.
+func (r *GatewayRoutes) InvalidateCacheHealthSource(sourceKind string, sourceID uint) {
+	if r == nil || r.readCaches == nil || sourceID == 0 {
+		return
+	}
+	kind := normalizeCacheHealthSource(sourceKind)
+	r.readCaches.gatewayRoutes.invalidateWhere(func(routes []GatewayRoute) bool {
+		for _, route := range routes {
+			if route.NormalizeSourceKind() != kind {
+				continue
+			}
+			id := route.GatewayProviderID
+			if kind != GatewayRouteSourceProvider {
+				id = route.SourceChannelID
+			}
+			if id == sourceID {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// InvalidateAllCacheHealth drops every cached route snapshot after a global
+// cache-health setting change.
+func (r *GatewayRoutes) InvalidateAllCacheHealth() {
+	if r == nil || r.readCaches == nil {
+		return
+	}
+	r.readCaches.gatewayRoutes.clear()
 }
 
 // SaveForGroup 全量保存某组下的路由列表。
@@ -1684,8 +1973,8 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 
 // GatewayUsageLogs 使用记录仓储。
 type GatewayUsageLogs struct {
-	db             *gorm.DB
-	statsMu        sync.Mutex
+	db      *gorm.DB
+	statsMu sync.Mutex
 	// statsQueryMu serializes expensive aggregate refreshes across distinct
 	// dashboard filter keys. Per-key single-flight alone still allows a
 	// dashboard to launch several parallel COUNT(DISTINCT ...) scans.
@@ -1701,21 +1990,22 @@ type gatewayStatsCacheEntry struct {
 }
 
 type gatewayStatsQueryKey struct {
-	gatewayGroupID uint
-	gatewayKeyID   uint
-	channelID      uint
+	gatewayGroupID   uint
+	gatewayKeyID     uint
+	channelID        uint
+	providerID       uint
 	includeEndpoints bool
-	model          string
-	requestID      string
-	resultMode     string
-	requestType    int
-	requestTypeSet bool
-	successOnly    bool
-	successSet     bool
-	fromUnixNano   int64
-	fromSet        bool
-	toUnixNano     int64
-	toSet          bool
+	model            string
+	requestID        string
+	resultMode       string
+	requestType      int
+	requestTypeSet   bool
+	successOnly      bool
+	successSet       bool
+	fromUnixNano     int64
+	fromSet          bool
+	toUnixNano       int64
+	toSet            bool
 }
 
 type gatewayStatsCall struct {
@@ -1877,7 +2167,7 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 				if !hasCompanion {
 					return fmt.Errorf("virtual cache hedge settlement requires a recorded hedge attempt")
 				}
-				case GatewayVirtualCacheReasonResponseRuleFailover:
+			case GatewayVirtualCacheReasonResponseRuleFailover:
 				if usage.AttemptKind != GatewayAttemptKindFailover && usage.AttemptKind != GatewayAttemptKindHedge {
 					return fmt.Errorf("virtual cache response-rule settlement requires a failover or hedge winner")
 				}
@@ -1885,17 +2175,17 @@ func (r *GatewayUsageLogs) FinalizeRequest(input GatewayFinalizeRequestInput) (b
 				if err != nil {
 					return fmt.Errorf("check response-rule companion: %w", err)
 				}
-					if !hasCompanion {
-						return fmt.Errorf("virtual cache response-rule settlement requires a prior rejected route")
-					}
-				case GatewayVirtualCacheReasonProviderGlobal:
-					if input.HedgeTriggered {
-						return fmt.Errorf("virtual cache provider settlement cannot be marked as a hedge")
-					}
-					if usage.GatewayProviderID == 0 {
-						return fmt.Errorf("virtual cache provider settlement requires a provider-backed winner")
-					}
-				default:
+				if !hasCompanion {
+					return fmt.Errorf("virtual cache response-rule settlement requires a prior rejected route")
+				}
+			case GatewayVirtualCacheReasonProviderGlobal:
+				if input.HedgeTriggered {
+					return fmt.Errorf("virtual cache provider settlement cannot be marked as a hedge")
+				}
+				if usage.GatewayProviderID == 0 {
+					return fmt.Errorf("virtual cache provider settlement requires a provider-backed winner")
+				}
+			default:
 				return fmt.Errorf("unsupported virtual cache reason %q", virtualReason)
 			}
 			if input.VirtualCacheReadTokens > usage.InputTokens {
@@ -2107,7 +2397,18 @@ func (r *GatewayUsageLogs) DeleteBefore(before time.Time) (int64, error) {
 		if err := tx.Where("request_id NOT IN (?)", remaining).Delete(&GatewayWinnerSettlement{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("request_id NOT IN (?)", remaining).Delete(&GatewayRequestFinalization{}).Error
+		if err := tx.Where("request_id NOT IN (?)", remaining).Delete(&GatewayRequestFinalization{}).Error; err != nil {
+			return err
+		}
+		if deleted > 0 {
+			// Cache-health rows are derived from usage logs. Retention changes can
+			// alter the rolling denominator, so force a fresh evaluation rather
+			// than serving stale statistics or pauses.
+			if err := tx.Where("1 = 1").Delete(&GatewayChannelCacheHealth{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err == nil && deleted > 0 {
 		r.markStatsChanged()
@@ -2128,7 +2429,10 @@ func (r *GatewayUsageLogs) DeleteAll() (int64, error) {
 		if err := tx.Where("1 = 1").Delete(&GatewayWinnerSettlement{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("1 = 1").Delete(&GatewayRequestFinalization{}).Error
+		if err := tx.Where("1 = 1").Delete(&GatewayRequestFinalization{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("1 = 1").Delete(&GatewayChannelCacheHealth{}).Error
 	})
 	if err == nil && deleted > 0 {
 		r.markStatsChanged()
@@ -2140,12 +2444,15 @@ type GatewayUsageQuery struct {
 	GatewayGroupID uint
 	GatewayKeyID   uint
 	ChannelID      uint
+	// GatewayProviderID filters direct-provider usage independently from
+	// ChannelID, which is reserved for monitored channels.
+	GatewayProviderID uint
 	// IncludeSum and IncludeEndpoints keep optional dashboard aggregates out of
 	// latency-sensitive list/stat calls. The HTTP API enables both by default
 	// for backwards compatibility; the bundled UI explicitly opts out.
 	IncludeSum       bool
 	IncludeEndpoints bool
-	Model          string
+	Model            string
 	// RequestID 模糊匹配 request_id
 	RequestID   string
 	RequestType *int
@@ -2195,12 +2502,18 @@ type GatewayUsageStats struct {
 	TotalCacheCreationTokens int64 `json:"total_cache_creation_tokens"`
 	// TotalCacheReadTokens includes actual upstream reads and winner virtual
 	// cache credits; total token count remains unchanged by the reclassification.
-	TotalCacheReadTokens int64   `json:"total_cache_read_tokens"`
-	TotalTokens          int64   `json:"total_tokens"`
-	TotalCost            float64 `json:"total_cost"`
-	TotalActualCost      float64 `json:"total_actual_cost"`
-	TotalUpstreamCost    float64 `json:"total_upstream_cost"`
-	WinnerCost           float64 `json:"winner_cost"`
+	TotalCacheReadTokens int64 `json:"total_cache_read_tokens"`
+	// CacheHitRate is based only on real upstream cache buckets; virtual cache
+	// settlement credits never enter this ratio.
+	CacheHitRate              float64 `json:"cache_hit_rate"`
+	CacheHealthInputTokens    int64   `json:"cache_health_input_tokens"`
+	CacheHealthReadTokens     int64   `json:"cache_health_read_tokens"`
+	CacheHealthCreationTokens int64   `json:"cache_health_creation_tokens"`
+	TotalTokens               int64   `json:"total_tokens"`
+	TotalCost                 float64 `json:"total_cost"`
+	TotalActualCost           float64 `json:"total_actual_cost"`
+	TotalUpstreamCost         float64 `json:"total_upstream_cost"`
+	WinnerCost                float64 `json:"winner_cost"`
 	// VirtualCacheSubsidyCost is the amount absorbed by the gateway when a
 	// virtual-cache winner's raw upstream cost exceeds the amount billed to
 	// the gateway key. It is included in ExtraAttemptCost for the aggregate
@@ -2208,8 +2521,8 @@ type GatewayUsageStats struct {
 	VirtualCacheSubsidyCost float64 `json:"virtual_cache_subsidy_cost"`
 	// ExtraAttemptCost includes loser/rejected attempts and virtual-cache
 	// subsidies. Keep the field name for API compatibility.
-	ExtraAttemptCost     float64 `json:"extra_attempt_cost"`
-	AverageDurationMS    float64 `json:"average_duration_ms"`
+	ExtraAttemptCost  float64 `json:"extra_attempt_cost"`
+	AverageDurationMS float64 `json:"average_duration_ms"`
 	// RPM/TPM：近 5 分钟均值（对齐 sub2api），与筛选时间范围无关；TPM 仅 input+output
 	RPM       int64                 `json:"rpm"`
 	TPM       int64                 `json:"tpm"`
@@ -2237,6 +2550,9 @@ func (r *GatewayUsageLogs) applyFilters(db *gorm.DB, q GatewayUsageQuery) *gorm.
 	}
 	if q.ChannelID > 0 {
 		db = db.Where("channel_id = ?", q.ChannelID)
+	}
+	if q.GatewayProviderID > 0 {
+		db = db.Where("gateway_provider_id = ?", q.GatewayProviderID)
 	}
 	if m := strings.TrimSpace(q.Model); m != "" {
 		// 下拉精确匹配请求模型 / 上游模型（兼容历史模糊：含 * 或 % 时走 LIKE）
@@ -2670,22 +2986,25 @@ func (r *GatewayUsageLogs) markStatsChanged() {
 func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStats, error) {
 	db := r.applyFilters(r.db.Model(&GatewayUsageLog{}), q)
 	type aggRow struct {
-		TotalRequests            int64
-		AttemptCount             int64
-		WinnerCount              int64
-		SuccessCount             int64
-		ErrorCount               int64
-		TotalInputTokens         int64
-		TotalOutputTokens        int64
-		TotalCacheCreationTokens int64
-		TotalCacheReadTokens     int64
-		TotalCost                float64
-		TotalActualCost          float64
-		TotalUpstreamCost        float64
-		WinnerCost               float64
-		VirtualCacheSubsidyCost  float64
-		ExtraAttemptCost         float64
-		AvgDurationMS            float64
+		TotalRequests             int64
+		AttemptCount              int64
+		WinnerCount               int64
+		SuccessCount              int64
+		ErrorCount                int64
+		TotalInputTokens          int64
+		TotalOutputTokens         int64
+		TotalCacheCreationTokens  int64
+		TotalCacheReadTokens      int64
+		CacheHealthInputTokens    int64
+		CacheHealthReadTokens     int64
+		CacheHealthCreationTokens int64
+		TotalCost                 float64
+		TotalActualCost           float64
+		TotalUpstreamCost         float64
+		WinnerCost                float64
+		VirtualCacheSubsidyCost   float64
+		ExtraAttemptCost          float64
+		AvgDurationMS             float64
 	}
 	var row aggRow
 	if err := db.Session(&gorm.Session{}).Select(`
@@ -2698,6 +3017,9 @@ func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStat
 		COALESCE(SUM(output_tokens),0) as total_output_tokens,
 		COALESCE(SUM(cache_creation_tokens),0) as total_cache_creation_tokens,
 		COALESCE(SUM(cache_read_tokens + virtual_cache_read_tokens),0) as total_cache_read_tokens,
+		COALESCE(SUM(CASE WHEN success THEN input_tokens ELSE 0 END),0) as cache_health_input_tokens,
+		COALESCE(SUM(CASE WHEN success THEN cache_read_tokens ELSE 0 END),0) as cache_health_read_tokens,
+		COALESCE(SUM(CASE WHEN success THEN cache_creation_tokens ELSE 0 END),0) as cache_health_creation_tokens,
 		COALESCE(SUM(total_cost),0) as total_cost,
 		COALESCE(SUM(actual_cost),0) as total_actual_cost,
 		COALESCE(SUM(actual_cost),0) as total_upstream_cost,
@@ -2726,28 +3048,33 @@ func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStat
 	}
 
 	totalTokens := row.TotalInputTokens + row.TotalOutputTokens + row.TotalCacheCreationTokens + row.TotalCacheReadTokens
+	cacheHitRate := cacheHitRatePercent(row.CacheHealthInputTokens, row.CacheHealthReadTokens, row.CacheHealthCreationTokens)
 	rpm, tpm := r.performanceRPMAndTPM(q)
 	return &GatewayUsageStats{
-		TotalRequests:            row.TotalRequests,
-		AttemptCount:             row.AttemptCount,
-		WinnerCount:              row.WinnerCount,
-		SuccessCount:             row.SuccessCount,
-		ErrorCount:               row.ErrorCount,
-		TotalInputTokens:         row.TotalInputTokens,
-		TotalOutputTokens:        row.TotalOutputTokens,
-		TotalCacheCreationTokens: row.TotalCacheCreationTokens,
-		TotalCacheReadTokens:     row.TotalCacheReadTokens,
-		TotalTokens:              totalTokens,
-		TotalCost:                row.TotalCost,
-		TotalActualCost:          row.TotalActualCost,
-		TotalUpstreamCost:        row.TotalUpstreamCost,
-		WinnerCost:               row.WinnerCost,
-		VirtualCacheSubsidyCost:  row.VirtualCacheSubsidyCost,
-		ExtraAttemptCost:         row.ExtraAttemptCost,
-		AverageDurationMS:        row.AvgDurationMS,
-		RPM:                      rpm,
-		TPM:                      tpm,
-		Endpoints:                endpoints,
+		TotalRequests:             row.TotalRequests,
+		AttemptCount:              row.AttemptCount,
+		WinnerCount:               row.WinnerCount,
+		SuccessCount:              row.SuccessCount,
+		ErrorCount:                row.ErrorCount,
+		TotalInputTokens:          row.TotalInputTokens,
+		TotalOutputTokens:         row.TotalOutputTokens,
+		TotalCacheCreationTokens:  row.TotalCacheCreationTokens,
+		TotalCacheReadTokens:      row.TotalCacheReadTokens,
+		CacheHitRate:              cacheHitRate,
+		CacheHealthInputTokens:    row.CacheHealthInputTokens,
+		CacheHealthReadTokens:     row.CacheHealthReadTokens,
+		CacheHealthCreationTokens: row.CacheHealthCreationTokens,
+		TotalTokens:               totalTokens,
+		TotalCost:                 row.TotalCost,
+		TotalActualCost:           row.TotalActualCost,
+		TotalUpstreamCost:         row.TotalUpstreamCost,
+		WinnerCost:                row.WinnerCost,
+		VirtualCacheSubsidyCost:   row.VirtualCacheSubsidyCost,
+		ExtraAttemptCost:          row.ExtraAttemptCost,
+		AverageDurationMS:         row.AvgDurationMS,
+		RPM:                       rpm,
+		TPM:                       tpm,
+		Endpoints:                 endpoints,
 	}, nil
 }
 
@@ -2755,13 +3082,14 @@ func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStat
 // 沿用组/密钥/时间筛选；忽略 model / result / request_id（避免自过滤）。
 func gatewayStatsCacheKey(q GatewayUsageQuery) gatewayStatsQueryKey {
 	key := gatewayStatsQueryKey{
-		gatewayGroupID: q.GatewayGroupID,
-		gatewayKeyID:   q.GatewayKeyID,
-		channelID:      q.ChannelID,
+		gatewayGroupID:   q.GatewayGroupID,
+		gatewayKeyID:     q.GatewayKeyID,
+		channelID:        q.ChannelID,
+		providerID:       q.GatewayProviderID,
 		includeEndpoints: q.IncludeEndpoints,
-		model:          strings.TrimSpace(q.Model),
-		requestID:      strings.TrimSpace(q.RequestID),
-		resultMode:     strings.ToLower(strings.TrimSpace(q.ResultMode)),
+		model:            strings.TrimSpace(q.Model),
+		requestID:        strings.TrimSpace(q.RequestID),
+		resultMode:       strings.ToLower(strings.TrimSpace(q.ResultMode)),
 	}
 	if q.From != nil {
 		key.fromSet = true
