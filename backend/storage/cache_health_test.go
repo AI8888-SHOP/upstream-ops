@@ -65,6 +65,14 @@ func TestCacheHealthStateUpsertBySource(t *testing.T) {
 	if rows[0].HitRate != 80 || rows[0].BlacklistReason != "updated" {
 		t.Fatalf("state = %+v", rows[0])
 	}
+	if err := logs.ClearCacheHealthBlacklist(GatewayRouteSourceProvider, 3); err != nil {
+		t.Fatalf("clear provider blacklist: %v", err)
+	}
+	rows, err = logs.CacheHealthStates(GatewayRouteSourceProvider, []uint{3})
+	if err != nil || len(rows) != 1 || rows[0].HitRate != 80 || rows[0].BlacklistedUntil != nil || rows[0].BlacklistReason != "" {
+		t.Fatalf("source-cleared state = %#v err=%v", rows, err)
+	}
+	// The global cleanup remains idempotent after a source-specific clear.
 	if err := logs.ClearCacheHealthBlacklists(); err != nil {
 		t.Fatalf("clear blacklists: %v", err)
 	}

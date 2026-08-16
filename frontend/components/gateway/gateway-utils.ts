@@ -3,6 +3,7 @@ import type {
   GatewayModelTestResult,
   GatewayProviderOption,
   GatewayRoute,
+  GatewayRouteModelCooldown,
   GatewayRouteSourceKind,
   RateSnapshot,
 } from "@/lib/api-types"
@@ -342,7 +343,53 @@ export function isRouteTempPaused(
 
 /** 是否有可展示的上次/当前暂停错误 */
 export function hasRoutePauseError(route: Partial<GatewayRoute>): boolean {
-  return !!(route.temp_unschedulable_reason?.trim() || route.temp_unschedulable_until)
+  return !!(
+    route.temp_unschedulable_reason?.trim() ||
+    route.temp_unschedulable_until ||
+    routeModelCooldownEntries(route).length > 0
+  )
+}
+
+/** 返回路由上已持久化的模型冷却，按模型名稳定排序。 */
+export function routeModelCooldownEntries(
+  route: Partial<GatewayRoute>,
+): GatewayRouteModelCooldown[] {
+  const values = Object.values(route.model_cooldowns ?? {})
+  const seen = new Set<string>()
+  return values
+    .filter((item) => {
+      const model = String(item?.model ?? "").trim()
+      const hasState =
+        !!item?.temp_unschedulable_until ||
+        !!item?.temp_unschedulable_at ||
+        !!item?.temp_unschedulable_reason?.trim() ||
+        !!item?.temp_unschedulable_request_id?.trim() ||
+        (item?.recover_success_streak ?? 0) > 0
+      if (!model || !hasState || seen.has(model)) return false
+      seen.add(model)
+      return true
+    })
+    .sort((a, b) => String(a.model).localeCompare(String(b.model)))
+}
+
+/** 模型级冷却是否仍在限制调度。 */
+export function isModelCooldownActive(
+  cooldown: Partial<GatewayRouteModelCooldown>,
+  now = Date.now(),
+): boolean {
+  if (!cooldown.temp_unschedulable_until) return false
+  const time = new Date(cooldown.temp_unschedulable_until).getTime()
+  return !Number.isNaN(time) && time > now
+}
+
+/** 缓存健康拉黑是否仍在生效。 */
+export function isCacheHealthBlacklisted(
+  route: Partial<GatewayRoute>,
+  now = Date.now(),
+): boolean {
+  if (!route.cache_health_blacklisted_until) return false
+  const time = new Date(route.cache_health_blacklisted_until).getTime()
+  return !Number.isNaN(time) && time > now
 }
 
 /** 对齐上游同步 accountRateMultiplier：原值=源分组 ratio，非强制 1 */

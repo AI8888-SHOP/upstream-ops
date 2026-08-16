@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
-import { Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react"
+import {
+  Loader2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+  Unlock,
+} from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -91,6 +99,7 @@ export function GatewayProvidersPanel() {
   const [form, setForm] = useState<ProviderForm>(emptyForm())
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [modelsLoading, setModelsLoading] = useState(false)
+  const [cacheHealthBusyID, setCacheHealthBusyID] = useState<number | null>(null)
 
   const load = useCallback(
     async (p = pageNum, query = q) => {
@@ -289,6 +298,27 @@ export function GatewayProvidersPanel() {
     }
   }
 
+  async function clearCacheBlacklist(item: GatewayProvider) {
+    const ok = await confirm({
+      title: "解除缓存限制",
+      description: `确定立即解除「${item.name}」的缓存健康拉黑？命中率统计会保留。`,
+      confirmLabel: "解除限制",
+    })
+    if (!ok) return
+    setCacheHealthBusyID(item.id)
+    try {
+      await apiFetch(`/gateway/providers/${item.id}/cache-health/clear`, {
+        method: "POST",
+      })
+      toast.success("已解除缓存限制")
+      await load(pageNum, q)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "解除缓存限制失败")
+    } finally {
+      setCacheHealthBusyID(null)
+    }
+  }
+
   const items = page?.items ?? []
 
   return (
@@ -422,13 +452,38 @@ export function GatewayProvidersPanel() {
                             </div>
                             {p.cache_health_blacklisted_until &&
                             new Date(p.cache_health_blacklisted_until).getTime() > Date.now() ? (
-                              <Badge
-                                variant="destructive"
-                                className="px-1.5 py-0 text-[10px]"
-                                title={p.cache_health_blacklist_reason || "缓存命中率过低"}
-                              >
-                                拉黑至 {new Date(p.cache_health_blacklisted_until).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
-                              </Badge>
+                              <div className="flex max-w-64 flex-wrap items-center gap-1">
+                                <Badge
+                                  variant="destructive"
+                                  className="px-1.5 py-0 text-[10px]"
+                                  title={p.cache_health_blacklist_reason || "缓存命中率过低"}
+                                >
+                                  拉黑至 {new Date(p.cache_health_blacklisted_until).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                                </Badge>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-6 gap-1 px-1.5 text-[10px]"
+                                  disabled={cacheHealthBusyID === p.id}
+                                  title="立即解除该直连渠道的缓存健康限制"
+                                  onClick={() => void clearCacheBlacklist(p)}
+                                >
+                                  {cacheHealthBusyID === p.id ? (
+                                    <Loader2 className="size-3 animate-spin" />
+                                  ) : (
+                                    <Unlock className="size-3" />
+                                  )}
+                                  解除
+                                </Button>
+                                {p.cache_health_blacklist_reason ? (
+                                  <div
+                                    className="w-full truncate text-[10px] text-destructive"
+                                    title={p.cache_health_blacklist_reason}
+                                  >
+                                    {p.cache_health_blacklist_reason}
+                                  </div>
+                                ) : null}
+                              </div>
                             ) : null}
                           </div>
                         ) : (

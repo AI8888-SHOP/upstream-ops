@@ -68,6 +68,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.GET("/providers/options", func(c *gin.Context) { listGatewayProviderOptions(c, d) })
 		gp.GET("/providers/:id/models/preview", func(c *gin.Context) { previewGatewayProviderModels(c, d) })
 		gp.GET("/providers/:id/cache-health", func(c *gin.Context) { gatewayProviderCacheHealth(c, d) })
+		gp.POST("/providers/:id/cache-health/clear", func(c *gin.Context) { clearGatewayProviderCacheHealth(c, d) })
 		gp.GET("/providers", func(c *gin.Context) { listGatewayProviders(c, d) })
 		gp.POST("/providers", func(c *gin.Context) { createGatewayProvider(c, d) })
 		gp.PUT("/providers/:id", func(c *gin.Context) { updateGatewayProvider(c, d) })
@@ -80,6 +81,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.GET("/usage/models", func(c *gin.Context) { listGatewayUsageModels(c, d) })
 		gp.POST("/usage/cleanup", func(c *gin.Context) { cleanupGatewayUsage(c, d) })
 		gp.GET("/cache-health", func(c *gin.Context) { listGatewayCacheHealth(c, d) })
+		gp.POST("/cache-health/clear", func(c *gin.Context) { clearGatewayCacheHealth(c, d) })
 
 		// prices
 		gp.GET("/prices", func(c *gin.Context) { listGatewayPrices(c, d) })
@@ -531,6 +533,46 @@ func gatewayProviderCacheHealth(c *gin.Context, d *Deps) {
 		item = &stats[0]
 	}
 	c.JSON(http.StatusOK, gin.H{"item": item, "enabled": d.Gateway.CacheHealthEnabled()})
+}
+
+func clearGatewayProviderCacheHealth(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid provider id"})
+		return
+	}
+	if err := d.Gateway.ClearCacheHealthBlacklist(storage.GatewayRouteSourceProvider, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+type clearGatewayCacheHealthInput struct {
+	SourceKind string `json:"source_kind"`
+	SourceID   uint   `json:"source_id"`
+}
+
+func clearGatewayCacheHealth(c *gin.Context, d *Deps) {
+	var input clearGatewayCacheHealthInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(input.SourceKind))
+	if kind != storage.GatewayRouteSourceProvider && kind != storage.GatewayRouteSourceMonitor {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid source_kind"})
+		return
+	}
+	if input.SourceID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "source_id is required"})
+		return
+	}
+	if err := d.Gateway.ClearCacheHealthBlacklist(kind, input.SourceID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func uniqueUintIDs(ids []uint) []uint {

@@ -1,5 +1,5 @@
 import { useState, type Dispatch, type SetStateAction } from "react"
-import { Check, ChevronDown, Play, Plus } from "lucide-react"
+import { Check, ChevronDown, Play, Plus, Unlock } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -41,8 +41,11 @@ import {
   emptyRoute,
   formatRate,
   hasRoutePauseError,
+  isCacheHealthBlacklisted,
+  isModelCooldownActive,
   isRouteTempPaused,
   routeAccountRate,
+  routeModelCooldownEntries,
   routeSourceKind,
   sourceGroupOptionValue,
   sourceGroupSelectValue,
@@ -204,6 +207,7 @@ type RoutesPanelProps = {
   onSaveRoutes: () => void
   onEnsureKeys: () => void
   onClearRoutePause: (routeID?: number) => void
+  onClearCacheHealth: (sourceKind: GatewayRouteSourceKind, sourceID: number) => void
   onShowPauseError: (route: Partial<GatewayRoute>) => void
 }
 
@@ -224,6 +228,7 @@ export function RoutesPanel({
   onSaveRoutes,
   onEnsureKeys,
   onClearRoutePause,
+  onClearCacheHealth,
   onShowPauseError,
 }: RoutesPanelProps) {
   return (
@@ -318,6 +323,10 @@ export function RoutesPanel({
             const providerID = Number(r.gateway_provider_id) || 0
             const sgs = sourceGroupsByChannel[chId] ?? []
             const provider = providerOptions.find((p) => p.id === providerID)
+            const modelCooldowns = routeModelCooldownEntries(r)
+            const cacheHealthBlacklisted = isCacheHealthBlacklisted(r)
+            const cacheHealthSourceID = kind === "provider" ? providerID : chId
+            const hasCacheHealthStats = (r.cache_health_request_count ?? 0) > 0
             const calculatedRate =
               kind === "provider"
                 ? (r.rate_convert_mode as string) === "custom"
@@ -702,38 +711,94 @@ export function RoutesPanel({
                       )
                     )}
                   </div>
+                  {hasCacheHealthStats || cacheHealthBlacklisted ? (
+                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                      <span className="text-[10px] text-muted-foreground">
+                        缓存 {(r.cache_health_hit_rate ?? 0).toFixed(2)}% · {r.cache_health_request_count ?? 0} 次
+                      </span>
+                      {cacheHealthBlacklisted ? (
+                        <>
+                          <Badge
+                            variant="destructive"
+                            className="px-1.5 text-[10px]"
+                            title={r.cache_health_blacklist_reason || "缓存命中率过低"}
+                          >
+                            拉黑至 {new Date(r.cache_health_blacklisted_until as string).toLocaleString("zh-CN")}
+                          </Badge>
+                          {cacheHealthSourceID > 0 ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 gap-1 px-1.5 text-xs"
+                              title="立即解除该来源的缓存健康限制"
+                              onClick={() =>
+                                onClearCacheHealth(
+                                  kind,
+                                  cacheHealthSourceID,
+                                )
+                              }
+                            >
+                              <Unlock className="size-3" /> 解除缓存限制
+                            </Button>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {hasRoutePauseError(r) && (
                     <div className="mt-1 flex flex-wrap items-center gap-1">
                       {isRouteTempPaused(r.temp_unschedulable_until) ? (
-                        <Badge variant="destructive" title={
-                          r.temp_unschedulable_until
-                            ? `冷却至 ${new Date(r.temp_unschedulable_until).toLocaleString("zh-CN")}`
-                            : undefined
-                        }>
-                          暂停中
+                        <Badge
+                          variant="destructive"
+                          title={
+                            r.temp_unschedulable_until
+                              ? `冷却至 ${new Date(r.temp_unschedulable_until).toLocaleString("zh-CN")}`
+                              : undefined
+                          }
+                        >
+                          路由暂停
                           {r.temp_unschedulable_until
                             ? ` · ${new Date(r.temp_unschedulable_until).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
                             : ""}
                         </Badge>
-                      ) : (
+                      ) : null}
+                      {modelCooldowns.map((cooldown) => {
+                        const active = isModelCooldownActive(cooldown)
+                        return (
+                          <Badge
+                            key={`${cooldown.route_id}-${cooldown.model}`}
+                            variant={active ? "destructive" : "secondary"}
+                            className="max-w-full px-1.5 text-[10px]"
+                            title={cooldown.temp_unschedulable_reason || undefined}
+                          >
+                            模型 {cooldown.model} {active ? "冷却至" : "已恢复"}
+                            {active && cooldown.temp_unschedulable_until
+                              ? ` ${new Date(cooldown.temp_unschedulable_until).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
+                              : ""}
+                          </Badge>
+                        )
+                      })}
+                      {!isRouteTempPaused(r.temp_unschedulable_until) &&
+                      modelCooldowns.length === 0 ? (
                         <Badge variant="secondary">已恢复</Badge>
-                      )}
+                      ) : null}
                       <Button
                         size="sm"
                         variant="outline"
                         className="h-6 px-1.5 text-xs"
                         onClick={() => onShowPauseError(r)}
                       >
-                        错误
+                        详情
                       </Button>
                       {r.id ? (
                         <Button
                           size="sm"
                           variant="outline"
-                          className="h-6 px-1.5 text-xs"
+                          className="h-6 gap-1 px-1.5 text-xs"
+                          title="解除该路由的全部模型冷却"
                           onClick={() => void onClearRoutePause(r.id)}
                         >
-                          清除
+                          <Unlock className="size-3" /> 解除冷却
                         </Button>
                       ) : null}
                     </div>

@@ -74,6 +74,21 @@ func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 	if IsRouteSchedulable(&loaded[0], now) {
 		t.Fatal("blacklisted provider route remained schedulable")
 	}
+	if err := svc.ClearCacheHealthBlacklist(storage.GatewayRouteSourceProvider, provider.ID); err != nil {
+		t.Fatalf("clear provider blacklist: %v", err)
+	}
+	loaded, err = routes.ListByGroupID(group.ID)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("reload after source clear: %#v err=%v", loaded, err)
+	}
+	if loaded[0].CacheHealthBlacklistedUntil != nil || !IsRouteSchedulable(&loaded[0], now) {
+		t.Fatalf("source clear did not release route: %+v", loaded[0])
+	}
+	// Re-evaluate the same low-health source to exercise the normal automatic
+	// path before testing global protection shutdown below.
+	if err := svc.EvaluateCacheHealth(storage.GatewayRouteSourceProvider, provider.ID, now); err != nil {
+		t.Fatalf("re-evaluate after source clear: %v", err)
+	}
 	if !IsRouteSchedulable(&loaded[0], now.Add(11*time.Minute)) {
 		t.Fatal("expired provider blacklist did not recover")
 	}

@@ -30,6 +30,7 @@ import type {
   GatewayModelTestResult,
   GatewayProviderOption,
   GatewayRoute,
+  GatewayRouteSourceKind,
   GatewayUsageModelOption,
   GatewayUsagePage,
   GatewayUsageStats,
@@ -1234,10 +1235,34 @@ export function GatewayPage() {
     if (!routeID || !selectedGroup) return
     try {
       await apiFetch(`/gateway/routes/${routeID}/clear-pause`, { method: "POST" })
-      toast.success("已清除暂停")
+      toast.success("已解除冷却")
       await loadRoutes(selectedGroup.id)
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "清除暂停失败")
+      toast.error(e instanceof Error ? e.message : "解除冷却失败")
+    }
+  }
+
+  async function clearCacheHealth(
+    sourceKind: GatewayRouteSourceKind,
+    sourceID: number,
+  ) {
+    if (!sourceID) return
+    const sourceLabel = sourceKind === "provider" ? "直连渠道" : "监控渠道"
+    const ok = await confirm({
+      title: "解除缓存限制",
+      description: `确定立即解除该${sourceLabel}的缓存健康拉黑？命中率统计会保留，来源下的全部路由都会恢复调度。`,
+      confirmLabel: "解除限制",
+    })
+    if (!ok) return
+    try {
+      await apiFetch("/gateway/cache-health/clear", {
+        method: "POST",
+        body: JSON.stringify({ source_kind: sourceKind, source_id: sourceID }),
+      })
+      toast.success("已解除缓存限制")
+      if (selectedGroup) await loadRoutes(selectedGroup.id)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "解除缓存限制失败")
     }
   }
 
@@ -1679,6 +1704,9 @@ export function GatewayPage() {
                         onSaveRoutes={() => void saveRoutes()}
                         onEnsureKeys={() => void ensureKeys()}
                         onClearRoutePause={(id) => void clearRoutePause(id)}
+                        onClearCacheHealth={(kind, id) =>
+                          void clearCacheHealth(kind, id)
+                        }
                         onShowPauseError={setPauseErrorRoute}
                       />
                     </TabsContent>
@@ -1793,6 +1821,7 @@ export function GatewayPage() {
         pauseErrorRoute={pauseErrorRoute}
         onClose={() => setPauseErrorRoute(null)}
         onClearPause={(id) => void clearRoutePause(id)}
+        onClearCacheHealth={(kind, id) => void clearCacheHealth(kind, id)}
       />
 
       <EnsureKeysResultDialog

@@ -5,6 +5,7 @@ import {
   FlaskConical,
   Loader2,
   Search,
+  Unlock,
   XCircle,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
@@ -40,6 +41,7 @@ import type {
   GatewayModelSyncResult,
   GatewayModelTestResult,
   GatewayRoute,
+  GatewayRouteSourceKind,
   ModelDefaultPrice,
 } from "@/lib/api-types"
 import {
@@ -47,8 +49,12 @@ import {
   type APIKeyLen,
   findSourceTest,
   isRouteTempPaused,
+  isCacheHealthBlacklisted,
+  isModelCooldownActive,
   perTokenToMTok,
   resolveModelSources,
+  routeModelCooldownEntries,
+  routeSourceKind,
   sourceTagTone,
   testBusyKey,
   type GroupFormState,
@@ -268,11 +274,27 @@ export function RoutePauseErrorDialog({
   pauseErrorRoute,
   onClose,
   onClearPause,
+  onClearCacheHealth,
 }: {
   pauseErrorRoute: Partial<GatewayRoute> | null
   onClose: () => void
   onClearPause: (id: number) => void
+  onClearCacheHealth?: (sourceKind: GatewayRouteSourceKind, sourceID: number) => void
 }) {
+  const modelCooldowns = pauseErrorRoute
+    ? routeModelCooldownEntries(pauseErrorRoute)
+    : []
+  const cacheHealthBlacklisted = pauseErrorRoute
+    ? isCacheHealthBlacklisted(pauseErrorRoute)
+    : false
+  const cacheHealthSourceKind = pauseErrorRoute
+    ? routeSourceKind(pauseErrorRoute)
+    : "monitor"
+  const cacheHealthSourceID = pauseErrorRoute
+    ? cacheHealthSourceKind === "provider"
+      ? Number(pauseErrorRoute.gateway_provider_id) || 0
+      : Number(pauseErrorRoute.source_channel_id) || 0
+    : 0
   return (
     <Dialog
       open={!!pauseErrorRoute}
@@ -282,9 +304,9 @@ export function RoutePauseErrorDialog({
     >
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>路由错误信息</DialogTitle>
+          <DialogTitle>路由限制详情</DialogTitle>
           <DialogDescription>
-            最近一次上游失败详情。错误信息会保留到手动清除、连续 3 次成功自动清除，或下次失败覆盖。
+            展示上游失败冷却和缓存健康限制。失败详情会保留到手动清除、连续 3 次成功自动清除，或下次失败覆盖。
           </DialogDescription>
         </DialogHeader>
         {pauseErrorRoute ? (
@@ -337,6 +359,84 @@ export function RoutePauseErrorDialog({
                 </div>
               </div>
             </div>
+            {modelCooldowns.length > 0 ? (
+              <div className="space-y-1 rounded-md border bg-muted/20 p-3">
+                <div className="text-[11px] text-muted-foreground">模型级冷却</div>
+                <div className="space-y-2">
+                  {modelCooldowns.map((cooldown) => (
+                    <div
+                      key={`${cooldown.route_id}-${cooldown.model}`}
+                      className="rounded border bg-background/60 p-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge
+                          variant={
+                            isModelCooldownActive(cooldown)
+                              ? "destructive"
+                              : "secondary"
+                          }
+                          className="px-1.5 text-[10px]"
+                        >
+                          {isModelCooldownActive(cooldown) ? "冷却中" : "已恢复"}
+                        </Badge>
+                        <span className="font-medium break-all">{cooldown.model}</span>
+                        {cooldown.temp_unschedulable_until ? (
+                          <span className="font-mono text-[11px] text-muted-foreground">
+                            冷却至 {new Date(cooldown.temp_unschedulable_until).toLocaleString("zh-CN")}
+                          </span>
+                        ) : null}
+                      </div>
+                      {cooldown.temp_unschedulable_reason ? (
+                        <div className="mt-1 break-all text-[11px] text-muted-foreground">
+                          {cooldown.temp_unschedulable_reason}
+                        </div>
+                      ) : null}
+                      {cooldown.temp_unschedulable_request_id ? (
+                        <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">
+                          request_id: {cooldown.temp_unschedulable_request_id}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {pauseErrorRoute.cache_health_blacklisted_until ? (
+              <div className="rounded-md border bg-muted/20 p-3 text-[11px]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge
+                    variant={cacheHealthBlacklisted ? "destructive" : "secondary"}
+                    className="px-1.5 text-[10px]"
+                  >
+                    {cacheHealthBlacklisted ? "缓存限制中" : "缓存限制已恢复"}
+                  </Badge>
+                  <span className="font-mono text-muted-foreground">
+                    截止 {new Date(pauseErrorRoute.cache_health_blacklisted_until).toLocaleString("zh-CN")}
+                  </span>
+                  {cacheHealthBlacklisted &&
+                  onClearCacheHealth &&
+                  cacheHealthSourceID > 0 ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-6 gap-1 px-1.5 text-xs"
+                      onClick={() => {
+                        onClose()
+                        onClearCacheHealth(cacheHealthSourceKind, cacheHealthSourceID)
+                      }}
+                    >
+                      <Unlock className="size-3" /> 解除缓存限制
+                    </Button>
+                  ) : null}
+                </div>
+                {pauseErrorRoute.cache_health_blacklist_reason ? (
+                  <div className="mt-1 break-all text-muted-foreground">
+                    {pauseErrorRoute.cache_health_blacklist_reason}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <div>
               <div className="mb-1 flex items-center justify-between gap-2">
                 <div className="text-[11px] text-muted-foreground">错误信息</div>
@@ -394,7 +494,7 @@ export function RoutePauseErrorDialog({
               void onClearPause(id)
             }}
           >
-            清除暂停
+            解除全部冷却
           </Button>
           <Button type="button" onClick={onClose}>
             关闭

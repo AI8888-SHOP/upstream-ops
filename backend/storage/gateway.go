@@ -350,6 +350,24 @@ func (r *GatewayUsageLogs) ClearCacheHealthBlacklists() error {
 	}).Error
 }
 
+// ClearCacheHealthBlacklist removes the automatic pause for one upstream
+// source while retaining its rolling statistics and evaluation timestamp.
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklist(sourceKind string, sourceID uint) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	if sourceID == 0 {
+		return fmt.Errorf("cache health source id is required")
+	}
+	kind := normalizeCacheHealthSource(sourceKind)
+	return r.db.Exec(
+		`UPDATE gateway_channel_cache_health
+		 SET blacklisted_until = NULL, blacklist_reason = '', updated_at = ?
+		 WHERE source_kind = ? AND source_id = ?`,
+		time.Now(), kind, sourceID,
+	).Error
+}
+
 // GatewayGroups 网关组仓储。
 type GatewayGroups struct {
 	db         *gorm.DB

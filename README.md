@@ -934,6 +934,7 @@ Route field `upstream_protocol`:
 - Default failover: no response, 429, 5xx; with group “failover on 4xx”, all 4xx may failover too.
 - Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
 - Automatic cooldown is isolated by route and final upstream model, so a failure for one model does not pause the channel for other models. Model aliases that resolve to the same upstream model share the cooldown; the management "clear pause" action clears all model cooldowns for that route.
+- The route page shows model cooldowns and cache-health blacklist deadlines/reasons, with actions to release route cooldowns or a source-level cache restriction early.
 - Group: `retry_count`, `response_validation_retry_count`, `failover_max`, `cooldown_seconds`. `response_validation_retry_count` controls extra attempts on the same route after a pre-commit regex rejection; `-1` inherits `retry_count`, while `0` disables only regex-triggered retries.
 - **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
 - **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.
@@ -1130,6 +1131,8 @@ GET/PUT/DELETE /api/gateway/response-rules/:id
 PUT/DELETE   /api/gateway/keys/:id
 POST         /api/gateway/keys/:id/reveal
 POST         /api/gateway/routes/:id/clear-pause
+POST         /api/gateway/cache-health/clear
+POST         /api/gateway/providers/:id/cache-health/clear
 GET/POST     /api/gateway/providers
 GET          /api/gateway/providers/options
 PUT/DELETE   /api/gateway/providers/:id

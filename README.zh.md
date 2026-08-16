@@ -1041,6 +1041,7 @@ x-api-key: sk-...
 - 默认可顺延：无响应、429、5xx；组开启「4xx 顺延」时全部 4xx 也可顺延。
 - 失败路由可写入临时不可调度截止时间（冷却秒数，默认来自 `gateway.tempPauseSeconds` / 组配置）。
 - 自动冷却按“路由 + 最终上游模型”隔离：某个模型失败不会暂停同一渠道的其它模型；映射到同一最终上游模型的别名共享冷却。管理端“清除暂停”会清除该路由的全部模型冷却。
+- 路由页会展示模型级冷却、缓存健康拉黑截止时间与原因；可分别提前解除路由冷却或来源级缓存限制。
 - 组级：`retry_count`、`response_validation_retry_count`、`failover_max`、`cooldown_seconds`。
 - **首字超时**：配置后，仅当「本请求仍可切换到其它路由」时启用；最后一条可试路由会关闭首字掐断，避免无意义超时。
 - **并发兜底（默认关闭）**：主 attempt 立即开始；超过 `hedge_delay_seconds` 仍没有通过校验的响应时，按延迟阶梯启动其它路由。`hedge_max_parallel` 包含主请求，`hedge_max_attempts` 是整个请求可启动的 attempt 总上限。第一个通过校验的响应获胜，其余未完成请求会被取消。
@@ -1238,6 +1239,8 @@ GET/PUT/DELETE /api/gateway/response-rules/:id
 PUT/DELETE   /api/gateway/keys/:id
 POST         /api/gateway/keys/:id/reveal
 POST         /api/gateway/routes/:id/clear-pause
+POST         /api/gateway/cache-health/clear
+POST         /api/gateway/providers/:id/cache-health/clear
 GET/POST     /api/gateway/providers
 GET          /api/gateway/providers/options
 PUT/DELETE   /api/gateway/providers/:id

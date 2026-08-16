@@ -241,3 +241,22 @@ func (s *Service) CacheHealthEnabled() bool {
 	}
 	return cacheHealthProtectionEnabled(s.gatewayRuntime())
 }
+
+// ClearCacheHealthBlacklist releases one source immediately without changing
+// its rolling cache statistics or the global protection configuration.
+func (s *Service) ClearCacheHealthBlacklist(sourceKind string, sourceID uint) error {
+	if s == nil || s.Usage == nil {
+		return fmt.Errorf("cache health dependencies are unavailable")
+	}
+	if sourceID == 0 {
+		return fmt.Errorf("cache health source id is required")
+	}
+	kind := normalizeCacheHealthKind(sourceKind)
+	if err := s.Usage.ClearCacheHealthBlacklist(kind, sourceID); err != nil {
+		return err
+	}
+	if s.Routes != nil {
+		s.Routes.InvalidateCacheHealthSource(kind, sourceID)
+	}
+	return nil
+}
