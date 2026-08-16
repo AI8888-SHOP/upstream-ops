@@ -330,7 +330,7 @@ Commit only `.env.example` to a public repository. Never commit `.env`, `data/`,
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.28
+IMAGE_TAG=v0.0.29
 ```
 
 ## MySQL Deployment
@@ -368,13 +368,13 @@ helper with the live deployment paths:
 
 ```bash
 chmod +x scripts/upgrade.sh
-TARGET_TAG=v0.0.28 ./scripts/upgrade.sh
+TARGET_TAG=v0.0.29 ./scripts/upgrade.sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-.\scripts\upgrade.ps1 -TargetTag v0.0.28
+.\scripts\upgrade.ps1 -TargetTag v0.0.29
 ```
 
 The helper defaults to `ghcr.io/ai8888-shop/upstream-ops` as the image
@@ -410,12 +410,12 @@ For an old Docker/SQLite deployment that also needs the database migration, run
 the PostgreSQL helper from the kit with explicit live deployment paths:
 
 ```bash
-chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.28/scripts/upgrade-to-postgres.sh
+chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.29/scripts/upgrade-to-postgres.sh
 ENV_FILE=/srv/upstream-ops/.env DATA_DIR=/srv/upstream-ops/data \
 COMPOSE_FILE=/srv/upstream-ops/docker-compose.yml \
-POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.28/docker-compose.postgres.yml \
-TARGET_TAG=v0.0.28 MIGRATION_IMAGE_TAG=v0.0.28 \
-/tmp/upstream-ops-upgrade-kit-v0.0.28/scripts/upgrade-to-postgres.sh
+POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.29/docker-compose.postgres.yml \
+TARGET_TAG=v0.0.29 MIGRATION_IMAGE_TAG=v0.0.29 \
+/tmp/upstream-ops-upgrade-kit-v0.0.29/scripts/upgrade-to-postgres.sh
 ```
 
 On Windows PowerShell:
@@ -423,9 +423,9 @@ On Windows PowerShell:
 ```powershell
 .\scripts\upgrade-to-postgres.ps1 `
   -ComposeFile 'D:\upstream-ops\docker-compose.yml' `
-  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.28\docker-compose.postgres.yml' `
+  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.29\docker-compose.postgres.yml' `
   -EnvFile 'D:\upstream-ops\.env' -DataDir 'D:\upstream-ops\data' `
-  -TargetTag 'v0.0.28' -MigrationImageTag 'v0.0.28'
+  -TargetTag 'v0.0.29' -MigrationImageTag 'v0.0.29'
 ```
 
 The helper validates both Compose files and the external network before stopping

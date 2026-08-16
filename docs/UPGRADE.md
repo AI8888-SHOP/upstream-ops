@@ -25,8 +25,8 @@ Linux/macOS:
 COMPOSE_FILE=/srv/upstream-ops/docker-compose.yml \
 ENV_FILE=/srv/upstream-ops/.env \
 DATA_DIR=/srv/upstream-ops/data \
-TARGET_TAG=v0.0.28 \
-/tmp/upstream-ops-upgrade-kit-v0.0.28/scripts/upgrade.sh
+TARGET_TAG=v0.0.29 \
+/tmp/upstream-ops-upgrade-kit-v0.0.29/scripts/upgrade.sh
 ```
 
 Windows PowerShell:
@@ -36,7 +36,7 @@ Windows PowerShell:
   -ComposeFile 'D:\upstream-ops\docker-compose.yml' `
   -EnvFile 'D:\upstream-ops\.env' `
   -DataDir 'D:\upstream-ops\data' `
-  -TargetTag 'v0.0.28'
+  -TargetTag 'v0.0.29'
 ```
 
 The helper performs these checks and actions:
@@ -62,7 +62,7 @@ For a MySQL deployment, include the second Compose file in the same stack:
 COMPOSE_EXTRA_FILES=docker-compose.mysql.yml \
 COMPOSE_FILE=docker-compose.yml \
 ENV_FILE=/srv/upstream-ops/.env DATA_DIR=/srv/upstream-ops/data \
-TARGET_TAG=v0.0.28 /tmp/upstream-ops-upgrade-kit-v0.0.28/scripts/upgrade.sh
+TARGET_TAG=v0.0.29 /tmp/upstream-ops-upgrade-kit-v0.0.29/scripts/upgrade.sh
 ```
 
 PowerShell uses `-ComposeExtraFile 'docker-compose.mysql.yml'`.
@@ -75,14 +75,14 @@ line), then run the PostgreSQL helper from the kit with explicit deployment
 paths:
 
 ```bash
-chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.28/scripts/upgrade-to-postgres.sh
+chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.29/scripts/upgrade-to-postgres.sh
 ENV_FILE=/srv/upstream-ops/.env \
 DATA_DIR=/srv/upstream-ops/data \
 COMPOSE_FILE=/srv/upstream-ops/docker-compose.yml \
-POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.28/docker-compose.postgres.yml \
-TARGET_TAG=v0.0.28 \
-MIGRATION_IMAGE_TAG=v0.0.28 \
-/tmp/upstream-ops-upgrade-kit-v0.0.28/scripts/upgrade-to-postgres.sh
+POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.29/docker-compose.postgres.yml \
+TARGET_TAG=v0.0.29 \
+MIGRATION_IMAGE_TAG=v0.0.29 \
+/tmp/upstream-ops-upgrade-kit-v0.0.29/scripts/upgrade-to-postgres.sh
 ```
 
 PowerShell:
@@ -90,11 +90,11 @@ PowerShell:
 ```powershell
 .\scripts\upgrade-to-postgres.ps1 `
   -ComposeFile 'D:\upstream-ops\docker-compose.yml' `
-  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.28\docker-compose.postgres.yml' `
+  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.29\docker-compose.postgres.yml' `
   -EnvFile 'D:\upstream-ops\.env' `
   -DataDir 'D:\upstream-ops\data' `
-  -TargetTag 'v0.0.28' `
-  -MigrationImageTag 'v0.0.28'
+  -TargetTag 'v0.0.29' `
+  -MigrationImageTag 'v0.0.29'
 ```
 
 The password is passed to the migration container through
