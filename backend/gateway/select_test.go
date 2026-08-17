@@ -190,7 +190,7 @@ func TestRecoverWhenAllRoutesRestrictedClearsResolvedUpstreamModel(t *testing.T)
 	}
 }
 
-func TestRecoverWhenAllRoutesRestrictedWakesCacheBlacklistedRoutes(t *testing.T) {
+func TestRecoverWhenAllRoutesRestrictedWakesHighestHitRateCacheRoutes(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 1, 0, 0, 0, time.UTC)
 	until := now.Add(10 * time.Minute)
 	evaluatedAt := func(minutesAgo int) *time.Time {
@@ -198,23 +198,23 @@ func TestRecoverWhenAllRoutesRestrictedWakesCacheBlacklistedRoutes(t *testing.T)
 		return &value
 	}
 	routes := []storage.GatewayRoute{
-		{ID: 1, Position: 0, SourceChannelID: 10, Enabled: true, SourceAPIKeyCipher: "a", CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(3)},
-		{ID: 2, Position: 1, SourceChannelID: 20, Enabled: true, SourceAPIKeyCipher: "b", CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(2)},
-		{ID: 3, Position: 2, SourceChannelID: 30, Enabled: true, SourceAPIKeyCipher: "c", CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(1)},
+		{ID: 1, Position: 0, SourceChannelID: 10, Enabled: true, SourceAPIKeyCipher: "a", CacheHealthHitRate: 10, CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(3)},
+		{ID: 2, Position: 1, SourceChannelID: 20, Enabled: true, SourceAPIKeyCipher: "b", CacheHealthHitRate: 80, CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(2)},
+		{ID: 3, Position: 2, SourceChannelID: 30, Enabled: true, SourceAPIKeyCipher: "c", CacheHealthHitRate: 60, CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(1)},
 	}
 
 	rt := (&Service{}).runtime()
 	got := rt.recoverWhenAllRoutesRestricted(routes, "m", nil, now)
-	if got[0].CacheHealthBlacklistedUntil != nil || got[1].CacheHealthBlacklistedUntil != nil {
-		t.Fatalf("oldest cache restrictions were not bypassed: route1=%+v route2=%+v", got[0], got[1])
+	if got[1].CacheHealthBlacklistedUntil != nil || got[2].CacheHealthBlacklistedUntil != nil {
+		t.Fatalf("highest-hit-rate cache restrictions were not bypassed: route2=%+v route3=%+v", got[1], got[2])
 	}
-	if got[2].CacheHealthBlacklistedUntil == nil {
-		t.Fatal("recovery bypassed more than the bounded route count")
+	if got[0].CacheHealthBlacklistedUntil == nil {
+		t.Fatal("the lowest-hit-rate route consumed a bounded recovery slot")
 	}
-	if routes[0].CacheHealthBlacklistedUntil == nil || routes[1].CacheHealthBlacklistedUntil == nil {
+	if routes[1].CacheHealthBlacklistedUntil == nil || routes[2].CacheHealthBlacklistedUntil == nil {
 		t.Fatal("cache blacklist bypass must remain request-local")
 	}
-	if candidates := SortRoutesForModel(got, nil, "asc", now, nil, "m"); len(candidates) != 2 {
+	if candidates := SortRoutesForModel(got, nil, "asc", now, nil, "m"); len(candidates) != 2 || candidates[0].Route.ID != 2 || candidates[1].Route.ID != 3 {
 		t.Fatalf("cache recovery candidates=%+v", candidates)
 	}
 }

@@ -243,6 +243,7 @@ type emergencyRestrictionRecoveryCandidate struct {
 	requestID     string
 	modelCooling  bool
 	cacheBlocked  bool
+	cacheHitRate  float64
 	position      int
 	routeID       uint
 	identity      upstreamConcurrencyKey
@@ -321,7 +322,7 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 			index: index, model: modelKey, restrictedAt: restrictedAt,
 			cooldownAt: cooldownAt, cooldownUntil: cooldownUntil,
 			requestID: requestID, modelCooling: modelCooling, cacheBlocked: cacheBlocked,
-			position: route.Position, routeID: route.ID,
+			cacheHitRate: route.CacheHealthHitRate, position: route.Position, routeID: route.ID,
 			identity: identity, identityOK: identityOK,
 		})
 	}
@@ -333,10 +334,22 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 		return routes
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		// Cache-health protection is an accounting policy, not proof that the
-		// upstream is unavailable. Prefer those routes over known failed models.
+		// Cache-only restrictions prefer the best observed hit rate. Known model
+		// failures remain lower priority and prefer the route that has rested longest.
 		if candidates[i].modelCooling != candidates[j].modelCooling {
 			return !candidates[i].modelCooling
+		}
+		if !candidates[i].modelCooling {
+			leftRate := candidates[i].cacheHitRate
+			rightRate := candidates[j].cacheHitRate
+			leftFinite := !math.IsNaN(leftRate) && !math.IsInf(leftRate, 0)
+			rightFinite := !math.IsNaN(rightRate) && !math.IsInf(rightRate, 0)
+			if leftFinite != rightFinite {
+				return leftFinite
+			}
+			if leftFinite && leftRate != rightRate {
+				return leftRate > rightRate
+			}
 		}
 		if !candidates[i].restrictedAt.Equal(candidates[j].restrictedAt) {
 			return candidates[i].restrictedAt.Before(candidates[j].restrictedAt)
