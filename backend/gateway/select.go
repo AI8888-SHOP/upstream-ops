@@ -232,29 +232,29 @@ func sortRoutesForModel(routes []storage.GatewayRoute, groupsByChannel map[uint]
 	return out
 }
 
-const emergencyCooldownRecoveryRouteCount = 2
+const emergencyRestrictionRecoveryRouteCount = 2
 
-type emergencyCooldownRecoveryCandidate struct {
+type emergencyRestrictionRecoveryCandidate struct {
 	index         int
 	model         string
-	failedAt      time.Time
+	restrictedAt  time.Time
 	cooldownAt    *time.Time
 	cooldownUntil time.Time
 	requestID     string
+	modelCooling  bool
+	cacheBlocked  bool
 	position      int
 	routeID       uint
 	identity      upstreamConcurrencyKey
 	identityOK    bool
 }
 
-// recoverWhenAllRoutesCooling clears the oldest model cooldowns when a group
-// would otherwise have no schedulable route. It is intentionally limited to
-// routes that are otherwise valid and enabled, and wakes at most one route per
-// physical upstream so duplicate route rows cannot amplify a recovery probe.
-// The persisted cooldown is cleared before the request-local copy is made
-// schedulable, so a restart does not immediately put the route back into the
-// same dead-end state.
-func (rt *Runtime) recoverWhenAllRoutesCooling(
+// recoverWhenAllRoutesRestricted prevents automatic model cooldowns and
+// cache-health blacklists from emptying an otherwise valid route pool. Manual
+// disablement, multiplier guards, missing credentials, and invalid sources are
+// never bypassed. Cache blacklists are cleared only on the request-local copy;
+// model cooldowns retain the existing CAS-protected persistent recovery.
+func (rt *Runtime) recoverWhenAllRoutesRestricted(
 	routes []storage.GatewayRoute,
 	requestedModel string,
 	groupMapping map[string]string,
@@ -267,7 +267,7 @@ func (rt *Runtime) recoverWhenAllRoutesCooling(
 		now = time.Now()
 	}
 
-	candidates := make([]emergencyCooldownRecoveryCandidate, 0, len(routes))
+	candidates := make([]emergencyRestrictionRecoveryCandidate, 0, len(routes))
 	eligible := 0
 	for index := range routes {
 		route := routes[index]
@@ -279,53 +279,67 @@ func (rt *Runtime) recoverWhenAllRoutesCooling(
 		if strings.TrimSpace(upstreamModel) == "" {
 			upstreamModel = requestedModel
 		}
-		withoutCooldown := route
-		withoutCooldown.TempUnschedulableUntil = nil
-		withoutCooldown.ModelCooldowns = nil
-		if !IsRouteSchedulableForModel(&withoutCooldown, requestedModel, now) {
+		withoutRestrictions := route
+		withoutRestrictions.TempUnschedulableUntil = nil
+		withoutRestrictions.ModelCooldowns = nil
+		withoutRestrictions.CacheHealthBlacklistedUntil = nil
+		if !IsRouteSchedulableForModel(&withoutRestrictions, requestedModel, now) {
 			continue
 		}
 		eligible++
 
 		modelKey := storage.NormalizeGatewayModel(upstreamModel)
-		if modelKey == "" {
-			continue
-		}
-		cooldown, ok := route.ModelCooldowns[modelKey]
-		if !ok || cooldown.TempUnschedulableUntil == nil || !cooldown.TempUnschedulableUntil.After(now) {
-			// A healthy route means this is not an all-cooling outage. Return
-			// immediately so the recovery check stays off the normal hot path.
+		cooldown, modelCooling := route.ModelCooldowns[modelKey]
+		modelCooling = modelCooling && cooldown.TempUnschedulableUntil != nil && cooldown.TempUnschedulableUntil.After(now)
+		cacheBlocked := route.CacheHealthBlacklistedUntil != nil && route.CacheHealthBlacklistedUntil.After(now)
+		if !modelCooling && !cacheBlocked {
+			// A healthy route means automatic restrictions did not empty the pool.
+			// Keep every cooldown/blacklist intact on the normal hot path.
 			return routes
 		}
-		failedAt := cooldown.TempUnschedulableAt
-		if failedAt == nil || failedAt.IsZero() {
-			fallback := *cooldown.TempUnschedulableUntil
-			failedAt = &fallback
-		}
+
+		restrictedAt := now
 		var cooldownAt *time.Time
-		if cooldown.TempUnschedulableAt != nil {
-			at := *cooldown.TempUnschedulableAt
-			cooldownAt = &at
+		var cooldownUntil time.Time
+		var requestID string
+		if modelCooling {
+			cooldownUntil = *cooldown.TempUnschedulableUntil
+			restrictedAt = cooldownUntil
+			if cooldown.TempUnschedulableAt != nil && !cooldown.TempUnschedulableAt.IsZero() {
+				at := *cooldown.TempUnschedulableAt
+				cooldownAt = &at
+				restrictedAt = at
+			}
+			requestID = cooldown.TempUnschedulableRequestID
+		} else if route.CacheHealthEvaluatedAt != nil && !route.CacheHealthEvaluatedAt.IsZero() {
+			restrictedAt = *route.CacheHealthEvaluatedAt
+		} else if route.CacheHealthBlacklistedUntil != nil {
+			restrictedAt = *route.CacheHealthBlacklistedUntil
 		}
 		identity, identityOK := routeUpstreamConcurrencyKey(&route)
-		candidates = append(candidates, emergencyCooldownRecoveryCandidate{
-			index: index, model: modelKey, failedAt: *failedAt,
-			cooldownAt: cooldownAt, cooldownUntil: *cooldown.TempUnschedulableUntil,
-			requestID: cooldown.TempUnschedulableRequestID,
-			position:  route.Position, routeID: route.ID,
+		candidates = append(candidates, emergencyRestrictionRecoveryCandidate{
+			index: index, model: modelKey, restrictedAt: restrictedAt,
+			cooldownAt: cooldownAt, cooldownUntil: cooldownUntil,
+			requestID: requestID, modelCooling: modelCooling, cacheBlocked: cacheBlocked,
+			position: route.Position, routeID: route.ID,
 			identity: identity, identityOK: identityOK,
 		})
 	}
 
-	// If even one otherwise-valid route is not cooling, there is no outage to
-	// recover from. This also avoids waking a single model while another route
-	// can still serve it normally.
+	// If even one otherwise-valid route is unrestricted, there is no outage to
+	// recover from. The loop returns early in that case; this count check also
+	// protects future restriction types from accidentally becoming fail-open.
 	if eligible == 0 || len(candidates) != eligible {
 		return routes
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		if !candidates[i].failedAt.Equal(candidates[j].failedAt) {
-			return candidates[i].failedAt.Before(candidates[j].failedAt)
+		// Cache-health protection is an accounting policy, not proof that the
+		// upstream is unavailable. Prefer those routes over known failed models.
+		if candidates[i].modelCooling != candidates[j].modelCooling {
+			return !candidates[i].modelCooling
+		}
+		if !candidates[i].restrictedAt.Equal(candidates[j].restrictedAt) {
+			return candidates[i].restrictedAt.Before(candidates[j].restrictedAt)
 		}
 		if candidates[i].position != candidates[j].position {
 			return candidates[i].position < candidates[j].position
@@ -333,10 +347,10 @@ func (rt *Runtime) recoverWhenAllRoutesCooling(
 		return candidates[i].routeID < candidates[j].routeID
 	})
 
-	selected := make([]emergencyCooldownRecoveryCandidate, 0, emergencyCooldownRecoveryRouteCount)
-	seen := make(map[upstreamConcurrencyKey]struct{}, emergencyCooldownRecoveryRouteCount)
+	selected := make([]emergencyRestrictionRecoveryCandidate, 0, emergencyRestrictionRecoveryRouteCount)
+	seen := make(map[upstreamConcurrencyKey]struct{}, emergencyRestrictionRecoveryRouteCount)
 	for _, candidate := range candidates {
-		if len(selected) >= emergencyCooldownRecoveryRouteCount {
+		if len(selected) >= emergencyRestrictionRecoveryRouteCount {
 			break
 		}
 		if candidate.identityOK {
@@ -354,7 +368,7 @@ func (rt *Runtime) recoverWhenAllRoutesCooling(
 	recovered := make([]storage.GatewayRoute, len(routes))
 	copy(recovered, routes)
 	for _, candidate := range selected {
-		if rt.Routes != nil {
+		if candidate.modelCooling && rt.Routes != nil {
 			cleared, err := rt.Routes.ClearModelTempUnschedulableUntilIfMatch(
 				candidate.routeID, candidate.model, candidate.cooldownUntil,
 				candidate.cooldownAt, candidate.requestID,
@@ -372,22 +386,33 @@ func (rt *Runtime) recoverWhenAllRoutesCooling(
 				continue
 			}
 		}
-		cooldowns := cloneModelCooldowns(recovered[candidate.index].ModelCooldowns)
-		for key, cooldown := range cooldowns {
-			// bindModelCooldownAliases adds request-local aliases that point to
-			// the same persisted upstream cooldown. Clear those views as well,
-			// otherwise the scheduler would immediately filter the recovered
-			// route again for the requested model.
-			if key != candidate.model &&
-				(cooldown.RouteID != candidate.routeID || storage.NormalizeGatewayModel(cooldown.Model) != candidate.model) {
-				continue
+		if candidate.modelCooling {
+			cooldowns := cloneModelCooldowns(recovered[candidate.index].ModelCooldowns)
+			for key, cooldown := range cooldowns {
+				// bindModelCooldownAliases adds request-local aliases that point to
+				// the same persisted upstream cooldown. Clear those views as well,
+				// otherwise the scheduler would immediately filter the recovered
+				// route again for the requested model.
+				if key != candidate.model &&
+					(cooldown.RouteID != candidate.routeID || storage.NormalizeGatewayModel(cooldown.Model) != candidate.model) {
+					continue
+				}
+				cooldown.TempUnschedulableUntil = nil
+				cooldowns[key] = cooldown
 			}
-			cooldown.TempUnschedulableUntil = nil
-			cooldowns[key] = cooldown
+			recovered[candidate.index].ModelCooldowns = cooldowns
 		}
-		recovered[candidate.index].ModelCooldowns = cooldowns
+		if candidate.cacheBlocked {
+			recovered[candidate.index].CacheHealthBlacklistedUntil = nil
+		}
 		if rt.Log != nil {
-			rt.Log.Info("emergency gateway cooldown recovery", "route_id", candidate.routeID, "model", candidate.model)
+			rt.Log.Info(
+				"emergency gateway restriction recovery",
+				"route_id", candidate.routeID,
+				"model", candidate.model,
+				"model_cooling", candidate.modelCooling,
+				"cache_blacklisted", candidate.cacheBlocked,
+			)
 		}
 	}
 	return recovered

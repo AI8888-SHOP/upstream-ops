@@ -65,14 +65,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	routes = filteredRoutes
-	// If every otherwise-valid route is cooling for this model, wake the two
-	// oldest physical upstreams so the request can make a bounded recovery
-	// attempt instead of returning "no schedulable routes" immediately.
-	// Keep this behind the existing failover policy: without an allowed route
-	// switch there is no reason to force a cooled route back into service.
-	if group.RetryEnabled && group.FailoverEnabled && group.FailoverMax > 0 {
-		routes = rt.recoverWhenAllRoutesCooling(routes, requestedModel, groupMapping, time.Now())
-	}
+	// Automatic restrictions must never empty an otherwise valid route pool.
+	// This fail-open recovery is independent of retry/failover settings so a
+	// single-route group can still make one upstream attempt while cooling.
+	routes = rt.recoverWhenAllRoutesRestricted(routes, requestedModel, groupMapping, time.Now())
 	routes = bindModelCooldownAliases(routes, requestedModel, groupMapping)
 	// A model alias can map to a media-generation model only after route
 	// selection. Disable concurrent hedge scheduling for such a request even

@@ -104,7 +104,7 @@ func TestSortRoutesForModel_CooldownIsolated(t *testing.T) {
 	}
 }
 
-func TestRecoverWhenAllRoutesCoolingWakesOldestDistinctUpstreams(t *testing.T) {
+func TestRecoverWhenAllRoutesRestrictedWakesOldestDistinctUpstreams(t *testing.T) {
 	now := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
 	activeUntil := now.Add(5 * time.Minute)
 	failedAt := func(minutesAgo int) *time.Time {
@@ -130,7 +130,7 @@ func TestRecoverWhenAllRoutesCoolingWakesOldestDistinctUpstreams(t *testing.T) {
 
 	original := append([]storage.GatewayRoute(nil), routes...)
 	rt := (&Service{}).runtime()
-	got := rt.recoverWhenAllRoutesCooling(routes, "m", nil, now)
+	got := rt.recoverWhenAllRoutesRestricted(routes, "m", nil, now)
 	if len(got) != len(routes) {
 		t.Fatalf("route count=%d, want %d", len(got), len(routes))
 	}
@@ -151,7 +151,7 @@ func TestRecoverWhenAllRoutesCoolingWakesOldestDistinctUpstreams(t *testing.T) {
 	}
 }
 
-func TestRecoverWhenAllRoutesCoolingLeavesHealthyRouteUntouched(t *testing.T) {
+func TestRecoverWhenAllRoutesRestrictedLeavesHealthyRouteUntouched(t *testing.T) {
 	now := time.Now()
 	until := now.Add(time.Minute)
 	routes := []storage.GatewayRoute{
@@ -161,13 +161,13 @@ func TestRecoverWhenAllRoutesCoolingLeavesHealthyRouteUntouched(t *testing.T) {
 		{ID: 2, Position: 1, SourceChannelID: 2, Enabled: true, SourceAPIKeyCipher: "b"},
 	}
 	rt := (&Service{}).runtime()
-	got := rt.recoverWhenAllRoutesCooling(routes, "m", nil, now)
+	got := rt.recoverWhenAllRoutesRestricted(routes, "m", nil, now)
 	if !reflect.DeepEqual(got, routes) {
 		t.Fatalf("healthy route means no emergency reset; got=%+v want=%+v", got, routes)
 	}
 }
 
-func TestRecoverWhenAllRoutesCoolingClearsResolvedUpstreamModel(t *testing.T) {
+func TestRecoverWhenAllRoutesRestrictedClearsResolvedUpstreamModel(t *testing.T) {
 	now := time.Now()
 	until := now.Add(time.Minute)
 	routes := []storage.GatewayRoute{
@@ -179,7 +179,7 @@ func TestRecoverWhenAllRoutesCoolingClearsResolvedUpstreamModel(t *testing.T) {
 		}},
 	}
 	rt := (&Service{}).runtime()
-	got := rt.recoverWhenAllRoutesCooling(routes, "alias", nil, now)
+	got := rt.recoverWhenAllRoutesRestricted(routes, "alias", nil, now)
 	for _, route := range got {
 		if route.ModelCooldowns["upstream"].TempUnschedulableUntil != nil {
 			t.Fatalf("resolved upstream cooldown was not cleared: %+v", route.ModelCooldowns)
@@ -187,6 +187,83 @@ func TestRecoverWhenAllRoutesCoolingClearsResolvedUpstreamModel(t *testing.T) {
 		if _, exists := route.ModelCooldowns["alias"]; exists {
 			t.Fatal("request alias should not be persisted as a cooldown key")
 		}
+	}
+}
+
+func TestRecoverWhenAllRoutesRestrictedWakesCacheBlacklistedRoutes(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 1, 0, 0, 0, time.UTC)
+	until := now.Add(10 * time.Minute)
+	evaluatedAt := func(minutesAgo int) *time.Time {
+		value := now.Add(-time.Duration(minutesAgo) * time.Minute)
+		return &value
+	}
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 10, Enabled: true, SourceAPIKeyCipher: "a", CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(3)},
+		{ID: 2, Position: 1, SourceChannelID: 20, Enabled: true, SourceAPIKeyCipher: "b", CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(2)},
+		{ID: 3, Position: 2, SourceChannelID: 30, Enabled: true, SourceAPIKeyCipher: "c", CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: evaluatedAt(1)},
+	}
+
+	rt := (&Service{}).runtime()
+	got := rt.recoverWhenAllRoutesRestricted(routes, "m", nil, now)
+	if got[0].CacheHealthBlacklistedUntil != nil || got[1].CacheHealthBlacklistedUntil != nil {
+		t.Fatalf("oldest cache restrictions were not bypassed: route1=%+v route2=%+v", got[0], got[1])
+	}
+	if got[2].CacheHealthBlacklistedUntil == nil {
+		t.Fatal("recovery bypassed more than the bounded route count")
+	}
+	if routes[0].CacheHealthBlacklistedUntil == nil || routes[1].CacheHealthBlacklistedUntil == nil {
+		t.Fatal("cache blacklist bypass must remain request-local")
+	}
+	if candidates := SortRoutesForModel(got, nil, "asc", now, nil, "m"); len(candidates) != 2 {
+		t.Fatalf("cache recovery candidates=%+v", candidates)
+	}
+}
+
+func TestRecoverWhenAllRoutesRestrictedPrefersCacheOnlyRoute(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 1, 0, 0, 0, time.UTC)
+	until := now.Add(10 * time.Minute)
+	failedAt := now.Add(-10 * time.Minute)
+	evaluatedAt := now.Add(-time.Minute)
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 10, Enabled: true, SourceAPIKeyCipher: "a", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 1, Model: "m", TempUnschedulableUntil: &until, TempUnschedulableAt: &failedAt},
+		}},
+		{ID: 2, Position: 1, SourceChannelID: 20, Enabled: true, SourceAPIKeyCipher: "b", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 2, Model: "m", TempUnschedulableUntil: &until, TempUnschedulableAt: &failedAt},
+		}},
+		{ID: 3, Position: 2, SourceChannelID: 30, Enabled: true, SourceAPIKeyCipher: "c", CacheHealthBlacklistedUntil: &until, CacheHealthEvaluatedAt: &evaluatedAt},
+	}
+
+	got := (&Service{}).runtime().recoverWhenAllRoutesRestricted(routes, "m", nil, now)
+	if got[2].CacheHealthBlacklistedUntil != nil {
+		t.Fatal("cache-only restriction should be preferred over a known failed model")
+	}
+	if got[0].ModelCooldowns["m"].TempUnschedulableUntil != nil && got[1].ModelCooldowns["m"].TempUnschedulableUntil != nil {
+		t.Fatal("recovery should retain one model probe alongside the cache-only route")
+	}
+}
+
+func TestRecoverWhenAllRoutesRestrictedDoesNotBypassHardRestrictions(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 1, 0, 0, 0, time.UTC)
+	until := now.Add(10 * time.Minute)
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 10, Enabled: true, SourceAPIKeyCipher: "valid", CacheHealthBlacklistedUntil: &until},
+		{ID: 2, Position: 1, SourceChannelID: 20, Enabled: false, SourceAPIKeyCipher: "disabled", CacheHealthBlacklistedUntil: &until},
+		{ID: 3, Position: 2, SourceChannelID: 30, Enabled: true, CacheHealthBlacklistedUntil: &until},
+		{ID: 4, Position: 3, SourceChannelID: 40, Enabled: true, RateLimitAutoDisabled: true, SourceAPIKeyCipher: "limited", CacheHealthBlacklistedUntil: &until},
+	}
+
+	got := (&Service{}).runtime().recoverWhenAllRoutesRestricted(routes, "m", nil, now)
+	if got[0].CacheHealthBlacklistedUntil != nil {
+		t.Fatal("the otherwise-valid route should be recovered")
+	}
+	for _, index := range []int{1, 2, 3} {
+		if got[index].CacheHealthBlacklistedUntil == nil {
+			t.Fatalf("hard-restricted route %d was incorrectly recovered", got[index].ID)
+		}
+	}
+	if candidates := SortRoutesForModel(got, nil, "asc", now, nil, "m"); len(candidates) != 1 || candidates[0].Route.ID != 1 {
+		t.Fatalf("hard restrictions must remain unschedulable: %+v", candidates)
 	}
 }
 
