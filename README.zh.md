@@ -1190,7 +1190,7 @@ curl -sN http://127.0.0.1:8418/v1/responses \
 | `cacheHitRateWindowMinutes` | 0（关闭） | 按最近窗口统计真实上游缓存命中率（分钟） |
 | `cacheHitRateThresholdPercent` | 0（关闭） | 命中率低于该百分比时触发保护 |
 | `cacheHitRateBlacklistMinutes` | 0（关闭） | 触发后暂停该来源全部路由的分钟数 |
-| `cacheHitRateMinimumRequests` | 10（最低值） | 新渠道至少累计 10 次成功请求后才会触发自动拉黑，避免冷启动误判 |
+| `cacheHitRateMinimumRequests` | 10（默认/最低） | 可在设置页调整；来源累计达到设置的成功请求数后才触发自动拉黑，最低 10 次，避免冷启动误判 |
 | `hedge.enabled` | false | 新建组是否默认启用并发兜底 |
 | `hedge.delaySeconds` | 10 | 启动后续并发 attempt 的延迟阶梯（0.1-300 秒） |
 | `hedge.maxParallel` | 2 | 最大并发 attempt，包含主请求（1-32） |

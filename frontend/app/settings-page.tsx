@@ -1271,8 +1271,8 @@ export default function SettingsPage() {
                 />
               </Field>
               <Field
-                label="缓存保护最小请求数"
-                description="新渠道先累计至少 10 次成功请求再评估，避免冷启动阶段误拉黑。"
+                label="缓存保护最小成功请求数"
+                description="达到这里设置的成功请求数后才评估，默认 10 次、最低 10 次；可设置更高以延长冷启动保护。"
               >
                 <Input
                   type="number"

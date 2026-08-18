@@ -1082,7 +1082,7 @@ Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no pr
 | `cacheHitRateWindowMinutes` | 0 (off) | Rolling real-upstream cache hit-rate window (minutes) |
 | `cacheHitRateThresholdPercent` | 0 (off) | Trigger protection below this hit-rate percentage |
 | `cacheHitRateBlacklistMinutes` | 0 (off) | Minutes to pause all routes for the source |
-| `cacheHitRateMinimumRequests` | 10 (minimum) | Successful requests required before auto-blacklisting, preventing cold-start false positives |
+| `cacheHitRateMinimumRequests` | 10 (default/minimum) | Configurable in Settings; successful requests required before auto-blacklisting. Minimum 10 prevents cold-start false positives |
 | `hedge.enabled` | false | Enable hedging by default for new groups |
 | `hedge.delaySeconds` | 10 | Delay ladder for launching additional attempts (0.1-300 seconds) |
 | `hedge.maxParallel` | 2 | Concurrent attempts including the primary (1-32) |

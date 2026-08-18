@@ -180,8 +180,10 @@ const (
 	DefaultGatewayCacheHitRateBlacklistMinutes = 0
 	// A newly enabled upstream needs a warm-up sample before its cache rate is
 	// meaningful. Keep this floor even when an older config file still contains
-	// the former default of 1.
-	DefaultGatewayCacheHitRateMinimumRequests = 10
+	// the former default of 1. The setting may be raised up to the maximum.
+	MinGatewayCacheHitRateMinimumRequests     = 10
+	DefaultGatewayCacheHitRateMinimumRequests = MinGatewayCacheHitRateMinimumRequests
+	MaxGatewayCacheHitRateMinimumRequests     = 100000
 )
 
 type UpstreamConfig struct {
@@ -319,8 +321,8 @@ func (g GatewayConfig) Validate() error {
 	if g.CacheHitRateBlacklistMinutes < 0 || g.CacheHitRateBlacklistMinutes > 30*24*60 {
 		joined = errors.Join(joined, fmt.Errorf("gateway.cacheHitRateBlacklistMinutes must be between 0 and %d", 30*24*60))
 	}
-	if g.CacheHitRateMinimumRequests < 0 || g.CacheHitRateMinimumRequests > 100000 {
-		joined = errors.Join(joined, fmt.Errorf("gateway.cacheHitRateMinimumRequests must be between 0 and 100000"))
+	if g.CacheHitRateMinimumRequests < 0 || g.CacheHitRateMinimumRequests > MaxGatewayCacheHitRateMinimumRequests {
+		joined = errors.Join(joined, fmt.Errorf("gateway.cacheHitRateMinimumRequests must be between 0 and %d", MaxGatewayCacheHitRateMinimumRequests))
 	}
 	if math.IsNaN(g.Hedge.DelaySeconds) || math.IsInf(g.Hedge.DelaySeconds, 0) ||
 		g.Hedge.DelaySeconds < 0.1 || g.Hedge.DelaySeconds > 300 {
@@ -381,8 +383,8 @@ func (g GatewayConfig) WithDefaults() GatewayConfig {
 	if g.CacheHitRateMinimumRequests < DefaultGatewayCacheHitRateMinimumRequests {
 		g.CacheHitRateMinimumRequests = DefaultGatewayCacheHitRateMinimumRequests
 	}
-	if g.CacheHitRateMinimumRequests > 100000 {
-		g.CacheHitRateMinimumRequests = 100000
+	if g.CacheHitRateMinimumRequests > MaxGatewayCacheHitRateMinimumRequests {
+		g.CacheHitRateMinimumRequests = MaxGatewayCacheHitRateMinimumRequests
 	}
 	if g.CacheHitRateWindowMinutes < 0 {
 		g.CacheHitRateWindowMinutes = 0

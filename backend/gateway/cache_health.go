@@ -222,11 +222,9 @@ func (s *Service) EvaluateCacheHealth(sourceKind string, sourceID uint, now time
 		state.ManualClearUntil = cloneTimePointer(previous.ManualClearUntil)
 	}
 	denominator := agg.InputTokens + agg.CacheReadTokens + agg.CacheCreationTokens
-	minimumRequests := cfg.CacheHitRateMinimumRequests
-	if minimumRequests < config.DefaultGatewayCacheHitRateMinimumRequests {
-		minimumRequests = config.DefaultGatewayCacheHitRateMinimumRequests
-	}
-	low := agg.RequestCount >= int64(minimumRequests) && denominator > 0 &&
+	// gatewayRuntime() normalizes this value, so the setting is the single
+	// source of truth for the warm-up threshold.
+	low := agg.RequestCount >= int64(cfg.CacheHitRateMinimumRequests) && denominator > 0 &&
 		agg.HitRate < cfg.CacheHitRateThresholdPercent
 	active := state.BlacklistedUntil != nil && state.BlacklistedUntil.After(now)
 	manualClearActive := state.ManualClearUntil != nil && state.ManualClearUntil.After(now)

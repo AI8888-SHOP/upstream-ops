@@ -39,7 +39,7 @@ func TestSaveSettingsKeepsAppVersion(t *testing.T) {
 		"notifications":{"batchRateChanges":true,"minChangePct":0,"balanceLowCooldownMinutes":60,"subscriptionDailyRemainingThresholdPct":0,"subscriptionWeeklyRemainingThresholdPct":0,"subscriptionMonthlyRemainingThresholdPct":0,"subscriptionExpiryThresholdHours":0,"subscriptionAlertCooldownMinutes":1440,"sendMaxAttempts":3},
 		"proxy":{"enabled":true,"versionCheckEnabled":true,"protocol":"socks5","host":"127.0.0.1","port":1080,"username":"u","password":"p"},
 		"upstream":{"timeoutSeconds":45,"userAgent":"custom-agent"},
-		"gateway":{"tempPauseSeconds":30,"forwardTimeoutSeconds":600,"modelsCacheTTLSeconds":60,"maxFailoverSwitches":8,"routeBatchConcurrency":8,"usageErrorBodyBytes":32768,"usageErrorMsgRunes":500,"usageErrorHeaderValueRunes":8192,"usageErrorHeadersJSONBytes":65536}
+		"gateway":{"tempPauseSeconds":30,"forwardTimeoutSeconds":600,"modelsCacheTTLSeconds":60,"maxFailoverSwitches":8,"routeBatchConcurrency":8,"usageErrorBodyBytes":32768,"usageErrorMsgRunes":500,"usageErrorHeaderValueRunes":8192,"usageErrorHeadersJSONBytes":65536,"cacheHitRateMinimumRequests":25}
 	}`
 	req := httptest.NewRequest(http.MethodPut, "/api/settings/config", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -70,5 +70,8 @@ func TestSaveSettingsKeepsAppVersion(t *testing.T) {
 	}
 	if got.Gateway.RouteBatchConcurrency != 8 || got.Gateway.ForwardTimeoutSeconds != 600 {
 		t.Fatalf("gateway = %#v", got.Gateway)
+	}
+	if got.Gateway.CacheHitRateMinimumRequests != 25 {
+		t.Fatalf("cache health minimum requests = %d, want 25", got.Gateway.CacheHitRateMinimumRequests)
 	}
 }

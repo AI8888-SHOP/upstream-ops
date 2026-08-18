@@ -30,7 +30,7 @@ func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 		CacheHitRateWindowMinutes:    60,
 		CacheHitRateThresholdPercent: 50,
 		CacheHitRateBlacklistMinutes: 10,
-		CacheHitRateMinimumRequests:  10,
+		CacheHitRateMinimumRequests:  12,
 	})
 	saved, err := svc.SaveRoutes(group.ID, []RouteInput{{
 		SourceKind: storage.GatewayRouteSourceProvider, GatewayProviderID: provider.ID,
@@ -40,7 +40,7 @@ func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 		t.Fatalf("save route: %#v err=%v", saved, err)
 	}
 	now := time.Now().Truncate(time.Millisecond)
-	for i := 0; i < 9; i++ {
+	for i := 0; i < 11; i++ {
 		if err := usage.Create(&storage.GatewayUsageLog{
 			GatewayGroupID: group.ID, RouteID: saved[0].ID, GatewayProviderID: provider.ID,
 			RequestID: "cache-health-" + string(rune('a'+i)), Success: true,
@@ -58,7 +58,7 @@ func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 	}
 	if err := usage.Create(&storage.GatewayUsageLog{
 		GatewayGroupID: group.ID, RouteID: saved[0].ID, GatewayProviderID: provider.ID,
-		RequestID: "cache-health-j", Success: true,
+		RequestID: "cache-health-l", Success: true,
 		InputTokens: 90, CacheReadTokens: 10, CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("create tenth usage: %v", err)
