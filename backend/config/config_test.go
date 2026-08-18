@@ -26,7 +26,7 @@ func TestLoadAppliesUpstreamDefaults(t *testing.T) {
 
 func TestLoadCacheHealthConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("gateway:\n  cacheHitRateWindowMinutes: 15\n  cacheHitRateThresholdPercent: 42.5\n  cacheHitRateBlacklistMinutes: 30\n  cacheHitRateMinimumRequests: 7\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("gateway:\n  cacheHitRateWindowMinutes: 15\n  cacheHitRateThresholdPercent: 42.5\n  cacheHitRateBlacklistMinutes: 30\n  cacheHitRateMinimumRequests: 12\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	cfg, err := LoadFile(path)
@@ -34,7 +34,7 @@ func TestLoadCacheHealthConfig(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 	if cfg.Gateway.CacheHitRateWindowMinutes != 15 || cfg.Gateway.CacheHitRateThresholdPercent != 42.5 ||
-		cfg.Gateway.CacheHitRateBlacklistMinutes != 30 || cfg.Gateway.CacheHitRateMinimumRequests != 7 {
+		cfg.Gateway.CacheHitRateBlacklistMinutes != 30 || cfg.Gateway.CacheHitRateMinimumRequests != 12 {
 		t.Fatalf("cache health config = %#v", cfg.Gateway)
 	}
 }
@@ -96,6 +96,10 @@ func TestGatewayConfigWithDefaults(t *testing.T) {
 		cfg.CacheHitRateBlacklistMinutes != DefaultGatewayCacheHitRateBlacklistMinutes ||
 		cfg.CacheHitRateMinimumRequests != DefaultGatewayCacheHitRateMinimumRequests {
 		t.Fatalf("cache health defaults = %#v", cfg)
+	}
+	legacy := (GatewayConfig{CacheHitRateMinimumRequests: 1}).WithDefaults()
+	if legacy.CacheHitRateMinimumRequests != DefaultGatewayCacheHitRateMinimumRequests {
+		t.Fatalf("legacy cache health minimum = %d, want %d", legacy.CacheHitRateMinimumRequests, DefaultGatewayCacheHitRateMinimumRequests)
 	}
 }
 

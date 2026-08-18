@@ -71,7 +71,7 @@ const defaultGatewayConfig: SystemGatewayConfig = {
   cacheHitRateWindowMinutes: 0,
   cacheHitRateThresholdPercent: 0,
   cacheHitRateBlacklistMinutes: 0,
-  cacheHitRateMinimumRequests: 1,
+  cacheHitRateMinimumRequests: 10,
   hedge: {
     enabled: false,
     delaySeconds: 10,
@@ -1272,11 +1272,11 @@ export default function SettingsPage() {
               </Field>
               <Field
                 label="缓存保护最小请求数"
-                description="避免少量样本触发拉黑，默认 1 次；可按需调高。"
+                description="新渠道先累计至少 10 次成功请求再评估，避免冷启动阶段误拉黑。"
               >
                 <Input
                   type="number"
-                  min={1}
+                  min={10}
                   max={100000}
                   value={String(form.gateway?.cacheHitRateMinimumRequests ?? defaultGatewayConfig.cacheHitRateMinimumRequests)}
                   onChange={(e) =>

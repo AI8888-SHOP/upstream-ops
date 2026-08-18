@@ -212,10 +212,17 @@ func (s *Service) UpdateGatewayConfig(cfg config.GatewayConfig) {
 	s.mu.Unlock()
 	// Turning the feature off must immediately release source snapshots; this
 	// does not touch manual provider/route enable flags.
-	if !cacheHealthProtectionEnabled(updated) && s.Usage != nil {
+	if s.Usage == nil {
+		return
+	}
+	if !cacheHealthProtectionEnabled(updated) {
 		_ = s.Usage.ClearCacheHealthBlacklists()
 		if s.Routes != nil {
 			s.Routes.InvalidateAllCacheHealth()
 		}
+		return
+	}
+	if cleared, err := s.Usage.ClearCacheHealthBlacklistsBelowMinimum(int64(updated.CacheHitRateMinimumRequests)); err == nil && cleared > 0 && s.Routes != nil {
+		s.Routes.InvalidateAllCacheHealth()
 	}
 }

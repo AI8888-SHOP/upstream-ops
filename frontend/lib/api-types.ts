@@ -757,6 +757,7 @@ export interface GatewayProvider {
   cache_health_evaluated_at?: string
   cache_health_blacklisted_until?: string
   cache_health_blacklist_reason?: string
+  cache_health_manual_clear_until?: string
   created_at: string
   updated_at: string
 }
@@ -773,6 +774,7 @@ export interface GatewayCacheHealthStat {
   evaluated_at?: string
   blacklisted_until?: string
   blacklist_reason?: string
+  manual_clear_until?: string
 }
 
 export interface GatewayCacheHealthResponse {
@@ -858,6 +860,7 @@ export interface GatewayRoute {
   cache_health_evaluated_at?: string | null
   cache_health_blacklisted_until?: string | null
   cache_health_blacklist_reason?: string
+  cache_health_manual_clear_until?: string | null
   model_cooldowns?: Record<string, GatewayRouteModelCooldown>
   created_at: string
   updated_at: string

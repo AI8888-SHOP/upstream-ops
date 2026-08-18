@@ -332,7 +332,7 @@ func (r *GatewayUsageLogs) UpsertCacheHealth(state *GatewayChannelCacheHealth) e
 		DoUpdates: clause.AssignmentColumns([]string{
 			"hit_rate", "request_count", "input_tokens", "cache_read_tokens",
 			"cache_creation_tokens", "window_start", "evaluated_at",
-			"blacklisted_until", "blacklist_reason", "updated_at",
+			"blacklisted_until", "blacklist_reason", "manual_clear_until", "updated_at",
 		}),
 	}).Create(state).Error
 }
@@ -344,15 +344,45 @@ func (r *GatewayUsageLogs) ClearCacheHealthBlacklists() error {
 		return nil
 	}
 	return r.db.Model(&GatewayChannelCacheHealth{}).Where("1 = 1").Updates(map[string]any{
-		"blacklisted_until": nil,
-		"blacklist_reason":  "",
-		"updated_at":        time.Now(),
+		"blacklisted_until":  nil,
+		"blacklist_reason":   "",
+		"manual_clear_until": nil,
+		"updated_at":         time.Now(),
 	}).Error
+}
+
+// ClearCacheHealthBlacklistsBelowMinimum releases stale restrictions that
+// were created under an older, smaller warm-up threshold. Without this
+// cleanup, a blocked source may receive no traffic and therefore never be
+// reevaluated under the new threshold.
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklistsBelowMinimum(minimum int64) (int64, error) {
+	if r == nil || r.db == nil || minimum <= 0 {
+		return 0, nil
+	}
+	result := r.db.Model(&GatewayChannelCacheHealth{}).
+		Where("request_count < ? AND blacklisted_until IS NOT NULL", minimum).
+		Updates(map[string]any{
+			"blacklisted_until": nil,
+			"blacklist_reason":  "",
+			"updated_at":        time.Now(),
+		})
+	return result.RowsAffected, result.Error
 }
 
 // ClearCacheHealthBlacklist removes the automatic pause for one upstream
 // source while retaining its rolling statistics and evaluation timestamp.
 func (r *GatewayUsageLogs) ClearCacheHealthBlacklist(sourceKind string, sourceID uint) error {
+	return r.clearCacheHealthBlacklist(sourceKind, sourceID, time.Time{})
+}
+
+// ClearCacheHealthBlacklistWithSuppression releases one source and records a
+// grace period during which rolling low-hit-rate data cannot immediately
+// reapply the automatic blacklist.
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklistWithSuppression(sourceKind string, sourceID uint, until time.Time) error {
+	return r.clearCacheHealthBlacklist(sourceKind, sourceID, until)
+}
+
+func (r *GatewayUsageLogs) clearCacheHealthBlacklist(sourceKind string, sourceID uint, until time.Time) error {
 	if r == nil || r.db == nil {
 		return nil
 	}
@@ -360,11 +390,15 @@ func (r *GatewayUsageLogs) ClearCacheHealthBlacklist(sourceKind string, sourceID
 		return fmt.Errorf("cache health source id is required")
 	}
 	kind := normalizeCacheHealthSource(sourceKind)
+	var manualClearUntil any
+	if !until.IsZero() {
+		manualClearUntil = until
+	}
 	return r.db.Exec(
 		`UPDATE gateway_channel_cache_health
-		 SET blacklisted_until = NULL, blacklist_reason = '', updated_at = ?
+		 SET blacklisted_until = NULL, blacklist_reason = '', manual_clear_until = ?, updated_at = ?
 		 WHERE source_kind = ? AND source_id = ?`,
-		time.Now(), kind, sourceID,
+		manualClearUntil, time.Now(), kind, sourceID,
 	).Error
 }
 
@@ -1462,6 +1496,7 @@ func (r *GatewayRoutes) loadCacheHealth(routes []GatewayRoute) error {
 		routes[i].CacheHealthEvaluatedAt = clonePointer(state.EvaluatedAt)
 		routes[i].CacheHealthBlacklistedUntil = clonePointer(state.BlacklistedUntil)
 		routes[i].CacheHealthBlacklistReason = state.BlacklistReason
+		routes[i].CacheHealthManualClearUntil = clonePointer(state.ManualClearUntil)
 	}
 	return nil
 }

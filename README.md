@@ -600,7 +600,7 @@ gateway:
   cacheHitRateWindowMinutes: 0
   cacheHitRateThresholdPercent: 0
   cacheHitRateBlacklistMinutes: 0
-  cacheHitRateMinimumRequests: 1
+  cacheHitRateMinimumRequests: 10
   hedge:
     enabled: false
     delaySeconds: 10
@@ -934,7 +934,7 @@ Route field `upstream_protocol`:
 - Default failover: no response, 429, 5xx; with group “failover on 4xx”, all 4xx may failover too.
 - Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
 - Automatic cooldown is isolated by route and final upstream model, so a failure for one model does not pause the channel for other models. Model aliases that resolve to the same upstream model share the cooldown; the management "clear pause" action clears all model cooldowns for that route.
-- The route page shows model cooldowns and cache-health blacklist deadlines/reasons, with actions to release route cooldowns or a source-level cache restriction early.
+- The route page shows model cooldowns and cache-health blacklist deadlines/reasons, with actions to release route cooldowns or a source-level cache restriction early. A manual cache release suppresses re-blacklisting for one complete statistics window.
 - Group: `retry_count`, `response_validation_retry_count`, `failover_max`, `cooldown_seconds`. `response_validation_retry_count` controls extra attempts on the same route after a pre-commit regex rejection; `-1` inherits `retry_count`, while `0` disables only regex-triggered retries.
 - **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
 - **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.
@@ -1082,7 +1082,7 @@ Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no pr
 | `cacheHitRateWindowMinutes` | 0 (off) | Rolling real-upstream cache hit-rate window (minutes) |
 | `cacheHitRateThresholdPercent` | 0 (off) | Trigger protection below this hit-rate percentage |
 | `cacheHitRateBlacklistMinutes` | 0 (off) | Minutes to pause all routes for the source |
-| `cacheHitRateMinimumRequests` | 1 | Minimum successful requests before auto-blacklisting |
+| `cacheHitRateMinimumRequests` | 10 (minimum) | Successful requests required before auto-blacklisting, preventing cold-start false positives |
 | `hedge.enabled` | false | Enable hedging by default for new groups |
 | `hedge.delaySeconds` | 10 | Delay ladder for launching additional attempts (0.1-300 seconds) |
 | `hedge.maxParallel` | 2 | Concurrent attempts including the primary (1-32) |

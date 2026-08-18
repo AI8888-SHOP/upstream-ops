@@ -30,7 +30,7 @@ func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 		CacheHitRateWindowMinutes:    60,
 		CacheHitRateThresholdPercent: 50,
 		CacheHitRateBlacklistMinutes: 10,
-		CacheHitRateMinimumRequests:  3,
+		CacheHitRateMinimumRequests:  10,
 	})
 	saved, err := svc.SaveRoutes(group.ID, []RouteInput{{
 		SourceKind: storage.GatewayRouteSourceProvider, GatewayProviderID: provider.ID,
@@ -40,7 +40,7 @@ func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 		t.Fatalf("save route: %#v err=%v", saved, err)
 	}
 	now := time.Now().Truncate(time.Millisecond)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 9; i++ {
 		if err := usage.Create(&storage.GatewayUsageLog{
 			GatewayGroupID: group.ID, RouteID: saved[0].ID, GatewayProviderID: provider.ID,
 			RequestID: "cache-health-" + string(rune('a'+i)), Success: true,
@@ -48,6 +48,20 @@ func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("create usage: %v", err)
 		}
+	}
+	if err := svc.EvaluateCacheHealth(storage.GatewayRouteSourceProvider, provider.ID, now); err != nil {
+		t.Fatalf("warmup evaluate: %v", err)
+	}
+	warmupStats, err := svc.CacheHealthStats(storage.GatewayRouteSourceProvider, []uint{provider.ID})
+	if err != nil || len(warmupStats) != 1 || warmupStats[0].BlacklistedUntil != nil {
+		t.Fatalf("source was blacklisted before the minimum sample count: %+v err=%v", warmupStats, err)
+	}
+	if err := usage.Create(&storage.GatewayUsageLog{
+		GatewayGroupID: group.ID, RouteID: saved[0].ID, GatewayProviderID: provider.ID,
+		RequestID: "cache-health-j", Success: true,
+		InputTokens: 90, CacheReadTokens: 10, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("create tenth usage: %v", err)
 	}
 	if err := svc.EvaluateCacheHealth(storage.GatewayRouteSourceProvider, provider.ID, now); err != nil {
 		t.Fatalf("evaluate: %v", err)
@@ -84,13 +98,24 @@ func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 	if loaded[0].CacheHealthBlacklistedUntil != nil || !IsRouteSchedulable(&loaded[0], now) {
 		t.Fatalf("source clear did not release route: %+v", loaded[0])
 	}
-	// Re-evaluate the same low-health source to exercise the normal automatic
-	// path before testing global protection shutdown below.
-	if err := svc.EvaluateCacheHealth(storage.GatewayRouteSourceProvider, provider.ID, now); err != nil {
+	// A manual release keeps the existing rolling counters but suppresses the
+	// evaluator for the configured window; otherwise the next async evaluation
+	// would immediately restore the same blacklist.
+	if err := svc.EvaluateCacheHealth(storage.GatewayRouteSourceProvider, provider.ID, now.Add(time.Minute)); err != nil {
 		t.Fatalf("re-evaluate after source clear: %v", err)
 	}
-	if !IsRouteSchedulable(&loaded[0], now.Add(11*time.Minute)) {
-		t.Fatal("expired provider blacklist did not recover")
+	stats, err = svc.CacheHealthStats(storage.GatewayRouteSourceProvider, []uint{provider.ID})
+	if err != nil || len(stats) != 1 || stats[0].BlacklistedUntil != nil || stats[0].ManualClearUntil == nil {
+		t.Fatalf("manual release was re-blacklisted: %+v err=%v", stats, err)
+	}
+	// Once the grace window has elapsed, the old rows have also rolled out of
+	// the statistics window and the source remains schedulable normally.
+	if err := svc.EvaluateCacheHealth(storage.GatewayRouteSourceProvider, provider.ID, now.Add(61*time.Minute)); err != nil {
+		t.Fatalf("evaluate after grace window: %v", err)
+	}
+	stats, err = svc.CacheHealthStats(storage.GatewayRouteSourceProvider, []uint{provider.ID})
+	if err != nil || len(stats) != 1 || stats[0].BlacklistedUntil != nil || stats[0].ManualClearUntil != nil {
+		t.Fatalf("expired manual release state = %+v err=%v", stats, err)
 	}
 	// Disabling protection clears persisted automatic state immediately, even
 	// before its original expiry.

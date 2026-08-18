@@ -325,6 +325,9 @@ export function RoutesPanel({
             const provider = providerOptions.find((p) => p.id === providerID)
             const modelCooldowns = routeModelCooldownEntries(r)
             const cacheHealthBlacklisted = isCacheHealthBlacklisted(r)
+            const cacheHealthManualClear =
+              r.cache_health_manual_clear_until &&
+              new Date(r.cache_health_manual_clear_until).getTime() > Date.now()
             const cacheHealthSourceID = kind === "provider" ? providerID : chId
             const hasCacheHealthStats = (r.cache_health_request_count ?? 0) > 0
             const calculatedRate =
@@ -711,11 +714,16 @@ export function RoutesPanel({
                       )
                     )}
                   </div>
-                  {hasCacheHealthStats || cacheHealthBlacklisted ? (
+                  {hasCacheHealthStats || cacheHealthBlacklisted || cacheHealthManualClear ? (
                     <div className="mt-1 flex flex-wrap items-center gap-1">
                       <span className="text-[10px] text-muted-foreground">
                         缓存 {(r.cache_health_hit_rate ?? 0).toFixed(2)}% · {r.cache_health_request_count ?? 0} 次
                       </span>
+                      {cacheHealthManualClear ? (
+                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400">
+                          人工放行至 {new Date(r.cache_health_manual_clear_until as string).toLocaleString("zh-CN")}
+                        </span>
+                      ) : null}
                       {cacheHealthBlacklisted ? (
                         <>
                           <Badge

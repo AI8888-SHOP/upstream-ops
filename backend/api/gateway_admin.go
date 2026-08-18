@@ -476,6 +476,7 @@ func listGatewayProviders(c *gin.Context, d *Deps) {
 					page.Items[i].CacheHealthEvaluatedAt = stat.EvaluatedAt
 					page.Items[i].CacheHealthBlacklistedUntil = stat.BlacklistedUntil
 					page.Items[i].CacheHealthBlacklistReason = stat.BlacklistReason
+					page.Items[i].CacheHealthManualClearUntil = stat.ManualClearUntil
 				}
 			}
 		}

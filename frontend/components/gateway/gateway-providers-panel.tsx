@@ -301,7 +301,7 @@ export function GatewayProvidersPanel() {
   async function clearCacheBlacklist(item: GatewayProvider) {
     const ok = await confirm({
       title: "解除缓存限制",
-      description: `确定立即解除「${item.name}」的缓存健康拉黑？命中率统计会保留。`,
+      description: `确定立即解除「${item.name}」的缓存健康拉黑？命中率统计会保留，并在统计窗口内暂不重复拉黑。`,
       confirmLabel: "解除限制",
     })
     if (!ok) return
@@ -450,6 +450,12 @@ export function GatewayProvidersPanel() {
                             <div className="text-[10px] text-muted-foreground">
                               {p.cache_health_request_count ?? 0} 次
                             </div>
+                            {p.cache_health_manual_clear_until &&
+                            new Date(p.cache_health_manual_clear_until).getTime() > Date.now() ? (
+                              <div className="text-[10px] text-emerald-600 dark:text-emerald-400">
+                                人工放行至 {new Date(p.cache_health_manual_clear_until).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                              </div>
+                            ) : null}
                             {p.cache_health_blacklisted_until &&
                             new Date(p.cache_health_blacklisted_until).getTime() > Date.now() ? (
                               <div className="flex max-w-64 flex-wrap items-center gap-1">

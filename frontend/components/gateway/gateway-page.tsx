@@ -1250,7 +1250,7 @@ export function GatewayPage() {
     const sourceLabel = sourceKind === "provider" ? "直连渠道" : "监控渠道"
     const ok = await confirm({
       title: "解除缓存限制",
-      description: `确定立即解除该${sourceLabel}的缓存健康拉黑？命中率统计会保留，来源下的全部路由都会恢复调度。`,
+      description: `确定立即解除该${sourceLabel}的缓存健康拉黑？命中率统计会保留，来源下的全部路由都会恢复调度，并在统计窗口内暂不重复拉黑。`,
       confirmLabel: "解除限制",
     })
     if (!ok) return

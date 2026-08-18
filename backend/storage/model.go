@@ -528,6 +528,7 @@ type GatewayProvider struct {
 	CacheHealthEvaluatedAt      *time.Time `gorm:"-" json:"cache_health_evaluated_at,omitempty"`
 	CacheHealthBlacklistedUntil *time.Time `gorm:"-" json:"cache_health_blacklisted_until,omitempty"`
 	CacheHealthBlacklistReason  string     `gorm:"-" json:"cache_health_blacklist_reason,omitempty"`
+	CacheHealthManualClearUntil *time.Time `gorm:"-" json:"cache_health_manual_clear_until,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
@@ -663,6 +664,7 @@ type GatewayRoute struct {
 	CacheHealthEvaluatedAt      *time.Time `gorm:"-" json:"cache_health_evaluated_at,omitempty"`
 	CacheHealthBlacklistedUntil *time.Time `gorm:"-" json:"cache_health_blacklisted_until,omitempty"`
 	CacheHealthBlacklistReason  string     `gorm:"-" json:"cache_health_blacklist_reason,omitempty"`
+	CacheHealthManualClearUntil *time.Time `gorm:"-" json:"cache_health_manual_clear_until,omitempty"`
 	// ModelCooldowns contains automatic cooldowns keyed by normalized model.
 	// It is loaded with routes and is not persisted as part of gateway_routes.
 	ModelCooldowns map[string]GatewayRouteModelCooldown `gorm:"-" json:"model_cooldowns,omitempty"`
@@ -725,6 +727,10 @@ type GatewayChannelCacheHealth struct {
 	EvaluatedAt         *time.Time `json:"evaluated_at,omitempty"`
 	BlacklistedUntil    *time.Time `json:"blacklisted_until,omitempty"`
 	BlacklistReason     string     `gorm:"size:512;not null;default:''" json:"blacklist_reason,omitempty"`
+	// ManualClearUntil is a persisted grace period after an administrator
+	// releases the source. It prevents stale rolling data from re-blacklisting
+	// the source on the next asynchronous evaluation.
+	ManualClearUntil    *time.Time `json:"manual_clear_until,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 }

@@ -30,6 +30,7 @@ type CacheHealthStat struct {
 	EvaluatedAt         *time.Time `json:"evaluated_at,omitempty"`
 	BlacklistedUntil    *time.Time `json:"blacklisted_until,omitempty"`
 	BlacklistReason     string     `json:"blacklist_reason,omitempty"`
+	ManualClearUntil    *time.Time `json:"manual_clear_until,omitempty"`
 }
 
 func normalizeCacheHealthKind(kind string) string {
@@ -97,6 +98,7 @@ func (s *Service) CacheHealthStats(sourceKind string, sourceIDs []uint) ([]Cache
 		item.EvaluatedAt = cloneTimePointer(state.EvaluatedAt)
 		item.BlacklistedUntil = cloneTimePointer(state.BlacklistedUntil)
 		item.BlacklistReason = state.BlacklistReason
+		item.ManualClearUntil = cloneTimePointer(state.ManualClearUntil)
 		byID[state.SourceID] = item
 	}
 	if len(sourceIDs) > 0 {
@@ -149,21 +151,28 @@ func (s *Service) scheduleCacheHealthEvaluation(sourceKind string, sourceID uint
 	if s.cacheHealthPending == nil {
 		s.cacheHealthPending = make(map[cacheHealthSourceKey]time.Time)
 	}
-	if previous, ok := s.cacheHealthPending[key]; ok && now.Sub(previous) < 15*time.Second {
+	const debounce = 15 * time.Second
+	if previous, ok := s.cacheHealthPending[key]; ok && now.Sub(previous) < debounce {
 		s.cacheHealthMu.Unlock()
 		return
 	}
 	s.cacheHealthPending[key] = now
 	s.cacheHealthMu.Unlock()
+	scheduledAt := now
 	time.AfterFunc(500*time.Millisecond, func() {
-		defer func() {
-			s.cacheHealthMu.Lock()
-			delete(s.cacheHealthPending, key)
-			s.cacheHealthMu.Unlock()
-		}()
 		if err := s.EvaluateCacheHealth(key.kind, key.id, time.Now()); err != nil && s.Log != nil {
 			s.Log.Warn("evaluate gateway cache health failed", "source_kind", key.kind, "source_id", key.id, "err", err)
 		}
+		// Keep the timestamp for the full debounce interval. The old code
+		// removed it after the 500ms timer, allowing every subsequent usage
+		// write to run another aggregate query almost immediately.
+		time.AfterFunc(debounce, func() {
+			s.cacheHealthMu.Lock()
+			if pending, ok := s.cacheHealthPending[key]; ok && pending.Equal(scheduledAt) {
+				delete(s.cacheHealthPending, key)
+			}
+			s.cacheHealthMu.Unlock()
+		})
 	})
 }
 
@@ -210,19 +219,36 @@ func (s *Service) EvaluateCacheHealth(sourceKind string, sourceID uint, now time
 		state.ID = previous.ID
 		state.BlacklistedUntil = cloneTimePointer(previous.BlacklistedUntil)
 		state.BlacklistReason = previous.BlacklistReason
+		state.ManualClearUntil = cloneTimePointer(previous.ManualClearUntil)
 	}
 	denominator := agg.InputTokens + agg.CacheReadTokens + agg.CacheCreationTokens
-	low := agg.RequestCount >= int64(cfg.CacheHitRateMinimumRequests) && denominator > 0 &&
+	minimumRequests := cfg.CacheHitRateMinimumRequests
+	if minimumRequests < config.DefaultGatewayCacheHitRateMinimumRequests {
+		minimumRequests = config.DefaultGatewayCacheHitRateMinimumRequests
+	}
+	low := agg.RequestCount >= int64(minimumRequests) && denominator > 0 &&
 		agg.HitRate < cfg.CacheHitRateThresholdPercent
 	active := state.BlacklistedUntil != nil && state.BlacklistedUntil.After(now)
-	if low && !active {
+	manualClearActive := state.ManualClearUntil != nil && state.ManualClearUntil.After(now)
+	if manualClearActive {
+		// A manual release is a deliberate warm-up period. Keep the rolling
+		// counters for visibility, but never reapply the same restriction until
+		// the grace period has elapsed.
+		state.BlacklistedUntil = nil
+		state.BlacklistReason = ""
+	} else {
+		// Do not retain an expired marker forever; otherwise an old manual
+		// release would keep appearing in the admin state.
+		state.ManualClearUntil = nil
+	}
+	if !manualClearActive && low && !active {
 		until := now.Add(time.Duration(cfg.CacheHitRateBlacklistMinutes) * time.Minute)
 		state.BlacklistedUntil = &until
 		state.BlacklistReason = fmt.Sprintf(
 			"缓存命中率 %.2f%% 低于阈值 %.2f%%（最近 %d 分钟）",
 			agg.HitRate, cfg.CacheHitRateThresholdPercent, cfg.CacheHitRateWindowMinutes,
 		)
-	} else if !active && !low {
+	} else if !manualClearActive && !active && !low {
 		state.BlacklistedUntil = nil
 		state.BlacklistReason = ""
 	}
@@ -252,7 +278,15 @@ func (s *Service) ClearCacheHealthBlacklist(sourceKind string, sourceID uint) er
 		return fmt.Errorf("cache health source id is required")
 	}
 	kind := normalizeCacheHealthKind(sourceKind)
-	if err := s.Usage.ClearCacheHealthBlacklist(kind, sourceID); err != nil {
+	var err error
+	cfg := s.gatewayRuntime()
+	if cacheHealthProtectionEnabled(cfg) {
+		graceUntil := time.Now().Add(time.Duration(cfg.CacheHitRateWindowMinutes) * time.Minute)
+		err = s.Usage.ClearCacheHealthBlacklistWithSuppression(kind, sourceID, graceUntil)
+	} else {
+		err = s.Usage.ClearCacheHealthBlacklist(kind, sourceID)
+	}
+	if err != nil {
 		return err
 	}
 	if s.Routes != nil {

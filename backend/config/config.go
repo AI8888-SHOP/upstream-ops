@@ -178,7 +178,10 @@ const (
 	DefaultGatewayCacheHitRateWindowMinutes    = 0
 	DefaultGatewayCacheHitRateThresholdPercent = 0.0
 	DefaultGatewayCacheHitRateBlacklistMinutes = 0
-	DefaultGatewayCacheHitRateMinimumRequests  = 1
+	// A newly enabled upstream needs a warm-up sample before its cache rate is
+	// meaningful. Keep this floor even when an older config file still contains
+	// the former default of 1.
+	DefaultGatewayCacheHitRateMinimumRequests = 10
 )
 
 type UpstreamConfig struct {
@@ -375,7 +378,7 @@ func (g GatewayConfig) WithDefaults() GatewayConfig {
 	if g.UsageErrorHeadersJSONBytes <= 0 {
 		g.UsageErrorHeadersJSONBytes = DefaultGatewayUsageErrorHeadersJSONBytes
 	}
-	if g.CacheHitRateMinimumRequests <= 0 {
+	if g.CacheHitRateMinimumRequests < DefaultGatewayCacheHitRateMinimumRequests {
 		g.CacheHitRateMinimumRequests = DefaultGatewayCacheHitRateMinimumRequests
 	}
 	if g.CacheHitRateMinimumRequests > 100000 {

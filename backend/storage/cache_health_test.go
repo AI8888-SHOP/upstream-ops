@@ -65,11 +65,12 @@ func TestCacheHealthStateUpsertBySource(t *testing.T) {
 	if rows[0].HitRate != 80 || rows[0].BlacklistReason != "updated" {
 		t.Fatalf("state = %+v", rows[0])
 	}
-	if err := logs.ClearCacheHealthBlacklist(GatewayRouteSourceProvider, 3); err != nil {
+	graceUntil := time.Now().Add(30 * time.Minute)
+	if err := logs.ClearCacheHealthBlacklistWithSuppression(GatewayRouteSourceProvider, 3, graceUntil); err != nil {
 		t.Fatalf("clear provider blacklist: %v", err)
 	}
 	rows, err = logs.CacheHealthStates(GatewayRouteSourceProvider, []uint{3})
-	if err != nil || len(rows) != 1 || rows[0].HitRate != 80 || rows[0].BlacklistedUntil != nil || rows[0].BlacklistReason != "" {
+	if err != nil || len(rows) != 1 || rows[0].HitRate != 80 || rows[0].BlacklistedUntil != nil || rows[0].BlacklistReason != "" || rows[0].ManualClearUntil == nil {
 		t.Fatalf("source-cleared state = %#v err=%v", rows, err)
 	}
 	// The global cleanup remains idempotent after a source-specific clear.
@@ -77,8 +78,40 @@ func TestCacheHealthStateUpsertBySource(t *testing.T) {
 		t.Fatalf("clear blacklists: %v", err)
 	}
 	rows, err = logs.CacheHealthStates(GatewayRouteSourceProvider, []uint{3})
-	if err != nil || len(rows) != 1 || rows[0].BlacklistedUntil != nil || rows[0].BlacklistReason != "" {
+	if err != nil || len(rows) != 1 || rows[0].BlacklistedUntil != nil || rows[0].BlacklistReason != "" || rows[0].ManualClearUntil != nil {
 		t.Fatalf("cleared state = %#v err=%v", rows, err)
+	}
+}
+
+func TestClearCacheHealthBlacklistsBelowMinimum(t *testing.T) {
+	db := openTestDB(t)
+	logs := NewGatewayUsageLogs(db)
+	until := time.Now().Add(time.Hour)
+	for _, state := range []*GatewayChannelCacheHealth{
+		{SourceKind: GatewayRouteSourceProvider, SourceID: 1, RequestCount: 1, BlacklistedUntil: &until, BlacklistReason: "legacy warmup"},
+		{SourceKind: GatewayRouteSourceProvider, SourceID: 2, RequestCount: 10, BlacklistedUntil: &until, BlacklistReason: "enough samples"},
+	} {
+		if err := logs.UpsertCacheHealth(state); err != nil {
+			t.Fatalf("seed state: %v", err)
+		}
+	}
+	cleared, err := logs.ClearCacheHealthBlacklistsBelowMinimum(10)
+	if err != nil || cleared != 1 {
+		t.Fatalf("cleared=%d err=%v", cleared, err)
+	}
+	rows, err := logs.CacheHealthStates(GatewayRouteSourceProvider, []uint{1, 2})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("states=%#v err=%v", rows, err)
+	}
+	byID := map[uint]GatewayChannelCacheHealth{}
+	for _, row := range rows {
+		byID[row.SourceID] = row
+	}
+	if byID[1].BlacklistedUntil != nil || byID[1].BlacklistReason != "" {
+		t.Fatalf("under-sampled state remained blocked: %+v", byID[1])
+	}
+	if byID[2].BlacklistedUntil == nil || byID[2].BlacklistReason != "enough samples" {
+		t.Fatalf("qualified state was released: %+v", byID[2])
 	}
 }
 

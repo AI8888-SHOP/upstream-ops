@@ -564,7 +564,7 @@ gateway:
   cacheHitRateWindowMinutes: 0
   cacheHitRateThresholdPercent: 0
   cacheHitRateBlacklistMinutes: 0
-  cacheHitRateMinimumRequests: 1
+  cacheHitRateMinimumRequests: 10
   hedge:
     enabled: false
     delaySeconds: 10
@@ -1041,7 +1041,7 @@ x-api-key: sk-...
 - 默认可顺延：无响应、429、5xx；组开启「4xx 顺延」时全部 4xx 也可顺延。
 - 失败路由可写入临时不可调度截止时间（冷却秒数，默认来自 `gateway.tempPauseSeconds` / 组配置）。
 - 自动冷却按“路由 + 最终上游模型”隔离：某个模型失败不会暂停同一渠道的其它模型；映射到同一最终上游模型的别名共享冷却。管理端“清除暂停”会清除该路由的全部模型冷却。
-- 路由页会展示模型级冷却、缓存健康拉黑截止时间与原因；可分别提前解除路由冷却或来源级缓存限制。
+- 路由页会展示模型级冷却、缓存健康拉黑截止时间与原因；可分别提前解除路由冷却或来源级缓存限制。人工解除缓存限制后，系统会在一个完整统计窗口内暂缓重新拉黑。
 - 组级：`retry_count`、`response_validation_retry_count`、`failover_max`、`cooldown_seconds`。
 - **首字超时**：配置后，仅当「本请求仍可切换到其它路由」时启用；最后一条可试路由会关闭首字掐断，避免无意义超时。
 - **并发兜底（默认关闭）**：主 attempt 立即开始；超过 `hedge_delay_seconds` 仍没有通过校验的响应时，按延迟阶梯启动其它路由。`hedge_max_parallel` 包含主请求，`hedge_max_attempts` 是整个请求可启动的 attempt 总上限。第一个通过校验的响应获胜，其余未完成请求会被取消。
@@ -1190,7 +1190,7 @@ curl -sN http://127.0.0.1:8418/v1/responses \
 | `cacheHitRateWindowMinutes` | 0（关闭） | 按最近窗口统计真实上游缓存命中率（分钟） |
 | `cacheHitRateThresholdPercent` | 0（关闭） | 命中率低于该百分比时触发保护 |
 | `cacheHitRateBlacklistMinutes` | 0（关闭） | 触发后暂停该来源全部路由的分钟数 |
-| `cacheHitRateMinimumRequests` | 1 | 触发自动拉黑所需的最少成功请求数 |
+| `cacheHitRateMinimumRequests` | 10（最低值） | 新渠道至少累计 10 次成功请求后才会触发自动拉黑，避免冷启动误判 |
 | `hedge.enabled` | false | 新建组是否默认启用并发兜底 |
 | `hedge.delaySeconds` | 10 | 启动后续并发 attempt 的延迟阶梯（0.1-300 秒） |
 | `hedge.maxParallel` | 2 | 最大并发 attempt，包含主请求（1-32） |
