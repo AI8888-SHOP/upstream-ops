@@ -104,6 +104,23 @@ func TestSortRoutesForModel_CooldownIsolated(t *testing.T) {
 	}
 }
 
+func TestIsRouteSchedulableForModelExpiredProbeLeaseFailsOpen(t *testing.T) {
+	now := time.Now()
+	expired := now.Add(-time.Second)
+	route := storage.GatewayRoute{
+		ID: 1, SourceChannelID: 1, Enabled: true, SourceAPIKeyCipher: "x",
+		ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"model-a": {
+				RouteID: 1, Model: "model-a", ProbeStatus: storage.GatewayModelProbeStatusProbing,
+				ProbeLeaseUntil: &expired, NextProbeAt: &expired,
+			},
+		},
+	}
+	if !IsRouteSchedulableForModel(&route, "model-a", now) {
+		t.Fatal("expired probe lease must not permanently block the route")
+	}
+}
+
 func TestRecoverWhenAllRoutesRestrictedWakesOldestDistinctUpstreams(t *testing.T) {
 	now := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
 	activeUntil := now.Add(5 * time.Minute)
@@ -148,6 +165,63 @@ func TestRecoverWhenAllRoutesRestrictedWakesOldestDistinctUpstreams(t *testing.T
 	}
 	if candidates := SortRoutesForModel(got, nil, "asc", now, nil, "m"); len(candidates) != 2 || candidates[0].Route.ID != 1 || candidates[1].Route.ID != 3 {
 		t.Fatalf("woken routes were not schedulable: %+v", candidates)
+	}
+}
+
+func TestRecoverWhenAllRoutesRestrictedSeparatesSourceGroupsOnSameChannel(t *testing.T) {
+	now := time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)
+	activeUntil := now.Add(5 * time.Minute)
+	failedAt := func(minutesAgo int) *time.Time {
+		value := now.Add(-time.Duration(minutesAgo) * time.Minute)
+		return &value
+	}
+	groupA, groupB := int64(201), int64(202)
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 10, SourceGroupID: &groupA, Enabled: true, SourceAPIKeyCipher: "a", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 1, Model: "m", TempUnschedulableUntil: &activeUntil, TempUnschedulableAt: failedAt(4)},
+		}},
+		{ID: 2, Position: 1, SourceChannelID: 10, SourceGroupID: &groupB, Enabled: true, SourceAPIKeyCipher: "b", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 2, Model: "m", TempUnschedulableUntil: &activeUntil, TempUnschedulableAt: failedAt(3)},
+		}},
+		{ID: 3, Position: 2, SourceChannelID: 20, Enabled: true, SourceAPIKeyCipher: "c", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 3, Model: "m", TempUnschedulableUntil: &activeUntil, TempUnschedulableAt: failedAt(2)},
+		}},
+	}
+
+	got := (&Service{}).runtime().recoverWhenAllRoutesRestricted(routes, "m", nil, now)
+	if got[0].ModelCooldowns["m"].TempUnschedulableUntil != nil || got[1].ModelCooldowns["m"].TempUnschedulableUntil != nil {
+		t.Fatalf("same-channel source groups were incorrectly deduplicated: route1=%+v route2=%+v", got[0].ModelCooldowns["m"], got[1].ModelCooldowns["m"])
+	}
+}
+
+func TestRecoverWhenAllRoutesRestrictedProbePendingUsesFailureAge(t *testing.T) {
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	due := now.Add(-time.Second)
+	failedAt := func(minutesAgo int) *time.Time {
+		value := now.Add(-time.Duration(minutesAgo) * time.Minute)
+		return &value
+	}
+	routes := []storage.GatewayRoute{
+		{ID: 1, Position: 0, SourceChannelID: 1, Enabled: true, SourceAPIKeyCipher: "a", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 1, Model: "m", NextProbeAt: &due, ProbeStatus: storage.GatewayModelProbeStatusPending, TempUnschedulableAt: failedAt(30)},
+		}},
+		{ID: 2, Position: 1, SourceChannelID: 2, Enabled: true, SourceAPIKeyCipher: "b", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 2, Model: "m", NextProbeAt: &due, ProbeStatus: storage.GatewayModelProbeStatusPending, TempUnschedulableAt: failedAt(20)},
+		}},
+		{ID: 3, Position: 2, SourceChannelID: 3, Enabled: true, SourceAPIKeyCipher: "c", ModelCooldowns: map[string]storage.GatewayRouteModelCooldown{
+			"m": {RouteID: 3, Model: "m", NextProbeAt: &due, ProbeStatus: storage.GatewayModelProbeStatusPending, TempUnschedulableAt: failedAt(10)},
+		}},
+	}
+
+	got := (&Service{}).runtime().recoverWhenAllRoutesRestricted(routes, "m", nil, now)
+	for _, id := range []uint{1, 2} {
+		cooldown := got[id-1].ModelCooldowns["m"]
+		if cooldown.ProbeStatus != storage.GatewayModelProbeStatusManual || cooldown.NextProbeAt != nil {
+			t.Fatalf("oldest pending route %d was not selected: %+v", id, cooldown)
+		}
+	}
+	if cooldown := got[2].ModelCooldowns["m"]; cooldown.ProbeStatus != storage.GatewayModelProbeStatusPending || cooldown.NextProbeAt == nil {
+		t.Fatalf("newest pending route was selected unexpectedly: %+v", cooldown)
 	}
 }
 
@@ -289,7 +363,7 @@ func TestBindModelCooldownAliases(t *testing.T) {
 func TestRateForRoute_GroupNameFallbackTrimsWhitespace(t *testing.T) {
 	route := &storage.GatewayRoute{
 		SourceGroupName:  "Team/plus典韦 🪓",
-		RateConvertMode: "raw",
+		RateConvertMode:  "raw",
 		RateConvertValue: 1,
 	}
 	groups := []connector.APIKeyGroup{

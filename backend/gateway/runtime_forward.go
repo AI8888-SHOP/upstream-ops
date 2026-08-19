@@ -511,8 +511,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					if strings.TrimSpace(errInfo.Detail) != "" {
 						pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 					}
-					cooldownErr := rt.Routes.SetModelTempUnschedulable(
+					cooldownErr := rt.Routes.SetModelTempUnschedulableWithProbeProtocol(
 						route.ID, upstreamModel, until, pauseReason, time.Now(), reqID,
+						gwCfg.ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(path, kind), string(kind),
 					)
 					if cooldownErr == nil && storage.NormalizeGatewayModel(upstreamModel) != "" {
 						affinity.preservePreferredOnCooldown(route.ID)

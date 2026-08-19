@@ -302,6 +302,11 @@ export interface SystemGatewayConfig {
   cacheHitRateThresholdPercent: number
   cacheHitRateBlacklistMinutes: number
   cacheHitRateMinimumRequests: number
+  modelCooldownProbeEnabled: boolean
+  modelCooldownProbeIntervalMinutes: number
+  modelCooldownProbeTimeoutSeconds: number
+  modelCooldownProbeConcurrency: number
+  modelCooldownProbeMaxBackoffMinutes: number
   hedge: {
     enabled: boolean
     delaySeconds: number
@@ -822,6 +827,15 @@ export interface GatewayRouteModelCooldown {
   temp_unschedulable_at?: string | null
   temp_unschedulable_request_id?: string
   recover_success_streak?: number
+  next_probe_at?: string | null
+  last_probe_at?: string | null
+  probe_lease_until?: string | null
+  probe_status?: string
+  probe_failure_count?: number
+  probe_request_id?: string
+  probe_inbound_protocol?: string
+  probe_last_status_code?: number
+  probe_last_error?: string
 }
 
 export interface GatewayRoute {

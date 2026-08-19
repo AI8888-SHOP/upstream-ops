@@ -364,6 +364,10 @@ export function routeModelCooldownEntries(
         !!item?.temp_unschedulable_at ||
         !!item?.temp_unschedulable_reason?.trim() ||
         !!item?.temp_unschedulable_request_id?.trim() ||
+        !!item?.next_probe_at ||
+        !!item?.last_probe_at ||
+        !!item?.probe_status ||
+        !!item?.probe_last_error?.trim() ||
         (item?.recover_success_streak ?? 0) > 0
       if (!model || !hasState || seen.has(model)) return false
       seen.add(model)
@@ -377,9 +381,50 @@ export function isModelCooldownActive(
   cooldown: Partial<GatewayRouteModelCooldown>,
   now = Date.now(),
 ): boolean {
-  if (!cooldown.temp_unschedulable_until) return false
-  const time = new Date(cooldown.temp_unschedulable_until).getTime()
-  return !Number.isNaN(time) && time > now
+  if (cooldown.probe_status === "probing") return true
+  if (cooldown.temp_unschedulable_until) {
+    const until = new Date(cooldown.temp_unschedulable_until).getTime()
+    if (!Number.isNaN(until) && until > now) return true
+  }
+  if (
+    cooldown.probe_status !== "healthy" &&
+    cooldown.probe_status !== "manual" &&
+    cooldown.next_probe_at
+  ) {
+    const nextProbe = new Date(cooldown.next_probe_at).getTime()
+    return !Number.isNaN(nextProbe) && nextProbe <= now
+  }
+  return false
+}
+
+export function modelProbeStatusLabel(status?: string): string {
+  switch (status) {
+    case "pending":
+      return "等待探测"
+    case "probing":
+      return "探测中"
+    case "healthy":
+      return "健康"
+    case "transient_failure":
+      return "临时失败"
+    case "permanent_failure":
+      return "需人工关注"
+    case "manual":
+      return "手动模式"
+    default:
+      return "等待探测"
+  }
+}
+
+export function modelProbeProtocolLabel(protocol?: string): string {
+  switch (protocol) {
+    case "anthropic":
+      return "Anthropic Messages"
+    case "openai_responses":
+      return "OpenAI Responses"
+    default:
+      return "OpenAI Chat"
+  }
 }
 
 /** 缓存健康拉黑是否仍在生效。 */

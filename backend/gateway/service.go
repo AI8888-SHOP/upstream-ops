@@ -97,6 +97,10 @@ type Service struct {
 	// channel never turns the usage write path into a query storm.
 	cacheHealthMu      sync.Mutex
 	cacheHealthPending map[cacheHealthSourceKey]time.Time
+
+	// modelProbeMu serializes a scheduler tick inside one process. Database
+	// leases still protect multiple processes/instances.
+	modelProbeMu sync.Mutex
 }
 
 type modelsCacheEntry struct {
@@ -210,6 +214,11 @@ func (s *Service) UpdateGatewayConfig(cfg config.GatewayConfig) {
 	s.gatewayCfg = cfg.WithDefaults()
 	updated := s.gatewayCfg
 	s.mu.Unlock()
+	if s.Routes != nil {
+		if err := s.Routes.ConfigureModelCooldownProbes(updated.ModelCooldownProbeEnabled, time.Now()); err != nil && s.Log != nil {
+			s.Log.Warn("synchronize gateway model probe scheduling failed", "err", err)
+		}
+	}
 	// Turning the feature off must immediately release source snapshots; this
 	// does not touch manual provider/route enable flags.
 	if s.Usage == nil {

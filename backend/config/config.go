@@ -184,6 +184,13 @@ const (
 	MinGatewayCacheHitRateMinimumRequests     = 10
 	DefaultGatewayCacheHitRateMinimumRequests = MinGatewayCacheHitRateMinimumRequests
 	MaxGatewayCacheHitRateMinimumRequests     = 100000
+	// Active model-cooldown recovery defaults. The scheduler polls frequently;
+	// these values control the actual probe cadence and resource budget.
+	DefaultGatewayModelCooldownProbeEnabled           = true
+	DefaultGatewayModelCooldownProbeIntervalMinutes   = 5
+	DefaultGatewayModelCooldownProbeTimeoutSeconds    = 10
+	DefaultGatewayModelCooldownProbeConcurrency       = 2
+	DefaultGatewayModelCooldownProbeMaxBackoffMinutes = 60
 )
 
 type UpstreamConfig struct {
@@ -225,6 +232,13 @@ type GatewayConfig struct {
 	CacheHitRateThresholdPercent float64 `mapstructure:"cacheHitRateThresholdPercent" yaml:"cacheHitRateThresholdPercent" json:"cacheHitRateThresholdPercent"`
 	CacheHitRateBlacklistMinutes int     `mapstructure:"cacheHitRateBlacklistMinutes" yaml:"cacheHitRateBlacklistMinutes" json:"cacheHitRateBlacklistMinutes"`
 	CacheHitRateMinimumRequests  int     `mapstructure:"cacheHitRateMinimumRequests" yaml:"cacheHitRateMinimumRequests" json:"cacheHitRateMinimumRequests"`
+	// Active model cooldown recovery. These fields are hot-reloadable with the
+	// rest of GatewayConfig and do not affect gateway usage accounting.
+	ModelCooldownProbeEnabled           bool `mapstructure:"modelCooldownProbeEnabled" yaml:"modelCooldownProbeEnabled" json:"modelCooldownProbeEnabled"`
+	ModelCooldownProbeIntervalMinutes   int  `mapstructure:"modelCooldownProbeIntervalMinutes" yaml:"modelCooldownProbeIntervalMinutes" json:"modelCooldownProbeIntervalMinutes"`
+	ModelCooldownProbeTimeoutSeconds    int  `mapstructure:"modelCooldownProbeTimeoutSeconds" yaml:"modelCooldownProbeTimeoutSeconds" json:"modelCooldownProbeTimeoutSeconds"`
+	ModelCooldownProbeConcurrency       int  `mapstructure:"modelCooldownProbeConcurrency" yaml:"modelCooldownProbeConcurrency" json:"modelCooldownProbeConcurrency"`
+	ModelCooldownProbeMaxBackoffMinutes int  `mapstructure:"modelCooldownProbeMaxBackoffMinutes" yaml:"modelCooldownProbeMaxBackoffMinutes" json:"modelCooldownProbeMaxBackoffMinutes"`
 	// Hedge / ResponseValidation 是新建 GatewayGroup 的默认策略；组内保存后独立生效。
 	Hedge              GatewayHedgeConfig              `mapstructure:"hedge" yaml:"hedge" json:"hedge"`
 	ResponseValidation GatewayResponseValidationConfig `mapstructure:"responseValidation" yaml:"responseValidation" json:"responseValidation"`
@@ -324,6 +338,18 @@ func (g GatewayConfig) Validate() error {
 	if g.CacheHitRateMinimumRequests < 0 || g.CacheHitRateMinimumRequests > MaxGatewayCacheHitRateMinimumRequests {
 		joined = errors.Join(joined, fmt.Errorf("gateway.cacheHitRateMinimumRequests must be between 0 and %d", MaxGatewayCacheHitRateMinimumRequests))
 	}
+	if g.ModelCooldownProbeIntervalMinutes < 0 || g.ModelCooldownProbeIntervalMinutes > 24*60 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.modelCooldownProbeIntervalMinutes must be between 0 and %d", 24*60))
+	}
+	if g.ModelCooldownProbeTimeoutSeconds < 0 || g.ModelCooldownProbeTimeoutSeconds > 120 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.modelCooldownProbeTimeoutSeconds must be between 0 and 120"))
+	}
+	if g.ModelCooldownProbeConcurrency < 0 || g.ModelCooldownProbeConcurrency > 16 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.modelCooldownProbeConcurrency must be between 0 and 16"))
+	}
+	if g.ModelCooldownProbeMaxBackoffMinutes < 0 || g.ModelCooldownProbeMaxBackoffMinutes > 7*24*60 {
+		joined = errors.Join(joined, fmt.Errorf("gateway.modelCooldownProbeMaxBackoffMinutes must be between 0 and %d", 7*24*60))
+	}
 	if math.IsNaN(g.Hedge.DelaySeconds) || math.IsInf(g.Hedge.DelaySeconds, 0) ||
 		g.Hedge.DelaySeconds < 0.1 || g.Hedge.DelaySeconds > 300 {
 		joined = errors.Join(joined, fmt.Errorf("gateway.hedge.delaySeconds must be between 0.1 and 300"))
@@ -403,6 +429,30 @@ func (g GatewayConfig) WithDefaults() GatewayConfig {
 	}
 	if g.CacheHitRateBlacklistMinutes > 30*24*60 {
 		g.CacheHitRateBlacklistMinutes = 30 * 24 * 60
+	}
+	if g.ModelCooldownProbeIntervalMinutes <= 0 {
+		g.ModelCooldownProbeIntervalMinutes = DefaultGatewayModelCooldownProbeIntervalMinutes
+	}
+	if g.ModelCooldownProbeIntervalMinutes > 24*60 {
+		g.ModelCooldownProbeIntervalMinutes = 24 * 60
+	}
+	if g.ModelCooldownProbeTimeoutSeconds <= 0 {
+		g.ModelCooldownProbeTimeoutSeconds = DefaultGatewayModelCooldownProbeTimeoutSeconds
+	}
+	if g.ModelCooldownProbeTimeoutSeconds > 120 {
+		g.ModelCooldownProbeTimeoutSeconds = 120
+	}
+	if g.ModelCooldownProbeConcurrency <= 0 {
+		g.ModelCooldownProbeConcurrency = DefaultGatewayModelCooldownProbeConcurrency
+	}
+	if g.ModelCooldownProbeConcurrency > 16 {
+		g.ModelCooldownProbeConcurrency = 16
+	}
+	if g.ModelCooldownProbeMaxBackoffMinutes <= 0 {
+		g.ModelCooldownProbeMaxBackoffMinutes = DefaultGatewayModelCooldownProbeMaxBackoffMinutes
+	}
+	if g.ModelCooldownProbeMaxBackoffMinutes > 7*24*60 {
+		g.ModelCooldownProbeMaxBackoffMinutes = 7 * 24 * 60
 	}
 	g.Hedge = g.Hedge.WithDefaults()
 	g.ResponseValidation = g.ResponseValidation.WithDefaults()
@@ -641,6 +691,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gateway.cacheHitRateThresholdPercent", DefaultGatewayCacheHitRateThresholdPercent)
 	v.SetDefault("gateway.cacheHitRateBlacklistMinutes", DefaultGatewayCacheHitRateBlacklistMinutes)
 	v.SetDefault("gateway.cacheHitRateMinimumRequests", DefaultGatewayCacheHitRateMinimumRequests)
+	v.SetDefault("gateway.modelCooldownProbeEnabled", DefaultGatewayModelCooldownProbeEnabled)
+	v.SetDefault("gateway.modelCooldownProbeIntervalMinutes", DefaultGatewayModelCooldownProbeIntervalMinutes)
+	v.SetDefault("gateway.modelCooldownProbeTimeoutSeconds", DefaultGatewayModelCooldownProbeTimeoutSeconds)
+	v.SetDefault("gateway.modelCooldownProbeConcurrency", DefaultGatewayModelCooldownProbeConcurrency)
+	v.SetDefault("gateway.modelCooldownProbeMaxBackoffMinutes", DefaultGatewayModelCooldownProbeMaxBackoffMinutes)
 	v.SetDefault("gateway.hedge.enabled", false)
 	v.SetDefault("gateway.hedge.delaySeconds", DefaultGatewayHedgeDelaySeconds)
 	v.SetDefault("gateway.hedge.maxParallel", DefaultGatewayHedgeMaxParallel)

@@ -1574,10 +1574,7 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 			normalizeGatewayRoute(&list[i])
 
 			// 保留已有上游密钥 / 暂停状态：来源未变时不丢
-			sameSource := hasPrev &&
-				prev.NormalizeSourceKind() == list[i].NormalizeSourceKind() &&
-				prev.SourceChannelID == list[i].SourceChannelID &&
-				prev.GatewayProviderID == list[i].GatewayProviderID
+			sameSource := hasPrev && gatewayRouteSourceEqual(&prev, &list[i])
 			if sameSource {
 				list[i].SourceAPIKeyID = prev.SourceAPIKeyID
 				list[i].SourceAPIKeyName = prev.SourceAPIKeyName
@@ -1638,6 +1635,38 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 		r.readCaches.gatewayRoutes.invalidate(groupID)
 	}
 	return err
+}
+
+// gatewayRouteSourceEqual reports whether two route rows still point at the
+// same independently schedulable source. SourceGroupID is authoritative when
+// both rows have it; names are retained as a compatibility fallback for older
+// rows that predate persisted remote group ids. A group change must not carry
+// the previous group's API key or model cooldown into the replacement row.
+func gatewayRouteSourceEqual(a, b *GatewayRoute) bool {
+	if a == nil || b == nil || a.NormalizeSourceKind() != b.NormalizeSourceKind() {
+		return false
+	}
+	if a.NormalizeSourceKind() == GatewayRouteSourceProvider {
+		return a.GatewayProviderID > 0 && a.GatewayProviderID == b.GatewayProviderID
+	}
+	if a.SourceChannelID == 0 || a.SourceChannelID != b.SourceChannelID {
+		return false
+	}
+	if a.SourceGroupID != nil && *a.SourceGroupID > 0 && b.SourceGroupID != nil && *b.SourceGroupID > 0 {
+		return *a.SourceGroupID == *b.SourceGroupID
+	}
+	leftName := strings.TrimSpace(a.SourceGroupName)
+	rightName := strings.TrimSpace(b.SourceGroupName)
+	if leftName != "" && rightName != "" {
+		return strings.EqualFold(leftName, rightName)
+	}
+	// If one side only has an id and the other side has no group information,
+	// they are not proven to be the same source. This deliberately resets stale
+	// credentials/cooldowns instead of silently sharing them with the default
+	// group.
+	return leftName == "" && rightName == "" &&
+		(a.SourceGroupID == nil || *a.SourceGroupID <= 0) &&
+		(b.SourceGroupID == nil || *b.SourceGroupID <= 0)
 }
 
 func normalizeGatewayRoute(item *GatewayRoute) {
@@ -1785,8 +1814,26 @@ func (r *GatewayRoutes) SetTempUnschedulable(id uint, until time.Time, reason st
 }
 
 // SetModelTempUnschedulable writes automatic cooldown state for one model on a
-// route. The unique route/model key makes concurrent failures idempotent.
+// route. The legacy entry point assumes active probing so existing callers
+// continue to get automatic recovery behavior.
 func (r *GatewayRoutes) SetModelTempUnschedulable(id uint, model string, until time.Time, reason string, failedAt time.Time, requestID string) error {
+	return r.setModelTempUnschedulable(id, model, until, reason, failedAt, requestID, true, "openai_chat")
+}
+
+// SetModelTempUnschedulableWithProbe is used by the runtime failure path so a
+// disabled feature cannot leave a newly-created row in a probe-pending state.
+func (r *GatewayRoutes) SetModelTempUnschedulableWithProbe(id uint, model string, until time.Time, reason string, failedAt time.Time, requestID string, probeEnabled bool) error {
+	return r.setModelTempUnschedulable(id, model, until, reason, failedAt, requestID, probeEnabled, "openai_chat")
+}
+
+// SetModelTempUnschedulableWithProbeProtocol records the inbound protocol that
+// caused the failure so an automatic probe can replay the same endpoint when a
+// route is configured with protocol=auto (notably /v1/responses).
+func (r *GatewayRoutes) SetModelTempUnschedulableWithProbeProtocol(id uint, model string, until time.Time, reason string, failedAt time.Time, requestID string, probeEnabled bool, inboundProtocol string) error {
+	return r.setModelTempUnschedulable(id, model, until, reason, failedAt, requestID, probeEnabled, inboundProtocol)
+}
+
+func (r *GatewayRoutes) setModelTempUnschedulable(id uint, model string, until time.Time, reason string, failedAt time.Time, requestID string, probeEnabled bool, inboundProtocol string) error {
 	model = NormalizeGatewayModel(model)
 	if id == 0 || model == "" {
 		return nil
@@ -1795,6 +1842,15 @@ func (r *GatewayRoutes) SetModelTempUnschedulable(id uint, model string, until t
 		failedAt = time.Now()
 	}
 	requestID = strings.TrimSpace(requestID)
+	inboundProtocol = normalizeGatewayProbeInboundProtocol(inboundProtocol)
+	now := time.Now()
+	var nextProbeAt *time.Time
+	probeStatus := GatewayModelProbeStatusManual
+	if probeEnabled {
+		next := modelCooldownInitialProbeAt(until, now)
+		nextProbeAt = &next
+		probeStatus = GatewayModelProbeStatusPending
+	}
 	err := r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "route_id"}, {Name: "model"}},
 		DoUpdates: clause.Assignments(map[string]any{
@@ -1803,17 +1859,382 @@ func (r *GatewayRoutes) SetModelTempUnschedulable(id uint, model string, until t
 			"temp_unschedulable_at":         failedAt,
 			"temp_unschedulable_request_id": requestID,
 			"recover_success_streak":        0,
-			"updated_at":                    time.Now(),
+			"next_probe_at":                 nextProbeAt,
+			"last_probe_at":                 nil,
+			"probe_lease_until":             nil,
+			"probe_status":                  probeStatus,
+			"probe_failure_count":           0,
+			"probe_request_id":              "",
+			"probe_inbound_protocol":        inboundProtocol,
+			"probe_last_status_code":        0,
+			"probe_last_error":              "",
+			"updated_at":                    now,
 		}),
 	}).Create(&GatewayRouteModelCooldown{
 		RouteID: id, Model: model, TempUnschedulableUntil: &until,
 		TempUnschedulableReason: reason, TempUnschedulableAt: &failedAt,
 		TempUnschedulableRequestID: requestID,
+		NextProbeAt:                nextProbeAt, ProbeStatus: probeStatus, ProbeInboundProtocol: inboundProtocol,
 	}).Error
 	if err == nil {
 		r.readCaches.invalidateGatewayRoute(id)
 	}
 	return err
+}
+
+func normalizeGatewayProbeInboundProtocol(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "anthropic":
+		return "anthropic"
+	case "openai_responses", "responses":
+		return "openai_responses"
+	default:
+		return "openai_chat"
+	}
+}
+
+// modelCooldownInitialProbeAt schedules the first health check shortly before
+// the user-facing cooldown expires. The scheduler itself polls more often than
+// this lead time, so a low-traffic route is normally checked before a request
+// can become its first recovery attempt.
+func modelCooldownInitialProbeAt(until, now time.Time) time.Time {
+	if until.IsZero() {
+		return now
+	}
+	lead := 10 * time.Second
+	if until.Before(now.Add(lead)) {
+		return now
+	}
+	return until.Add(-lead)
+}
+
+// ConfigureModelCooldownProbes synchronizes persisted scheduling state with
+// the runtime feature switch. Disabling the worker must not leave rows stuck in
+// a probe-pending state; enabling it re-arms active rows without touching the
+// original failure generation or diagnostics.
+func (r *GatewayRoutes) ConfigureModelCooldownProbes(enabled bool, now time.Time) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var rows []GatewayRouteModelCooldown
+	if err := r.db.Where(
+		"temp_unschedulable_until IS NOT NULL OR next_probe_at IS NOT NULL OR probe_lease_until IS NOT NULL OR probe_status = ?",
+		GatewayModelProbeStatusProbing,
+	).Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		updates := map[string]any{}
+		if !enabled {
+			// Let an in-flight request finish with its current lease. The worker
+			// observes the hot-reloaded flag when it records the result and will
+			// release the lease in manual mode. Clearing a live lease here would
+			// allow a second worker (or a user request) to race the probe.
+			if row.ProbeStatus == GatewayModelProbeStatusProbing &&
+				row.ProbeLeaseUntil != nil && row.ProbeLeaseUntil.After(now) {
+				continue
+			}
+			if row.ProbeStatus == GatewayModelProbeStatusManual && row.NextProbeAt == nil &&
+				row.ProbeLeaseUntil == nil && row.ProbeRequestID == "" {
+				continue
+			}
+			updates["next_probe_at"] = nil
+			updates["probe_lease_until"] = nil
+			updates["probe_request_id"] = ""
+			updates["probe_status"] = GatewayModelProbeStatusManual
+		} else if row.ProbeStatus != GatewayModelProbeStatusProbing &&
+			(row.ProbeStatus == "" ||
+				row.ProbeStatus == GatewayModelProbeStatusManual ||
+				row.ProbeStatus == GatewayModelProbeStatusHealthy ||
+				row.NextProbeAt == nil) {
+			// Existing pending/failure rows already carry their intended retry
+			// time, and an in-flight row owns a live lease. Re-applying an
+			// unrelated setting must not reset either state or duplicate probes.
+			next := now
+			if row.NextProbeAt != nil && !row.NextProbeAt.IsZero() {
+				next = *row.NextProbeAt
+			} else if row.TempUnschedulableUntil != nil {
+				next = modelCooldownInitialProbeAt(*row.TempUnschedulableUntil, now)
+			}
+			updates["next_probe_at"] = next
+			updates["probe_status"] = GatewayModelProbeStatusPending
+		}
+		if len(updates) == 0 {
+			continue
+		}
+		updates["updated_at"] = now
+		query := r.db.Model(&GatewayRouteModelCooldown{}).Where("id = ?", row.ID)
+		if !enabled {
+			// Do not overwrite a probe claimed after the snapshot above. An
+			// expired lease is safe to normalize because the owner can no longer
+			// be considered in flight.
+			query = query.Where("probe_status <> ? OR probe_lease_until IS NULL OR probe_lease_until <= ?", GatewayModelProbeStatusProbing, now)
+		} else {
+			// A stale probing row is deliberately left for ClaimDue to reclaim;
+			// re-applying settings must never replace its request id/lease.
+			query = query.Where("probe_status <> ?", GatewayModelProbeStatusProbing)
+		}
+		result := query.Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			r.readCaches.invalidateGatewayRoute(row.RouteID)
+		}
+	}
+	return nil
+}
+
+// ClaimDueModelCooldownProbes atomically leases due cooldown rows for a
+// background worker. Conditional updates make this safe when more than one
+// application instance runs the scheduler against the same database.
+func (r *GatewayRoutes) ClaimDueModelCooldownProbes(now time.Time, limit int, lease time.Duration) ([]GatewayRouteModelCooldown, error) {
+	if r == nil || r.db == nil || limit <= 0 {
+		return nil, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	// Read a small cushion because some rows may be claimed by another worker
+	// between SELECT and the conditional UPDATE below.
+	var candidates []GatewayRouteModelCooldown
+	probeDueBefore := now.Add(10 * time.Second)
+	err := r.db.Where("temp_unschedulable_until IS NOT NULL").
+		Where("(next_probe_at <= ? OR (next_probe_at IS NULL AND temp_unschedulable_until <= ?))", now, probeDueBefore).
+		Where("(probe_status IS NULL OR probe_status <> ?)", GatewayModelProbeStatusManual).
+		Where("(probe_status IS NULL OR probe_status <> ? OR probe_lease_until IS NULL OR probe_lease_until <= ?)", GatewayModelProbeStatusProbing, now).
+		Order("next_probe_at ASC, updated_at ASC, id ASC").
+		Limit(limit * 4).Find(&candidates).Error
+	if err != nil {
+		return nil, err
+	}
+	claimed := make([]GatewayRouteModelCooldown, 0, limit)
+	for _, candidate := range candidates {
+		if len(claimed) >= limit {
+			break
+		}
+		leaseUntil := now.Add(lease)
+		holdUntil := leaseUntil
+		if candidate.TempUnschedulableUntil != nil && candidate.TempUnschedulableUntil.After(holdUntil) {
+			holdUntil = *candidate.TempUnschedulableUntil
+		}
+		requestID := fmt.Sprintf("probe-%d-%d", candidate.ID, now.UnixNano())
+		query := r.db.Model(&GatewayRouteModelCooldown{}).
+			Where("id = ?", candidate.ID).
+			Where("(probe_status IS NULL OR probe_status <> ? OR probe_lease_until IS NULL OR probe_lease_until <= ?)", GatewayModelProbeStatusProbing, now).
+			Where("(probe_status IS NULL OR probe_status <> ?)", GatewayModelProbeStatusManual).
+			Where("(next_probe_at <= ? OR (next_probe_at IS NULL AND temp_unschedulable_until <= ?))", now, probeDueBefore)
+		if candidate.TempUnschedulableUntil != nil {
+			query = query.Where("temp_unschedulable_until = ?", *candidate.TempUnschedulableUntil)
+		}
+		if candidate.TempUnschedulableAt == nil {
+			query = query.Where("temp_unschedulable_at IS NULL")
+		} else {
+			query = query.Where("temp_unschedulable_at = ?", *candidate.TempUnschedulableAt)
+		}
+		query = query.Where("temp_unschedulable_request_id = ?", candidate.TempUnschedulableRequestID)
+		result := query.Updates(map[string]any{
+			"probe_status":      GatewayModelProbeStatusProbing,
+			"probe_lease_until": leaseUntil,
+			"probe_request_id":  requestID,
+			// Hold the route out of normal scheduling while the probe is in
+			// flight, including the small window after the original expiry.
+			"temp_unschedulable_until": holdUntil,
+			"updated_at":               now,
+		})
+		if result.Error != nil {
+			return claimed, result.Error
+		}
+		if result.RowsAffected == 0 {
+			continue
+		}
+		candidate.ProbeStatus = GatewayModelProbeStatusProbing
+		candidate.ProbeLeaseUntil = &leaseUntil
+		candidate.ProbeRequestID = requestID
+		candidate.TempUnschedulableUntil = &holdUntil
+		claimed = append(claimed, candidate)
+		r.readCaches.invalidateGatewayRoute(candidate.RouteID)
+	}
+	return claimed, nil
+}
+
+// ClaimModelCooldownProbe leases one row regardless of its next_probe_at. It
+// powers the administrator's "probe now" action while retaining the same CAS
+// semantics as the periodic worker.
+func (r *GatewayRoutes) ClaimModelCooldownProbe(id uint, model string, now time.Time, lease time.Duration) (*GatewayRouteModelCooldown, error) {
+	model = NormalizeGatewayModel(model)
+	if r == nil || r.db == nil || id == 0 || model == "" {
+		return nil, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	var candidate GatewayRouteModelCooldown
+	if err := r.db.Where("route_id = ? AND model = ?", id, model).First(&candidate).Error; err != nil {
+		return nil, err
+	}
+	leaseUntil := now.Add(lease)
+	holdUntil := leaseUntil
+	if candidate.TempUnschedulableUntil != nil && candidate.TempUnschedulableUntil.After(holdUntil) {
+		holdUntil = *candidate.TempUnschedulableUntil
+	}
+	requestID := fmt.Sprintf("probe-manual-%d-%d", candidate.ID, now.UnixNano())
+	query := r.db.Model(&GatewayRouteModelCooldown{}).
+		Where("id = ?", candidate.ID).
+		Where("(probe_status IS NULL OR probe_status <> ? OR probe_lease_until IS NULL OR probe_lease_until <= ?)", GatewayModelProbeStatusProbing, now)
+	result := query.Updates(map[string]any{
+		"probe_status":             GatewayModelProbeStatusProbing,
+		"probe_lease_until":        leaseUntil,
+		"probe_request_id":         requestID,
+		"temp_unschedulable_until": holdUntil,
+		"next_probe_at":            now,
+		"updated_at":               now,
+	})
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	candidate.ProbeStatus = GatewayModelProbeStatusProbing
+	candidate.ProbeLeaseUntil = &leaseUntil
+	candidate.ProbeRequestID = requestID
+	candidate.TempUnschedulableUntil = &holdUntil
+	candidate.NextProbeAt = &now
+	r.readCaches.invalidateGatewayRoute(id)
+	return &candidate, nil
+}
+
+// MarkModelProbeSuccess clears the active pause only if the worker still owns
+// the same failure generation and lease. A newer user failure therefore wins.
+func (r *GatewayRoutes) MarkModelProbeSuccess(claim GatewayRouteModelCooldown, now time.Time, statusCode int) (bool, error) {
+	if r == nil || r.db == nil || claim.ID == 0 {
+		return false, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	query := r.db.Model(&GatewayRouteModelCooldown{}).
+		Where("id = ? AND probe_status = ? AND probe_request_id = ?", claim.ID, GatewayModelProbeStatusProbing, claim.ProbeRequestID)
+	if claim.TempUnschedulableAt == nil {
+		query = query.Where("temp_unschedulable_at IS NULL")
+	} else {
+		query = query.Where("temp_unschedulable_at = ?", *claim.TempUnschedulableAt)
+	}
+	query = query.Where("temp_unschedulable_request_id = ?", claim.TempUnschedulableRequestID)
+	result := query.Updates(map[string]any{
+		"temp_unschedulable_until": nil,
+		"next_probe_at":            nil,
+		"last_probe_at":            now,
+		"probe_lease_until":        nil,
+		"probe_status":             GatewayModelProbeStatusHealthy,
+		"probe_failure_count":      0,
+		"probe_request_id":         "",
+		"probe_last_status_code":   statusCode,
+		"probe_last_error":         "",
+		"updated_at":               now,
+	})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(claim.RouteID)
+	}
+	return result.RowsAffected > 0, nil
+}
+
+// MarkModelProbeFailure keeps a route blocked and schedules the next attempt.
+// Permanent failures use the same backoff value supplied by the caller but are
+// surfaced separately so the UI can tell operators why recovery is delayed.
+func (r *GatewayRoutes) MarkModelProbeFailure(claim GatewayRouteModelCooldown, now, next time.Time, statusCode int, message string, permanent bool) (bool, error) {
+	if r == nil || r.db == nil || claim.ID == 0 {
+		return false, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if next.IsZero() || !next.After(now) {
+		next = now.Add(time.Minute)
+	}
+	status := GatewayModelProbeStatusTransient
+	if permanent {
+		status = GatewayModelProbeStatusPermanent
+	}
+	query := r.db.Model(&GatewayRouteModelCooldown{}).
+		Where("id = ? AND probe_status = ? AND probe_request_id = ?", claim.ID, GatewayModelProbeStatusProbing, claim.ProbeRequestID)
+	if claim.TempUnschedulableAt == nil {
+		query = query.Where("temp_unschedulable_at IS NULL")
+	} else {
+		query = query.Where("temp_unschedulable_at = ?", *claim.TempUnschedulableAt)
+	}
+	query = query.Where("temp_unschedulable_request_id = ?", claim.TempUnschedulableRequestID)
+	result := query.Updates(map[string]any{
+		"temp_unschedulable_until": next,
+		"next_probe_at":            next,
+		"last_probe_at":            now,
+		"probe_lease_until":        nil,
+		"probe_status":             status,
+		"probe_failure_count":      gorm.Expr("probe_failure_count + 1"),
+		"probe_request_id":         "",
+		"probe_last_status_code":   statusCode,
+		"probe_last_error":         strings.TrimSpace(message),
+		"updated_at":               now,
+	})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(claim.RouteID)
+	}
+	return result.RowsAffected > 0, nil
+}
+
+// MarkManualModelProbeFailure records an explicitly requested probe failure
+// without arming the background worker. The current cooldown window remains in
+// place (the claim may have extended it while the request was in flight), but
+// no due timestamp is left behind when automatic probing is disabled.
+func (r *GatewayRoutes) MarkManualModelProbeFailure(claim GatewayRouteModelCooldown, now time.Time, statusCode int, message string) (bool, error) {
+	if r == nil || r.db == nil || claim.ID == 0 {
+		return false, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	query := r.db.Model(&GatewayRouteModelCooldown{}).
+		Where("id = ? AND probe_status = ? AND probe_request_id = ?", claim.ID, GatewayModelProbeStatusProbing, claim.ProbeRequestID)
+	if claim.TempUnschedulableAt == nil {
+		query = query.Where("temp_unschedulable_at IS NULL")
+	} else {
+		query = query.Where("temp_unschedulable_at = ?", *claim.TempUnschedulableAt)
+	}
+	query = query.Where("temp_unschedulable_request_id = ?", claim.TempUnschedulableRequestID)
+	result := query.Updates(map[string]any{
+		"next_probe_at":          nil,
+		"last_probe_at":          now,
+		"probe_lease_until":      nil,
+		"probe_status":           GatewayModelProbeStatusManual,
+		"probe_failure_count":    gorm.Expr("probe_failure_count + 1"),
+		"probe_request_id":       "",
+		"probe_last_status_code": statusCode,
+		"probe_last_error":       strings.TrimSpace(message),
+		"updated_at":             now,
+	})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected > 0 {
+		r.readCaches.invalidateGatewayRoute(claim.RouteID)
+	}
+	return result.RowsAffected > 0, nil
 }
 
 // ClearModelTempUnschedulable clears one model's automatic cooldown state.
@@ -1826,9 +2247,11 @@ func (r *GatewayRoutes) ClearModelTempUnschedulable(id uint, model string) error
 		`UPDATE gateway_route_model_cooldowns
 		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
 		     temp_unschedulable_at = NULL, temp_unschedulable_request_id = '',
-		     recover_success_streak = 0, updated_at = ?
+		     recover_success_streak = 0, next_probe_at = NULL,
+		     probe_lease_until = NULL, probe_status = ?, probe_request_id = '',
+		     updated_at = ?
 		 WHERE route_id = ? AND model = ?`,
-		time.Now(), id, model,
+		GatewayModelProbeStatusManual, time.Now(), id, model,
 	)
 	if result.Error == nil && result.RowsAffected > 0 {
 		r.readCaches.invalidateGatewayRoute(id)
@@ -1847,9 +2270,11 @@ func (r *GatewayRoutes) ClearModelTempUnschedulableUntil(id uint, model string) 
 	}
 	result := r.db.Exec(
 		`UPDATE gateway_route_model_cooldowns
-		 SET temp_unschedulable_until = NULL, updated_at = ?
+		 SET temp_unschedulable_until = NULL, next_probe_at = NULL,
+		     probe_lease_until = NULL, probe_status = ?, probe_request_id = '',
+		     updated_at = ?
 		 WHERE route_id = ? AND model = ?`,
-		time.Now(), id, model,
+		GatewayModelProbeStatusManual, time.Now(), id, model,
 	)
 	if result.Error == nil && result.RowsAffected > 0 {
 		r.readCaches.invalidateGatewayRoute(id)
@@ -1873,9 +2298,10 @@ func (r *GatewayRoutes) ClearModelTempUnschedulableUntilIfMatch(
 		return false, nil
 	}
 	query := `UPDATE gateway_route_model_cooldowns
-		SET temp_unschedulable_until = NULL, updated_at = ?
+		SET temp_unschedulable_until = NULL, next_probe_at = NULL,
+		    probe_lease_until = NULL, probe_status = ?, probe_request_id = '', updated_at = ?
 		WHERE route_id = ? AND model = ? AND temp_unschedulable_until = ?`
-	args := []any{time.Now(), id, model, until}
+	args := []any{GatewayModelProbeStatusManual, time.Now(), id, model, until}
 	if failedAt == nil || failedAt.IsZero() {
 		query += ` AND temp_unschedulable_at IS NULL`
 	} else {
@@ -1918,7 +2344,9 @@ func (r *GatewayRoutes) NoteSuccessForModelPauseError(
 	updateSQL :=
 		`UPDATE gateway_route_model_cooldowns
 		 SET recover_success_streak = recover_success_streak + 1,
-		     temp_unschedulable_until = NULL, updated_at = ?
+		     temp_unschedulable_until = NULL, next_probe_at = NULL,
+		     probe_lease_until = NULL, probe_status = ?, probe_request_id = '',
+		     updated_at = ?
 		 WHERE route_id = ? AND model = ?
 		   AND (
 		     (temp_unschedulable_reason IS NOT NULL AND temp_unschedulable_reason != '')
@@ -1926,7 +2354,7 @@ func (r *GatewayRoutes) NoteSuccessForModelPauseError(
 		     OR (temp_unschedulable_request_id IS NOT NULL AND temp_unschedulable_request_id != '')
 		     OR temp_unschedulable_at IS NOT NULL
 		   )` + generationSQL
-	updateArgs := append([]any{now, id, model}, generationArgs...)
+	updateArgs := append([]any{GatewayModelProbeStatusHealthy, now, id, model}, generationArgs...)
 	result := r.db.Exec(updateSQL, updateArgs...)
 	if result.Error != nil {
 		return result.Error
@@ -1941,7 +2369,11 @@ func (r *GatewayRoutes) NoteSuccessForModelPauseError(
 		`UPDATE gateway_route_model_cooldowns
 		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
 		     temp_unschedulable_at = NULL, temp_unschedulable_request_id = '',
-		     recover_success_streak = 0, updated_at = ?
+		     recover_success_streak = 0, next_probe_at = NULL,
+		     last_probe_at = NULL, probe_lease_until = NULL,
+		     probe_status = '', probe_failure_count = 0, probe_request_id = '',
+		     probe_inbound_protocol = 'openai_chat', probe_last_status_code = 0,
+		     probe_last_error = '', updated_at = ?
 		 WHERE route_id = ? AND model = ? AND recover_success_streak >= ?` + generationSQL
 	clearArgs := append([]any{now, id, model, RouteRecoverSuccessClearStreak}, generationArgs...)
 	clearResult := r.db.Exec(clearSQL, clearArgs...)

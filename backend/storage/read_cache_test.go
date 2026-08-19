@@ -173,11 +173,12 @@ func TestGatewayRouteReadCacheInvalidationAndDeepCopy(t *testing.T) {
 		t.Fatalf("list route with cooldown: %+v err=%v", withCooldown, err)
 	}
 	cooldown := withCooldown[0].ModelCooldowns["model-a"]
-	if cooldown.TempUnschedulableReason != "capacity" || cooldown.TempUnschedulableUntil == nil {
+	if cooldown.TempUnschedulableReason != "capacity" || cooldown.TempUnschedulableUntil == nil || cooldown.NextProbeAt == nil {
 		t.Fatalf("cooldown not loaded after invalidation: %+v", cooldown)
 	}
 	withCooldown[0].Weight = 99
 	*cooldown.TempUnschedulableUntil = time.Time{}
+	*cooldown.NextProbeAt = time.Time{}
 	cooldown.TempUnschedulableReason = "caller mutation"
 	withCooldown[0].ModelCooldowns["model-a"] = cooldown
 	withCooldown[0].ModelCooldowns["caller-model"] = GatewayRouteModelCooldown{Model: "caller-model"}
@@ -187,7 +188,7 @@ func TestGatewayRouteReadCacheInvalidationAndDeepCopy(t *testing.T) {
 		t.Fatalf("list cached route: %+v err=%v", again, err)
 	}
 	storedCooldown := again[0].ModelCooldowns["model-a"]
-	if again[0].Weight != 1 || storedCooldown.TempUnschedulableReason != "capacity" || storedCooldown.TempUnschedulableUntil == nil || storedCooldown.TempUnschedulableUntil.IsZero() {
+	if again[0].Weight != 1 || storedCooldown.TempUnschedulableReason != "capacity" || storedCooldown.TempUnschedulableUntil == nil || storedCooldown.TempUnschedulableUntil.IsZero() || storedCooldown.NextProbeAt == nil || storedCooldown.NextProbeAt.IsZero() {
 		t.Fatalf("route cache shared caller-owned data: %+v", again[0])
 	}
 	if _, exists := again[0].ModelCooldowns["caller-model"]; exists {

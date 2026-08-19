@@ -2245,6 +2245,75 @@ func TestGatewayRouteModelCooldownIsolated(t *testing.T) {
 	}
 }
 
+func TestGatewayRouteModelCooldownDoesNotCrossSourceGroups(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	groupA, groupB := int64(301), int64(302)
+	if err := routes.SaveForGroup(120, []GatewayRoute{
+		{SourceChannelID: 41, SourceGroupID: &groupA, SourceGroupName: "group-a", Enabled: true, SourceAPIKeyCipher: "a"},
+		{SourceChannelID: 41, SourceGroupID: &groupB, SourceGroupName: "group-b", Enabled: true, SourceAPIKeyCipher: "b"},
+	}); err != nil {
+		t.Fatalf("create routes: %v", err)
+	}
+	list, err := routes.ListByGroupID(120)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list routes: %v len=%d", err, len(list))
+	}
+	if err := routes.SetModelTempUnschedulable(list[0].ID, "model-a", time.Now().Add(time.Minute), "failed", time.Now(), "request-a"); err != nil {
+		t.Fatalf("set cooldown: %v", err)
+	}
+	got, err := routes.ListByGroupID(120)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("reload routes: %v len=%d", err, len(got))
+	}
+	if got[0].ModelCooldowns["model-a"].TempUnschedulableUntil == nil {
+		t.Fatal("the failed source group did not retain its cooldown")
+	}
+	if len(got[1].ModelCooldowns) != 0 {
+		t.Fatalf("cooldown crossed into the other source group: %+v", got[1].ModelCooldowns)
+	}
+}
+
+func TestGatewayRouteSaveGroupChangeDropsOldCooldownAndKey(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	oldGroup, newGroup := int64(401), int64(402)
+	if err := routes.SaveForGroup(121, []GatewayRoute{{
+		SourceChannelID: 42, SourceGroupID: &oldGroup, SourceGroupName: "old", Enabled: true,
+	}}); err != nil {
+		t.Fatalf("create route: %v", err)
+	}
+	list, err := routes.ListByGroupID(121)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list route: %v len=%d", err, len(list))
+	}
+	routeID := list[0].ID
+	if err := routes.UpdateSourceKey(routeID, 7, "old-key", "old-cipher"); err != nil {
+		t.Fatalf("set old source key: %v", err)
+	}
+	if err := routes.SetModelTempUnschedulable(routeID, "model-a", time.Now().Add(time.Minute), "old failure", time.Now(), "old-request"); err != nil {
+		t.Fatalf("set old cooldown: %v", err)
+	}
+	if err := routes.SaveForGroup(121, []GatewayRoute{{
+		ID: routeID, SourceChannelID: 42, SourceGroupID: &newGroup, SourceGroupName: "new", Enabled: true,
+	}}); err != nil {
+		t.Fatalf("change source group: %v", err)
+	}
+	got, err := routes.FindByID(routeID)
+	if err != nil {
+		t.Fatalf("find changed route: %v", err)
+	}
+	if got.SourceGroupID == nil || *got.SourceGroupID != newGroup || got.SourceGroupName != "new" {
+		t.Fatalf("source group was not changed: %+v", got)
+	}
+	if got.SourceAPIKeyID != 0 || got.SourceAPIKeyName != "" || got.SourceAPIKeyCipher != "" {
+		t.Fatalf("old source key leaked into the new group: %+v", got)
+	}
+	if len(got.ModelCooldowns) != 0 {
+		t.Fatalf("old source cooldown leaked into the new group: %+v", got.ModelCooldowns)
+	}
+}
+
 func TestNoteSuccessForModelPauseErrorDoesNotClearNewerFailure(t *testing.T) {
 	db := openTestDB(t)
 	routes := NewGatewayRoutes(db)

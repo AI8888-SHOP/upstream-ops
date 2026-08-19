@@ -565,6 +565,11 @@ gateway:
   cacheHitRateThresholdPercent: 0
   cacheHitRateBlacklistMinutes: 0
   cacheHitRateMinimumRequests: 10
+  modelCooldownProbeEnabled: true
+  modelCooldownProbeIntervalMinutes: 5
+  modelCooldownProbeTimeoutSeconds: 10
+  modelCooldownProbeConcurrency: 2
+  modelCooldownProbeMaxBackoffMinutes: 60
   hedge:
     enabled: false
     delaySeconds: 10
@@ -1191,6 +1196,11 @@ curl -sN http://127.0.0.1:8418/v1/responses \
 | `cacheHitRateThresholdPercent` | 0（关闭） | 命中率低于该百分比时触发保护 |
 | `cacheHitRateBlacklistMinutes` | 0（关闭） | 触发后暂停该来源全部路由的分钟数 |
 | `cacheHitRateMinimumRequests` | 10（默认/最低） | 可在设置页调整；来源累计达到设置的成功请求数后才触发自动拉黑，最低 10 次，避免冷启动误判 |
+| `modelCooldownProbeEnabled` | true | 模型错误冷却到期前由后台主动探测；成功后自动恢复，探测不写入本地网关用量 |
+| `modelCooldownProbeIntervalMinutes` | 5 | 探测失败后的基础重试间隔；连续失败时指数退避 |
+| `modelCooldownProbeTimeoutSeconds` | 10 | 单次探测的独立超时（秒） |
+| `modelCooldownProbeConcurrency` | 2 | 同时执行的模型冷却探测上限（1-16） |
+| `modelCooldownProbeMaxBackoffMinutes` | 60 | 连续失败时的最大退避时间（分钟） |
 | `hedge.enabled` | false | 新建组是否默认启用并发兜底 |
 | `hedge.delaySeconds` | 10 | 启动后续并发 attempt 的延迟阶梯（0.1-300 秒） |
 | `hedge.maxParallel` | 2 | 最大并发 attempt，包含主请求（1-32） |

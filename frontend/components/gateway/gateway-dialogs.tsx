@@ -4,6 +4,7 @@ import {
   Copy,
   FlaskConical,
   Loader2,
+  Play,
   Search,
   Unlock,
   XCircle,
@@ -51,6 +52,8 @@ import {
   isRouteTempPaused,
   isCacheHealthBlacklisted,
   isModelCooldownActive,
+  modelProbeProtocolLabel,
+  modelProbeStatusLabel,
   perTokenToMTok,
   resolveModelSources,
   routeModelCooldownEntries,
@@ -274,11 +277,13 @@ export function RoutePauseErrorDialog({
   pauseErrorRoute,
   onClose,
   onClearPause,
+  onProbeModelCooldown,
   onClearCacheHealth,
 }: {
   pauseErrorRoute: Partial<GatewayRoute> | null
   onClose: () => void
   onClearPause: (id: number) => void
+  onProbeModelCooldown?: (routeID: number, model: string) => void
   onClearCacheHealth?: (sourceKind: GatewayRouteSourceKind, sourceID: number) => void
 }) {
   const modelCooldowns = pauseErrorRoute
@@ -363,41 +368,81 @@ export function RoutePauseErrorDialog({
               <div className="space-y-1 rounded-md border bg-muted/20 p-3">
                 <div className="text-[11px] text-muted-foreground">模型级冷却</div>
                 <div className="space-y-2">
-                  {modelCooldowns.map((cooldown) => (
-                    <div
-                      key={`${cooldown.route_id}-${cooldown.model}`}
-                      className="rounded border bg-background/60 p-2"
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge
-                          variant={
-                            isModelCooldownActive(cooldown)
-                              ? "destructive"
-                              : "secondary"
-                          }
-                          className="px-1.5 text-[10px]"
-                        >
-                          {isModelCooldownActive(cooldown) ? "冷却中" : "已恢复"}
-                        </Badge>
-                        <span className="font-medium break-all">{cooldown.model}</span>
-                        {cooldown.temp_unschedulable_until ? (
-                          <span className="font-mono text-[11px] text-muted-foreground">
-                            冷却至 {new Date(cooldown.temp_unschedulable_until).toLocaleString("zh-CN")}
-                          </span>
+                  {modelCooldowns.map((cooldown) => {
+                    const active = isModelCooldownActive(cooldown)
+                    const timedPause = isRouteTempPaused(cooldown.temp_unschedulable_until)
+                    return (
+                      <div
+                        key={`${cooldown.route_id}-${cooldown.model}`}
+                        className="rounded border bg-background/60 p-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge
+                            variant={active ? "destructive" : "secondary"}
+                            className="px-1.5 text-[10px]"
+                          >
+                            {cooldown.probe_status === "probing"
+                              ? "探测中"
+                              : timedPause
+                                ? "冷却中"
+                                : active
+                                  ? "等待探测"
+                                  : "已恢复"}
+                          </Badge>
+                          <span className="font-medium break-all">{cooldown.model}</span>
+                          {timedPause && cooldown.temp_unschedulable_until ? (
+                            <span className="font-mono text-[11px] text-muted-foreground">
+                              冷却至 {new Date(cooldown.temp_unschedulable_until).toLocaleString("zh-CN")}
+                            </span>
+                          ) : null}
+                          {active && onProbeModelCooldown && pauseErrorRoute.id ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 gap-1 px-1.5 text-[10px]"
+                              title="立即探测该模型"
+                              onClick={() => {
+                                onClose()
+                                onProbeModelCooldown(pauseErrorRoute.id as number, cooldown.model)
+                              }}
+                            >
+                              <Play className="size-3" /> 探测
+                            </Button>
+                          ) : null}
+                        </div>
+                        {cooldown.temp_unschedulable_reason ? (
+                          <div className="mt-1 break-all text-[11px] text-muted-foreground">
+                            {cooldown.temp_unschedulable_reason}
+                          </div>
+                        ) : null}
+                        {cooldown.temp_unschedulable_request_id ? (
+                          <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">
+                            request_id: {cooldown.temp_unschedulable_request_id}
+                          </div>
+                        ) : null}
+                        {cooldown.probe_status || cooldown.next_probe_at || cooldown.last_probe_at ? (
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                            <span>探测状态：{modelProbeStatusLabel(cooldown.probe_status)}</span>
+                            {cooldown.probe_inbound_protocol ? (
+                              <span>协议：{modelProbeProtocolLabel(cooldown.probe_inbound_protocol)}</span>
+                            ) : null}
+                            {cooldown.next_probe_at ? (
+                              <span>下次：{new Date(cooldown.next_probe_at).toLocaleString("zh-CN")}</span>
+                            ) : null}
+                            {cooldown.last_probe_at ? (
+                              <span>最近：{new Date(cooldown.last_probe_at).toLocaleString("zh-CN")}</span>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {cooldown.probe_last_error ? (
+                          <div className="mt-1 break-all text-[11px] text-red-600 dark:text-red-400">
+                            探测错误：{cooldown.probe_last_error}
+                          </div>
                         ) : null}
                       </div>
-                      {cooldown.temp_unschedulable_reason ? (
-                        <div className="mt-1 break-all text-[11px] text-muted-foreground">
-                          {cooldown.temp_unschedulable_reason}
-                        </div>
-                      ) : null}
-                      {cooldown.temp_unschedulable_request_id ? (
-                        <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">
-                          request_id: {cooldown.temp_unschedulable_request_id}
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             ) : null}

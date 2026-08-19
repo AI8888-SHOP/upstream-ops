@@ -704,9 +704,32 @@ type GatewayRouteModelCooldown struct {
 	TempUnschedulableAt        *time.Time `json:"temp_unschedulable_at,omitempty"`
 	TempUnschedulableRequestID string     `gorm:"size:64;not null;default:''" json:"temp_unschedulable_request_id,omitempty"`
 	RecoverSuccessStreak       int        `gorm:"not null;default:0" json:"recover_success_streak,omitempty"`
+	// Probe fields are deliberately kept on the same row as the cooldown so a
+	// background worker can claim and update one route/model atomically. They
+	// are diagnostic state only and never participate in usage accounting.
+	NextProbeAt          *time.Time `gorm:"index:idx_gateway_model_probe_due" json:"next_probe_at,omitempty"`
+	LastProbeAt          *time.Time `json:"last_probe_at,omitempty"`
+	ProbeLeaseUntil      *time.Time `json:"probe_lease_until,omitempty"`
+	ProbeStatus          string     `gorm:"size:24;not null;default:'';index:idx_gateway_model_probe_status" json:"probe_status,omitempty"`
+	ProbeFailureCount    int        `gorm:"not null;default:0" json:"probe_failure_count,omitempty"`
+	ProbeRequestID       string     `gorm:"size:96;not null;default:''" json:"probe_request_id,omitempty"`
+	ProbeInboundProtocol string     `gorm:"size:24;not null;default:'openai_chat'" json:"probe_inbound_protocol,omitempty"`
+	ProbeLastStatusCode  int        `gorm:"not null;default:0" json:"probe_last_status_code,omitempty"`
+	ProbeLastError       string     `gorm:"type:text" json:"probe_last_error,omitempty"`
 	CreatedAt                  time.Time  `json:"created_at"`
 	UpdatedAt                  time.Time  `json:"updated_at"`
 }
+
+// Gateway model cooldown probe states. Empty is treated as pending for rows
+// created by older releases, so migrations remain backwards compatible.
+const (
+	GatewayModelProbeStatusPending   = "pending"
+	GatewayModelProbeStatusProbing   = "probing"
+	GatewayModelProbeStatusHealthy   = "healthy"
+	GatewayModelProbeStatusTransient = "transient_failure"
+	GatewayModelProbeStatusPermanent = "permanent_failure"
+	GatewayModelProbeStatusManual    = "manual"
+)
 
 func (GatewayRouteModelCooldown) TableName() string { return "gateway_route_model_cooldowns" }
 

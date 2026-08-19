@@ -30,6 +30,7 @@ type Scheduler struct {
 	cipher        *crypto.Cipher
 	upstreamSync  upstreamSyncService
 	gatewayResort gatewayRateResortService
+	gatewayProbe  gatewayModelCooldownProbeService
 	proxy         config.ProxyConfig
 }
 
@@ -40,6 +41,13 @@ type upstreamSyncService interface {
 // gatewayRateResortService 倍率扫描后重排开启了「渠道分组价格倍率重排」的网关组。
 type gatewayRateResortService interface {
 	ResortRoutesOnRateScan(ctx context.Context)
+}
+
+// gatewayModelCooldownProbeService runs short model health checks that are
+// excluded from local gateway accounting for routes whose request-driven
+// cooldown is about to expire.
+type gatewayModelCooldownProbeService interface {
+	RunModelCooldownProbes(ctx context.Context)
 }
 
 // New 构造调度器。
@@ -78,6 +86,16 @@ func New(
 	}
 }
 
+// SetGatewayModelCooldownProbe attaches the optional gateway recovery worker.
+// Keeping this as a setter preserves the constructor signature used by older
+// integrations and tests.
+func (s *Scheduler) SetGatewayModelCooldownProbe(service gatewayModelCooldownProbeService) {
+	if s == nil {
+		return
+	}
+	s.gatewayProbe = service
+}
+
 // Start 注册 cron 任务并启动。
 func (s *Scheduler) Start() error {
 	if s.cfg.BalanceCron != "" {
@@ -95,14 +113,32 @@ func (s *Scheduler) Start() error {
 			return err
 		}
 	}
+	if s.gatewayProbe != nil {
+		// Polling is intentionally cheap and frequent enough to catch short
+		// group cooldowns before their next user request. Per-row NextProbeAt
+		// and the database lease prevent needless upstream calls.
+		if _, err := s.cron.AddFunc("@every 10s", s.runGatewayModelProbes); err != nil {
+			return err
+		}
+	}
 	s.cron.Start()
 	s.log.Info("scheduler started",
 		"balanceCron", s.cfg.BalanceCron,
 		"rateCron", s.cfg.RateCron,
 		"retentionCron", s.cfg.Retention.Cron,
 		"concurrency", s.cfg.Concurrency,
+		"gatewayModelProbe", s.gatewayProbe != nil,
 	)
 	return nil
+}
+
+func (s *Scheduler) runGatewayModelProbes() {
+	if s.gatewayProbe == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	s.gatewayProbe.RunModelCooldownProbes(ctx)
 }
 
 // Stop 停止调度器。

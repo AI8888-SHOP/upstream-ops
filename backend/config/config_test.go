@@ -22,6 +22,11 @@ func TestLoadAppliesUpstreamDefaults(t *testing.T) {
 	if cfg.Scheduler.Retention.GatewayUsageLogsDays != 90 {
 		t.Fatalf("gateway usage retention = %d", cfg.Scheduler.Retention.GatewayUsageLogsDays)
 	}
+	if !cfg.Gateway.ModelCooldownProbeEnabled ||
+		cfg.Gateway.ModelCooldownProbeIntervalMinutes != DefaultGatewayModelCooldownProbeIntervalMinutes ||
+		cfg.Gateway.ModelCooldownProbeTimeoutSeconds != DefaultGatewayModelCooldownProbeTimeoutSeconds {
+		t.Fatalf("model cooldown probe defaults = %#v", cfg.Gateway)
+	}
 }
 
 func TestLoadCacheHealthConfig(t *testing.T) {
@@ -96,6 +101,12 @@ func TestGatewayConfigWithDefaults(t *testing.T) {
 		cfg.CacheHitRateBlacklistMinutes != DefaultGatewayCacheHitRateBlacklistMinutes ||
 		cfg.CacheHitRateMinimumRequests != DefaultGatewayCacheHitRateMinimumRequests {
 		t.Fatalf("cache health defaults = %#v", cfg)
+	}
+	if cfg.ModelCooldownProbeIntervalMinutes != DefaultGatewayModelCooldownProbeIntervalMinutes ||
+		cfg.ModelCooldownProbeTimeoutSeconds != DefaultGatewayModelCooldownProbeTimeoutSeconds ||
+		cfg.ModelCooldownProbeConcurrency != DefaultGatewayModelCooldownProbeConcurrency ||
+		cfg.ModelCooldownProbeMaxBackoffMinutes != DefaultGatewayModelCooldownProbeMaxBackoffMinutes {
+		t.Fatalf("model cooldown probe defaults = %#v", cfg)
 	}
 	legacy := (GatewayConfig{CacheHitRateMinimumRequests: 1}).WithDefaults()
 	if legacy.CacheHitRateMinimumRequests != DefaultGatewayCacheHitRateMinimumRequests {

@@ -121,6 +121,26 @@ func TestOrderLoadBalancedCandidatesDeduplicatesPhysicalUpstreams(t *testing.T) 
 	}
 }
 
+func TestOrderLoadBalancedCandidatesSeparatesSourceGroupsOnSameChannel(t *testing.T) {
+	rt := (&Service{}).runtime()
+	group := &storage.GatewayGroup{ID: 3021, LoadBalanceRouteCount: 2}
+	firstGroup, secondGroup := int64(101), int64(102)
+	candidates := []ScoredRoute{
+		{Route: storage.GatewayRoute{ID: 1, SourceKind: storage.GatewayRouteSourceMonitor, SourceChannelID: 10, SourceGroupID: &firstGroup}},
+		{Route: storage.GatewayRoute{ID: 2, SourceKind: storage.GatewayRouteSourceMonitor, SourceChannelID: 10, SourceGroupID: &secondGroup}},
+		{Route: storage.GatewayRoute{ID: 3, SourceKind: storage.GatewayRouteSourceMonitor, SourceChannelID: 20}},
+	}
+
+	firstRoutes := make([]uint, 4)
+	for i := range firstRoutes {
+		ordered := rt.orderLoadBalancedCandidates(candidates, group, nil)
+		firstRoutes[i] = ordered[0].Route.ID
+	}
+	if want := []uint{1, 2, 1, 2}; fmt.Sprint(firstRoutes) != fmt.Sprint(want) {
+		t.Fatalf("first routes = %v, want %v; source groups on one channel must have independent scheduling identities", firstRoutes, want)
+	}
+}
+
 func TestOrderLoadBalancedCandidatesSeparatesMonitorAndProviderIDs(t *testing.T) {
 	rt := (&Service{}).runtime()
 	group := &storage.GatewayGroup{ID: 302, LoadBalanceRouteCount: 2}

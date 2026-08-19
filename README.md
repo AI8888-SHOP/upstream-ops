@@ -601,6 +601,11 @@ gateway:
   cacheHitRateThresholdPercent: 0
   cacheHitRateBlacklistMinutes: 0
   cacheHitRateMinimumRequests: 10
+  modelCooldownProbeEnabled: true
+  modelCooldownProbeIntervalMinutes: 5
+  modelCooldownProbeTimeoutSeconds: 10
+  modelCooldownProbeConcurrency: 2
+  modelCooldownProbeMaxBackoffMinutes: 60
   hedge:
     enabled: false
     delaySeconds: 10
@@ -1083,6 +1088,11 @@ Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no pr
 | `cacheHitRateThresholdPercent` | 0 (off) | Trigger protection below this hit-rate percentage |
 | `cacheHitRateBlacklistMinutes` | 0 (off) | Minutes to pause all routes for the source |
 | `cacheHitRateMinimumRequests` | 10 (default/minimum) | Configurable in Settings; successful requests required before auto-blacklisting. Minimum 10 prevents cold-start false positives |
+| `modelCooldownProbeEnabled` | true | Probe a model shortly before its error cooldown expires; a successful probe restores it without a local gateway usage row |
+| `modelCooldownProbeIntervalMinutes` | 5 | Base retry interval after a failed probe; consecutive failures use exponential backoff |
+| `modelCooldownProbeTimeoutSeconds` | 10 | Independent timeout for one probe (seconds) |
+| `modelCooldownProbeConcurrency` | 2 | Maximum concurrent model cooldown probes (1-16) |
+| `modelCooldownProbeMaxBackoffMinutes` | 60 | Maximum retry backoff after consecutive failures (minutes) |
 | `hedge.enabled` | false | Enable hedging by default for new groups |
 | `hedge.delaySeconds` | 10 | Delay ladder for launching additional attempts (0.1-300 seconds) |
 | `hedge.maxParallel` | 2 | Concurrent attempts including the primary (1-32) |

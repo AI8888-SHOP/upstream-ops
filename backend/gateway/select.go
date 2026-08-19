@@ -113,8 +113,28 @@ func IsRouteSchedulableForModel(route *storage.GatewayRoute, model string, now t
 		return false
 	}
 	if key != "" {
-		if cooldown, ok := route.ModelCooldowns[key]; ok && cooldown.TempUnschedulableUntil != nil && cooldown.TempUnschedulableUntil.After(now) {
-			return false
+		if cooldown, ok := route.ModelCooldowns[key]; ok {
+			if cooldown.TempUnschedulableUntil != nil && cooldown.TempUnschedulableUntil.After(now) {
+				return false
+			}
+			// Once a background probe is due or in flight, keep the route
+			// half-closed until that probe reports a result. This closes the
+			// low-traffic race where the first user request would otherwise be
+			// the recovery attempt. Manual release and healthy rows explicitly
+			// opt out of this guard.
+			if cooldown.ProbeStatus == storage.GatewayModelProbeStatusProbing {
+				// A crashed or stopped worker must not leave a route blocked
+				// forever. A live lease still keeps the route half-closed; once it
+				// expires, ClaimDue can reclaim it and normal traffic is allowed as
+				// a bounded fail-open fallback.
+				if cooldown.ProbeLeaseUntil != nil && cooldown.ProbeLeaseUntil.After(now) {
+					return false
+				}
+			} else if cooldown.ProbeStatus != storage.GatewayModelProbeStatusHealthy &&
+				cooldown.ProbeStatus != storage.GatewayModelProbeStatusManual &&
+				cooldown.NextProbeAt != nil && !cooldown.NextProbeAt.After(now) {
+				return false
+			}
 		}
 	}
 	if route.NormalizeSourceKind() == storage.GatewayRouteSourceProvider {
@@ -242,11 +262,12 @@ type emergencyRestrictionRecoveryCandidate struct {
 	cooldownUntil time.Time
 	requestID     string
 	modelCooling  bool
+	probePending  bool
 	cacheBlocked  bool
 	cacheHitRate  float64
 	position      int
 	routeID       uint
-	identity      upstreamConcurrencyKey
+	identity      routeSelectionKey
 	identityOK    bool
 }
 
@@ -290,10 +311,14 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 		eligible++
 
 		modelKey := storage.NormalizeGatewayModel(upstreamModel)
-		cooldown, modelCooling := route.ModelCooldowns[modelKey]
-		modelCooling = modelCooling && cooldown.TempUnschedulableUntil != nil && cooldown.TempUnschedulableUntil.After(now)
+		cooldown, hasCooldown := route.ModelCooldowns[modelKey]
+		modelCooling := hasCooldown && cooldown.TempUnschedulableUntil != nil && cooldown.TempUnschedulableUntil.After(now)
+		probePending := hasCooldown && cooldown.ProbeStatus != storage.GatewayModelProbeStatusHealthy &&
+			cooldown.ProbeStatus != storage.GatewayModelProbeStatusManual &&
+			((cooldown.ProbeStatus == storage.GatewayModelProbeStatusProbing) ||
+				(cooldown.NextProbeAt != nil && !cooldown.NextProbeAt.After(now)))
 		cacheBlocked := route.CacheHealthBlacklistedUntil != nil && route.CacheHealthBlacklistedUntil.After(now)
-		if !modelCooling && !cacheBlocked {
+		if !modelCooling && !probePending && !cacheBlocked {
 			// A healthy route means automatic restrictions did not empty the pool.
 			// Keep every cooldown/blacklist intact on the normal hot path.
 			return routes
@@ -312,16 +337,30 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 				restrictedAt = at
 			}
 			requestID = cooldown.TempUnschedulableRequestID
+		} else if probePending {
+			if cooldown.TempUnschedulableAt != nil && !cooldown.TempUnschedulableAt.IsZero() {
+				at := *cooldown.TempUnschedulableAt
+				cooldownAt = &at
+				// Keep the same "rested longest" ordering used for active
+				// model cooldowns once the original pause has expired and the
+				// row is waiting for (or running) its health probe.
+				restrictedAt = at
+			} else if cooldown.ProbeLeaseUntil != nil && !cooldown.ProbeLeaseUntil.IsZero() {
+				restrictedAt = *cooldown.ProbeLeaseUntil
+			} else if cooldown.LastProbeAt != nil && !cooldown.LastProbeAt.IsZero() {
+				restrictedAt = *cooldown.LastProbeAt
+			}
+			requestID = cooldown.TempUnschedulableRequestID
 		} else if route.CacheHealthEvaluatedAt != nil && !route.CacheHealthEvaluatedAt.IsZero() {
 			restrictedAt = *route.CacheHealthEvaluatedAt
 		} else if route.CacheHealthBlacklistedUntil != nil {
 			restrictedAt = *route.CacheHealthBlacklistedUntil
 		}
-		identity, identityOK := routeUpstreamConcurrencyKey(&route)
+		identity, identityOK := routeSelectionIdentity(&route)
 		candidates = append(candidates, emergencyRestrictionRecoveryCandidate{
 			index: index, model: modelKey, restrictedAt: restrictedAt,
 			cooldownAt: cooldownAt, cooldownUntil: cooldownUntil,
-			requestID: requestID, modelCooling: modelCooling, cacheBlocked: cacheBlocked,
+			requestID: requestID, modelCooling: modelCooling, probePending: probePending, cacheBlocked: cacheBlocked,
 			cacheHitRate: route.CacheHealthHitRate, position: route.Position, routeID: route.ID,
 			identity: identity, identityOK: identityOK,
 		})
@@ -336,10 +375,12 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 	sort.SliceStable(candidates, func(i, j int) bool {
 		// Cache-only restrictions prefer the best observed hit rate. Known model
 		// failures remain lower priority and prefer the route that has rested longest.
-		if candidates[i].modelCooling != candidates[j].modelCooling {
-			return !candidates[i].modelCooling
+		leftModelRestricted := candidates[i].modelCooling || candidates[i].probePending
+		rightModelRestricted := candidates[j].modelCooling || candidates[j].probePending
+		if leftModelRestricted != rightModelRestricted {
+			return !leftModelRestricted
 		}
-		if !candidates[i].modelCooling {
+		if !leftModelRestricted {
 			leftRate := candidates[i].cacheHitRate
 			rightRate := candidates[j].cacheHitRate
 			leftFinite := !math.IsNaN(leftRate) && !math.IsInf(leftRate, 0)
@@ -361,7 +402,7 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 	})
 
 	selected := make([]emergencyRestrictionRecoveryCandidate, 0, emergencyRestrictionRecoveryRouteCount)
-	seen := make(map[upstreamConcurrencyKey]struct{}, emergencyRestrictionRecoveryRouteCount)
+	seen := make(map[routeSelectionKey]struct{}, emergencyRestrictionRecoveryRouteCount)
 	for _, candidate := range candidates {
 		if len(selected) >= emergencyRestrictionRecoveryRouteCount {
 			break
@@ -411,6 +452,24 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 					continue
 				}
 				cooldown.TempUnschedulableUntil = nil
+				cooldown.NextProbeAt = nil
+				cooldown.ProbeLeaseUntil = nil
+				cooldown.ProbeStatus = storage.GatewayModelProbeStatusManual
+				cooldowns[key] = cooldown
+			}
+			recovered[candidate.index].ModelCooldowns = cooldowns
+		}
+		if candidate.probePending && !candidate.modelCooling {
+			cooldowns := cloneModelCooldowns(recovered[candidate.index].ModelCooldowns)
+			for key, cooldown := range cooldowns {
+				if key != candidate.model &&
+					(cooldown.RouteID != candidate.routeID || storage.NormalizeGatewayModel(cooldown.Model) != candidate.model) {
+					continue
+				}
+				cooldown.TempUnschedulableUntil = nil
+				cooldown.NextProbeAt = nil
+				cooldown.ProbeLeaseUntil = nil
+				cooldown.ProbeStatus = storage.GatewayModelProbeStatusManual
 				cooldowns[key] = cooldown
 			}
 			recovered[candidate.index].ModelCooldowns = cooldowns
@@ -424,6 +483,7 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 				"route_id", candidate.routeID,
 				"model", candidate.model,
 				"model_cooling", candidate.modelCooling,
+				"probe_pending", candidate.probePending,
 				"cache_blacklisted", candidate.cacheBlocked,
 			)
 		}

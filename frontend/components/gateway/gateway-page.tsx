@@ -1242,6 +1242,24 @@ export function GatewayPage() {
     }
   }
 
+  async function probeModelCooldown(routeID: number, model: string) {
+    if (!routeID || !model.trim() || !selectedGroup) return
+    try {
+      const response = await apiFetch<{ result: GatewayModelTestResult }>(
+        `/gateway/routes/${routeID}/probe-model`,
+        { method: "POST", body: JSON.stringify({ model }) },
+      )
+      if (response.result?.ok) {
+        toast.success(`模型 ${model} 探测成功，冷却已解除`)
+      } else {
+        toast.error(response.result?.error || `模型 ${model} 探测失败`)
+      }
+      await loadRoutes(selectedGroup.id)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "主动探测失败")
+    }
+  }
+
   async function clearCacheHealth(
     sourceKind: GatewayRouteSourceKind,
     sourceID: number,
@@ -1704,6 +1722,9 @@ export function GatewayPage() {
                         onSaveRoutes={() => void saveRoutes()}
                         onEnsureKeys={() => void ensureKeys()}
                         onClearRoutePause={(id) => void clearRoutePause(id)}
+                        onProbeModelCooldown={(routeID, model) =>
+                          void probeModelCooldown(routeID, model)
+                        }
                         onClearCacheHealth={(kind, id) =>
                           void clearCacheHealth(kind, id)
                         }
@@ -1821,6 +1842,9 @@ export function GatewayPage() {
         pauseErrorRoute={pauseErrorRoute}
         onClose={() => setPauseErrorRoute(null)}
         onClearPause={(id) => void clearRoutePause(id)}
+        onProbeModelCooldown={(routeID, model) =>
+          void probeModelCooldown(routeID, model)
+        }
         onClearCacheHealth={(kind, id) => void clearCacheHealth(kind, id)}
       />
 

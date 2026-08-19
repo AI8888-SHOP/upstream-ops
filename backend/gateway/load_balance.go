@@ -25,6 +25,17 @@ type loadBalancePoolState struct {
 	lastUsed atomic.Int64
 }
 
+// routeSelectionKey identifies one independently schedulable source. A
+// monitored channel may expose multiple source groups, each with its own API
+// key and gateway route. Those groups must occupy separate load-balancing and
+// emergency-recovery slots even though the concurrency limiter remains shared
+// by the physical channel.
+type routeSelectionKey struct {
+	Kind     string
+	ID       uint
+	GroupRef string
+}
+
 func normalizeLoadBalanceRouteCount(count int) int {
 	if count < 1 {
 		return 1
@@ -35,40 +46,52 @@ func normalizeLoadBalanceRouteCount(count int) int {
 	return count
 }
 
-// routeUpstreamConcurrencyKey deliberately uses the same physical-upstream
-// identity as the concurrency limiter. Multiple routes for one monitored
-// channel therefore consume only one load-balancing pool slot.
-func routeUpstreamConcurrencyKey(route *storage.GatewayRoute) (upstreamConcurrencyKey, bool) {
+// routeSelectionIdentity returns the source-group-aware identity used by route
+// ordering and bounded emergency recovery. It is intentionally separate from
+// upstreamConcurrencyKey: all groups on one physical channel still share the
+// channel's configured concurrency limit, while failures/recovery are scoped
+// to one channel group.
+func routeSelectionIdentity(route *storage.GatewayRoute) (routeSelectionKey, bool) {
 	if route == nil {
-		return upstreamConcurrencyKey{}, false
+		return routeSelectionKey{}, false
 	}
 	if route.NormalizeSourceKind() == storage.GatewayRouteSourceProvider {
 		if route.GatewayProviderID == 0 {
-			return upstreamConcurrencyKey{}, false
+			return routeSelectionKey{}, false
 		}
-		return upstreamConcurrencyKey{Kind: upstreamConcurrencyKindProvider, ID: route.GatewayProviderID}, true
+		return routeSelectionKey{Kind: upstreamConcurrencyKindProvider, ID: route.GatewayProviderID}, true
 	}
 	if route.SourceChannelID == 0 {
-		return upstreamConcurrencyKey{}, false
+		return routeSelectionKey{}, false
 	}
-	return upstreamConcurrencyKey{Kind: upstreamConcurrencyKindMonitor, ID: route.SourceChannelID}, true
+
+	groupRef := "default"
+	if route.SourceGroupID != nil && *route.SourceGroupID > 0 {
+		groupRef = "id:" + strconv.FormatInt(*route.SourceGroupID, 10)
+	} else if id, ok := parseSourceGroupIDRef(route.SourceGroupName); ok {
+		groupRef = "id:" + strconv.FormatInt(id, 10)
+	} else if name := strings.TrimSpace(route.SourceGroupName); name != "" {
+		groupRef = "name:" + strings.ToLower(name)
+	}
+	return routeSelectionKey{Kind: upstreamConcurrencyKindMonitor, ID: route.SourceChannelID, GroupRef: groupRef}, true
 }
 
-func loadBalanceIdentity(route *storage.GatewayRoute) upstreamConcurrencyKey {
-	if key, ok := routeUpstreamConcurrencyKey(route); ok {
+func loadBalanceIdentity(route *storage.GatewayRoute) routeSelectionKey {
+	if key, ok := routeSelectionIdentity(route); ok {
 		return key
 	}
 	if route == nil {
-		return upstreamConcurrencyKey{}
+		return routeSelectionKey{}
 	}
 	// Invalid legacy routes still need deterministic, independent identities so
 	// one malformed row cannot collapse every fallback into a single pool slot.
-	return upstreamConcurrencyKey{Kind: "route", ID: route.ID}
+	return routeSelectionKey{Kind: "route", ID: route.ID}
 }
 
 // orderLoadBalancedCandidates chooses one request primary from the highest
-// ranked N physical upstreams. The remaining candidates retain their original
-// order, so retry, response validation, hedge, and failover budgets are unchanged.
+// ranked N independently schedulable source groups. The remaining candidates
+// retain their original order, so retry, response validation, hedge, and
+// failover budgets are unchanged.
 func (rt *Runtime) orderLoadBalancedCandidates(
 	candidates []ScoredRoute,
 	group *storage.GatewayGroup,
@@ -90,8 +113,8 @@ func (rt *Runtime) orderLoadBalancedCandidates(
 	}
 
 	poolIndexes := make([]int, 0, minInt(poolLimit, len(candidates)))
-	poolKeys := make([]upstreamConcurrencyKey, 0, cap(poolIndexes))
-	seen := make(map[upstreamConcurrencyKey]struct{}, cap(poolIndexes))
+	poolKeys := make([]routeSelectionKey, 0, cap(poolIndexes))
+	seen := make(map[routeSelectionKey]struct{}, cap(poolIndexes))
 	for index := range candidates {
 		key := loadBalanceIdentity(&candidates[index].Route)
 		if _, exists := seen[key]; exists {
@@ -121,7 +144,7 @@ func (rt *Runtime) orderLoadBalancedCandidates(
 	return ordered
 }
 
-func (s *Service) nextLoadBalancePoolIndex(groupID uint, pool []upstreamConcurrencyKey) int {
+func (s *Service) nextLoadBalancePoolIndex(groupID uint, pool []routeSelectionKey) int {
 	if s == nil || len(pool) < 2 {
 		return 0
 	}
@@ -130,6 +153,8 @@ func (s *Service) nextLoadBalancePoolIndex(groupID uint, pool []upstreamConcurre
 		signature.WriteString(key.Kind)
 		signature.WriteByte(':')
 		signature.WriteString(strconv.FormatUint(uint64(key.ID), 10))
+		signature.WriteByte(':')
+		signature.WriteString(key.GroupRef)
 		signature.WriteByte(';')
 	}
 	poolKey := loadBalancePoolKey{GroupID: groupID, Signature: signature.String()}

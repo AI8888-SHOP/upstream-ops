@@ -63,6 +63,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 
 		// route ops
 		gp.POST("/routes/:id/clear-pause", func(c *gin.Context) { clearGatewayRoutePause(c, d) })
+		gp.POST("/routes/:id/probe-model", func(c *gin.Context) { probeGatewayRouteModel(c, d) })
 
 		// providers（直连渠道）— options 须在 :id 之前注册
 		gp.GET("/providers/options", func(c *gin.Context) { listGatewayProviderOptions(c, d) })
@@ -1012,6 +1013,28 @@ func clearGatewayRoutePause(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func probeGatewayRouteModel(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	// An empty body is valid when the route has exactly one model cooldown.
+	if bindErr := c.ShouldBindJSON(&body); bindErr != nil && !errors.Is(bindErr, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": bindErr.Error()})
+		return
+	}
+	result, err := d.Gateway.ProbeModelCooldownNow(c.Request.Context(), id, body.Model)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"result": result})
 }
 
 func parseGatewayUsageQuery(c *gin.Context) storage.GatewayUsageQuery {

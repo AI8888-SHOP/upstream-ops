@@ -1100,8 +1100,9 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			if strings.TrimSpace(errInfo.Detail) != "" {
 				pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 			}
-			cooldownErr := rt.Routes.SetModelTempUnschedulable(
+			cooldownErr := rt.Routes.SetModelTempUnschedulableWithProbeProtocol(
 				attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID,
+				rt.gatewayRuntime().ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(req.path, req.kind), string(req.kind),
 			)
 			if cooldownErr == nil && storage.NormalizeGatewayModel(attempt.UpstreamModel) != "" {
 				req.affinity.preservePreferredOnCooldown(attempt.Route.ID)

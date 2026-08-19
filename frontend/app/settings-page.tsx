@@ -72,6 +72,11 @@ const defaultGatewayConfig: SystemGatewayConfig = {
   cacheHitRateThresholdPercent: 0,
   cacheHitRateBlacklistMinutes: 0,
   cacheHitRateMinimumRequests: 10,
+  modelCooldownProbeEnabled: true,
+  modelCooldownProbeIntervalMinutes: 5,
+  modelCooldownProbeTimeoutSeconds: 10,
+  modelCooldownProbeConcurrency: 2,
+  modelCooldownProbeMaxBackoffMinutes: 60,
   hedge: {
     enabled: false,
     delaySeconds: 10,
@@ -1284,6 +1289,92 @@ export default function SettingsPage() {
                   }
                 />
               </Field>
+            </div>
+            <div className="mt-5 space-y-4 border-t border-border pt-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <Label className="text-sm font-medium">模型冷却主动探测</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    冷却到期前由后台用最小请求探测上游；成功后自动恢复，不写入本地网关使用记录，上游是否计费由上游规则决定。
+                  </p>
+                </div>
+                <Switch
+                  checked={form.gateway.modelCooldownProbeEnabled}
+                  onCheckedChange={(checked) =>
+                    setForm((prev) =>
+                      prev
+                        ? { ...prev, gateway: { ...prev.gateway, modelCooldownProbeEnabled: checked } }
+                        : prev,
+                    )
+                  }
+                />
+              </div>
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <Field
+                  label="探测间隔（分钟）"
+                  description="探测失败后的基础重试间隔；初次探测在冷却到期前执行。"
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={1440}
+                    value={String(form.gateway.modelCooldownProbeIntervalMinutes)}
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        patchGateway(prev, "modelCooldownProbeIntervalMinutes", num(e.target.value)),
+                      )
+                    }
+                  />
+                </Field>
+                <Field
+                  label="单次超时（秒）"
+                  description="后台探测请求的独立超时，不改变正常转发超时。"
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={String(form.gateway.modelCooldownProbeTimeoutSeconds)}
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        patchGateway(prev, "modelCooldownProbeTimeoutSeconds", num(e.target.value)),
+                      )
+                    }
+                  />
+                </Field>
+                <Field
+                  label="最大并发探测"
+                  description="跨路由同时探测的上限，范围 1-16。"
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={16}
+                    value={String(form.gateway.modelCooldownProbeConcurrency)}
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        patchGateway(prev, "modelCooldownProbeConcurrency", num(e.target.value)),
+                      )
+                    }
+                  />
+                </Field>
+                <Field
+                  label="最大退避（分钟）"
+                  description="连续失败后的最长等待；鉴权/模型错误会标记为需人工关注。"
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={10080}
+                    value={String(form.gateway.modelCooldownProbeMaxBackoffMinutes)}
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        patchGateway(prev, "modelCooldownProbeMaxBackoffMinutes", num(e.target.value)),
+                      )
+                    }
+                  />
+                </Field>
+              </div>
             </div>
             <div className="space-y-4 border-t border-border pt-5">
               <div className="flex items-start justify-between gap-4">

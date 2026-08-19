@@ -317,6 +317,9 @@ func cloneGatewayRoute(item GatewayRoute) GatewayRoute {
 	for model, cooldown := range item.ModelCooldowns {
 		cooldown.TempUnschedulableUntil = clonePointer(cooldown.TempUnschedulableUntil)
 		cooldown.TempUnschedulableAt = clonePointer(cooldown.TempUnschedulableAt)
+		cooldown.NextProbeAt = clonePointer(cooldown.NextProbeAt)
+		cooldown.LastProbeAt = clonePointer(cooldown.LastProbeAt)
+		cooldown.ProbeLeaseUntil = clonePointer(cooldown.ProbeLeaseUntil)
 		cooldowns[model] = cooldown
 	}
 	item.ModelCooldowns = cooldowns

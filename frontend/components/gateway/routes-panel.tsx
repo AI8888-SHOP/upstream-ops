@@ -207,6 +207,7 @@ type RoutesPanelProps = {
   onSaveRoutes: () => void
   onEnsureKeys: () => void
   onClearRoutePause: (routeID?: number) => void
+  onProbeModelCooldown: (routeID: number, model: string) => void
   onClearCacheHealth: (sourceKind: GatewayRouteSourceKind, sourceID: number) => void
   onShowPauseError: (route: Partial<GatewayRoute>) => void
 }
@@ -228,6 +229,7 @@ export function RoutesPanel({
   onSaveRoutes,
   onEnsureKeys,
   onClearRoutePause,
+  onProbeModelCooldown,
   onClearCacheHealth,
   onShowPauseError,
 }: RoutesPanelProps) {
@@ -772,18 +774,35 @@ export function RoutesPanel({
                       ) : null}
                       {modelCooldowns.map((cooldown) => {
                         const active = isModelCooldownActive(cooldown)
+                        const timedPause = isRouteTempPaused(cooldown.temp_unschedulable_until)
                         return (
-                          <Badge
+                          <span
                             key={`${cooldown.route_id}-${cooldown.model}`}
-                            variant={active ? "destructive" : "secondary"}
-                            className="max-w-full px-1.5 text-[10px]"
-                            title={cooldown.temp_unschedulable_reason || undefined}
+                            className="inline-flex max-w-full items-center gap-1"
                           >
-                            模型 {cooldown.model} {active ? "冷却至" : "已恢复"}
-                            {active && cooldown.temp_unschedulable_until
-                              ? ` ${new Date(cooldown.temp_unschedulable_until).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
-                              : ""}
-                          </Badge>
+                            <Badge
+                              variant={active ? "destructive" : "secondary"}
+                              className="max-w-full px-1.5 text-[10px]"
+                              title={cooldown.probe_last_error || cooldown.temp_unschedulable_reason || undefined}
+                            >
+                              模型 {cooldown.model} {cooldown.probe_status === "probing" ? "探测中" : timedPause ? "冷却至" : active ? "等待探测" : "已恢复"}
+                              {timedPause && cooldown.temp_unschedulable_until
+                                ? ` ${new Date(cooldown.temp_unschedulable_until).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`
+                                : ""}
+                            </Badge>
+                            {active && r.id ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 px-1.5 text-[10px]"
+                                title="立即探测该模型"
+                                onClick={() => onProbeModelCooldown(r.id as number, cooldown.model)}
+                              >
+                                <Play className="size-3" />
+                              </Button>
+                            ) : null}
+                          </span>
                         )
                       })}
                       {!isRouteTempPaused(r.temp_unschedulable_until) &&
