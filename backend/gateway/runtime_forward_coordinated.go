@@ -20,22 +20,22 @@ var errSkippedRejectedRoute = errors.New("route skipped after response validatio
 var errSkippedNonRetryableRoute = errors.New("route retry skipped after deterministic upstream failure")
 
 type coordinatedForwardRequest struct {
-	c               *gin.Context
-	path            string
-	kind            protocolKind
-	key             *storage.GatewayKey
-	group           *storage.GatewayGroup
-	body            []byte
-	requestedModel  string
-	stream          bool
-	serviceTier     string
-	reasoningEffort string
-	thinkingEnabled bool
-	routes          []storage.GatewayRoute
-	validator       *responseValidator
-	requestID       string
-	firstToken      time.Duration
-	hedgeActive     bool
+	c                     *gin.Context
+	path                  string
+	kind                  protocolKind
+	key                   *storage.GatewayKey
+	group                 *storage.GatewayGroup
+	body                  []byte
+	requestedModel        string
+	stream                bool
+	serviceTier           string
+	reasoningEffort       string
+	thinkingEnabled       bool
+	routes                []storage.GatewayRoute
+	validator             *responseValidator
+	requestID             string
+	firstToken            time.Duration
+	hedgeActive           bool
 	hedgeEligibilityKnown bool
 	virtualCacheEligible  bool
 	// hedgeTriggered is true only when the coordinator actually started an
@@ -48,10 +48,10 @@ type coordinatedForwardRequest struct {
 }
 
 type coordinatedRoutePlan struct {
-	Candidate          ScoredRoute
-	TryOnRoute         int
-	MaxTries           int
-	ResponseMaxTries   int
+	Candidate        ScoredRoute
+	TryOnRoute       int
+	MaxTries         int
+	ResponseMaxTries int
 }
 
 func (p coordinatedRoutePlan) responseMaxTries() int {
@@ -401,18 +401,20 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		return accepted, err
 	}
 	hooks := hedgeHooks[*coordinatedForwardAttempt]{
-			OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
-				if result.Value != nil {
-					req.virtualCacheReason = rt.virtualCacheReasonForWinner(&req, result.Value, &states)
-					gate, _, _, _ := result.Value.streamControlSnapshot()
-					if gate != nil {
-						if req.virtualCacheReason != "" {
-							percent := 100
-							if req.virtualCacheReason == storage.GatewayVirtualCacheReasonProviderGlobal && result.Value.Target != nil {
-								percent, _ = ProviderVirtualCachePercentForModel(result.Value.Target.Provider, result.Value.UpstreamModel)
-							}
+		OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
+			if result.Value != nil {
+				req.virtualCacheReason = rt.virtualCacheReasonForWinner(&req, result.Value, &states)
+				gate, _, _, _ := result.Value.streamControlSnapshot()
+				if gate != nil {
+					if req.virtualCacheReason != "" {
+						percent := effectiveGatewayVirtualCachePercent(req.group, 0)
+						if req.virtualCacheReason == storage.GatewayVirtualCacheReasonProviderGlobal && result.Value.Target != nil {
+							percent = providerVirtualCachePercentForGroup(result.Value.Target.Provider, result.Value.UpstreamModel, req.group)
+						}
+						if percent > 0 {
 							gate.EnableVirtualCachePercent(req.kind, percent)
 						}
+					}
 					result.Value.setGateCommitError(gate.Win())
 				}
 			}
@@ -1308,9 +1310,9 @@ func (rt *Runtime) finishCoordinatedNonStream(req *coordinatedForwardRequest, wi
 	}
 	settlement := rt.buildVirtualCacheSettlement(req, winner)
 	if settlement.VirtualCacheReadEnabled {
-		percent := 100
+		percent := effectiveGatewayVirtualCachePercent(req.group, 0)
 		if settlement.VirtualCacheReason == storage.GatewayVirtualCacheReasonProviderGlobal && winner.Target != nil {
-			percent, _ = ProviderVirtualCachePercentForModel(winner.Target.Provider, winner.UpstreamModel)
+			percent = providerVirtualCachePercentForGroup(winner.Target.Provider, winner.UpstreamModel, req.group)
 		}
 		if rewritten, changed := rewriteVirtualCacheResponsePercent(winner.ClientBody, req.kind, percent); changed {
 			winner.ClientBody = rewritten

@@ -483,7 +483,7 @@ const (
 
 	GatewayVirtualCacheReasonHedge                = "hedge"
 	GatewayVirtualCacheReasonResponseRuleFailover = "response_rule_failover"
-	GatewayVirtualCacheReasonProviderGlobal      = "provider_global"
+	GatewayVirtualCacheReasonProviderGlobal       = "provider_global"
 
 	GatewayAttemptStatusAccepted = "accepted"
 	GatewayAttemptStatusRejected = "rejected"
@@ -505,19 +505,19 @@ type GatewayProvider struct {
 	AllowedModelsJSON string `gorm:"type:text;not null;default:'[]'" json:"allowed_models_json"`
 	// ConcurrencyLimit is shared by every gateway route that references this provider.
 	// Zero preserves the legacy unlimited behavior.
-	ConcurrencyLimit   int     `gorm:"not null;default:0" json:"concurrency_limit"`
+	ConcurrencyLimit int `gorm:"not null;default:0" json:"concurrency_limit"`
 	// Provider-level virtual cache is an opt-in downstream accounting hint for
 	// text models. The percentage is applied to fresh input tokens only.
-	VirtualCacheEnabled    bool   `gorm:"not null;default:false" json:"virtual_cache_enabled"`
-	VirtualCacheModelsJSON  string `gorm:"type:text;not null;default:'[]'" json:"virtual_cache_models_json"`
-	VirtualCachePercent     int    `gorm:"not null;default:0" json:"virtual_cache_percent"`
-	DefaultBillingRate float64 `gorm:"not null;default:1" json:"default_billing_rate"`
-	AuthStyle          string  `gorm:"size:16;not null;default:'both'" json:"auth_style"`
-	Enabled            bool    `gorm:"not null;default:true;index" json:"enabled"`
+	VirtualCacheEnabled    bool    `gorm:"not null;default:false" json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON string  `gorm:"type:text;not null;default:'[]'" json:"virtual_cache_models_json"`
+	VirtualCachePercent    int     `gorm:"not null;default:0" json:"virtual_cache_percent"`
+	DefaultBillingRate     float64 `gorm:"not null;default:1" json:"default_billing_rate"`
+	AuthStyle              string  `gorm:"size:16;not null;default:'both'" json:"auth_style"`
+	Enabled                bool    `gorm:"not null;default:true;index" json:"enabled"`
 	// ProxyEnabled 与监控渠道一致：全局代理开启且本开关打开时，转发走系统代理配置。
-	ProxyEnabled     bool      `gorm:"not null;default:false" json:"proxy_enabled"`
-	ExtraHeadersJSON string    `gorm:"type:text" json:"extra_headers,omitempty"`
-	Notes            string    `gorm:"size:512;not null;default:''" json:"notes,omitempty"`
+	ProxyEnabled     bool   `gorm:"not null;default:false" json:"proxy_enabled"`
+	ExtraHeadersJSON string `gorm:"type:text" json:"extra_headers,omitempty"`
+	Notes            string `gorm:"size:512;not null;default:''" json:"notes,omitempty"`
 	// Cache health fields are populated by the admin usage view and are not
 	// persisted on the provider itself.
 	CacheHitRate                float64    `gorm:"-" json:"cache_hit_rate,omitempty"`
@@ -529,8 +529,8 @@ type GatewayProvider struct {
 	CacheHealthBlacklistedUntil *time.Time `gorm:"-" json:"cache_health_blacklisted_until,omitempty"`
 	CacheHealthBlacklistReason  string     `gorm:"-" json:"cache_health_blacklist_reason,omitempty"`
 	CacheHealthManualClearUntil *time.Time `gorm:"-" json:"cache_health_manual_clear_until,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	CreatedAt                   time.Time  `json:"created_at"`
+	UpdatedAt                   time.Time  `json:"updated_at"`
 }
 
 func (GatewayProvider) TableName() string { return "gateway_providers" }
@@ -581,13 +581,17 @@ type GatewayGroup struct {
 	// when this request actually used concurrent hedge attempts. Raw upstream
 	// usage and attempt costs remain unchanged for audit/accounting.
 	HedgeVirtualCacheEnabled bool `gorm:"not null;default:false" json:"hedge_virtual_cache_enabled"`
+	// VirtualCachePercent limits the fresh-input portion that may be reclassified
+	// as a virtual cache read for this gateway group. Existing groups retain the
+	// historical 100% behavior.
+	VirtualCachePercent int `gorm:"not null;default:100" json:"virtual_cache_percent"`
 	// 响应校验按组启用；流式响应只在提交客户端前检查 prefix。
-	ResponseValidationEnabled             bool   `gorm:"not null;default:false" json:"response_validation_enabled"`
-	ResponseValidationVirtualCacheEnabled bool   `gorm:"not null;default:false" json:"response_validation_virtual_cache_enabled"`
+	ResponseValidationEnabled             bool `gorm:"not null;default:false" json:"response_validation_enabled"`
+	ResponseValidationVirtualCacheEnabled bool `gorm:"not null;default:false" json:"response_validation_virtual_cache_enabled"`
 	// ResponseValidationRetryCount controls same-route retries after a
 	// pre-commit response-rule rejection. -1 inherits RetryCount; 0 disables
 	// response-rule retries while leaving transport retries unchanged.
-	ResponseValidationRetryCount       int    `gorm:"not null;default:-1" json:"response_validation_retry_count"`
+	ResponseValidationRetryCount      int    `gorm:"not null;default:-1" json:"response_validation_retry_count"`
 	ResponseValidationStreamMode      string `gorm:"size:16;not null;default:'prefix'" json:"response_validation_stream_mode"`
 	ResponseValidationPrefixBytes     int    `gorm:"not null;default:8192" json:"response_validation_prefix_bytes"`
 	ResponseValidationPrefixTimeoutMS int    `gorm:"not null;default:2000" json:"response_validation_prefix_timeout_ms"`
@@ -716,8 +720,8 @@ type GatewayRouteModelCooldown struct {
 	ProbeInboundProtocol string     `gorm:"size:24;not null;default:'openai_chat'" json:"probe_inbound_protocol,omitempty"`
 	ProbeLastStatusCode  int        `gorm:"not null;default:0" json:"probe_last_status_code,omitempty"`
 	ProbeLastError       string     `gorm:"type:text" json:"probe_last_error,omitempty"`
-	CreatedAt                  time.Time  `json:"created_at"`
-	UpdatedAt                  time.Time  `json:"updated_at"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
 }
 
 // Gateway model cooldown probe states. Empty is treated as pending for rows
@@ -734,13 +738,15 @@ const (
 func (GatewayRouteModelCooldown) TableName() string { return "gateway_route_model_cooldowns" }
 
 // GatewayChannelCacheHealth stores rolling cache statistics and the optional
-// automatic blacklist for one upstream source. SourceKind/SourceID identify a
-// monitored channel or a direct provider without changing its manual Enabled
-// flag. The row is also used to hydrate route scheduling snapshots.
+// automatic blacklist for one concrete route. SourceKind/SourceID identify a
+// monitored channel or direct provider, while RouteID separates independently
+// schedulable source groups that use the same physical channel.
 type GatewayChannelCacheHealth struct {
 	ID                  uint       `gorm:"primaryKey" json:"id"`
-	SourceKind          string     `gorm:"size:16;not null;uniqueIndex:idx_gateway_cache_health_source" json:"source_kind"`
-	SourceID            uint       `gorm:"not null;uniqueIndex:idx_gateway_cache_health_source" json:"source_id"`
+	GatewayGroupID      uint       `gorm:"not null;default:0;uniqueIndex:idx_gateway_cache_health_route_source" json:"gateway_group_id"`
+	RouteID             uint       `gorm:"not null;default:0;index;uniqueIndex:idx_gateway_cache_health_route_source" json:"route_id"`
+	SourceKind          string     `gorm:"size:16;not null;uniqueIndex:idx_gateway_cache_health_route_source" json:"source_kind"`
+	SourceID            uint       `gorm:"not null;uniqueIndex:idx_gateway_cache_health_route_source" json:"source_id"`
 	HitRate             float64    `gorm:"not null;default:0" json:"hit_rate"`
 	RequestCount        int64      `gorm:"not null;default:0" json:"request_count"`
 	InputTokens         int64      `gorm:"not null;default:0" json:"input_tokens"`
@@ -753,9 +759,9 @@ type GatewayChannelCacheHealth struct {
 	// ManualClearUntil is a persisted grace period after an administrator
 	// releases the source. It prevents stale rolling data from re-blacklisting
 	// the source on the next asynchronous evaluation.
-	ManualClearUntil    *time.Time `json:"manual_clear_until,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	ManualClearUntil *time.Time `json:"manual_clear_until,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 func (GatewayChannelCacheHealth) TableName() string { return "gateway_channel_cache_health" }

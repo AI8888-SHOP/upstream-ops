@@ -330,7 +330,7 @@ Commit only `.env.example` to a public repository. Never commit `.env`, `data/`,
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.32
+IMAGE_TAG=v0.0.33
 ```
 
 ## MySQL Deployment
@@ -368,13 +368,13 @@ helper with the live deployment paths:
 
 ```bash
 chmod +x scripts/upgrade.sh
-TARGET_TAG=v0.0.32 ./scripts/upgrade.sh
+TARGET_TAG=v0.0.33 ./scripts/upgrade.sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-.\scripts\upgrade.ps1 -TargetTag v0.0.32
+.\scripts\upgrade.ps1 -TargetTag v0.0.33
 ```
 
 The helper defaults to `ghcr.io/ai8888-shop/upstream-ops` as the image
@@ -410,12 +410,12 @@ For an old Docker/SQLite deployment that also needs the database migration, run
 the PostgreSQL helper from the kit with explicit live deployment paths:
 
 ```bash
-chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.32/scripts/upgrade-to-postgres.sh
+chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.33/scripts/upgrade-to-postgres.sh
 ENV_FILE=/srv/upstream-ops/.env DATA_DIR=/srv/upstream-ops/data \
 COMPOSE_FILE=/srv/upstream-ops/docker-compose.yml \
-POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.32/docker-compose.postgres.yml \
-TARGET_TAG=v0.0.32 MIGRATION_IMAGE_TAG=v0.0.32 \
-/tmp/upstream-ops-upgrade-kit-v0.0.32/scripts/upgrade-to-postgres.sh
+POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.33/docker-compose.postgres.yml \
+TARGET_TAG=v0.0.33 MIGRATION_IMAGE_TAG=v0.0.33 \
+/tmp/upstream-ops-upgrade-kit-v0.0.33/scripts/upgrade-to-postgres.sh
 ```
 
 On Windows PowerShell:
@@ -423,9 +423,9 @@ On Windows PowerShell:
 ```powershell
 .\scripts\upgrade-to-postgres.ps1 `
   -ComposeFile 'D:\upstream-ops\docker-compose.yml' `
-  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.32\docker-compose.postgres.yml' `
+  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.33\docker-compose.postgres.yml' `
   -EnvFile 'D:\upstream-ops\.env' -DataDir 'D:\upstream-ops\data' `
-  -TargetTag 'v0.0.32' -MigrationImageTag 'v0.0.32'
+  -TargetTag 'v0.0.33' -MigrationImageTag 'v0.0.33'
 ```
 
 The helper validates both Compose files and the external network before stopping
@@ -939,7 +939,7 @@ Route field `upstream_protocol`:
 - Default failover: no response, 429, 5xx; with group “failover on 4xx”, all 4xx may failover too.
 - Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
 - Automatic cooldown is isolated by route and final upstream model, so a failure for one model does not pause the channel for other models. Model aliases that resolve to the same upstream model share the cooldown; the management "clear pause" action clears all model cooldowns for that route.
-- The route page shows model cooldowns and cache-health blacklist deadlines/reasons, with actions to release route cooldowns or a source-level cache restriction early. A manual cache release suppresses re-blacklisting for one complete statistics window.
+- The route page shows model cooldowns and cache-health blacklist deadlines/reasons for each concrete source group, with actions to release route cooldowns or one route's cache restriction early. A manual cache release suppresses re-blacklisting for one complete statistics window.
 - Group: `retry_count`, `response_validation_retry_count`, `failover_max`, `cooldown_seconds`. `response_validation_retry_count` controls extra attempts on the same route after a pre-commit regex rejection; `-1` inherits `retry_count`, while `0` disables only regex-triggered retries.
 - **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
 - **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.
@@ -1086,7 +1086,7 @@ Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no pr
 | `usageErrorHeadersJSONBytes` | 65536 | Max error headers JSON size |
 | `cacheHitRateWindowMinutes` | 0 (off) | Rolling real-upstream cache hit-rate window (minutes) |
 | `cacheHitRateThresholdPercent` | 0 (off) | Trigger protection below this hit-rate percentage |
-| `cacheHitRateBlacklistMinutes` | 0 (off) | Minutes to pause all routes for the source |
+| `cacheHitRateBlacklistMinutes` | 0 (off) | Minutes to pause the affected source group route |
 | `cacheHitRateMinimumRequests` | 10 (default/minimum) | Configurable in Settings; successful requests required before auto-blacklisting. Minimum 10 prevents cold-start false positives |
 | `modelCooldownProbeEnabled` | true | Probe a model shortly before its error cooldown expires; a successful probe restores it without a local gateway usage row |
 | `modelCooldownProbeIntervalMinutes` | 5 | Base retry interval after a failed probe; consecutive failures use exponential backoff |

@@ -264,6 +264,26 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 	if db == nil {
 		return fmt.Errorf("database is nil")
 	}
+	// Cache health was first source-wide, then gateway-group-wide. Both old
+	// unique indexes would prevent two source groups on the same channel from
+	// owning independent route state, so remove them before creating the route
+	// key. Existing rows keep route_id=0 as a compatibility fallback.
+	for _, legacy := range []string{"idx_gateway_cache_health_source", "idx_gateway_cache_health_group_source"} {
+		if db.Migrator().HasIndex(&GatewayChannelCacheHealth{}, legacy) {
+			if err := db.Migrator().DropIndex(&GatewayChannelCacheHealth{}, legacy); err != nil {
+				return fmt.Errorf("drop legacy cache health index %s: %w", legacy, err)
+			}
+		}
+	}
+	if !db.Migrator().HasIndex(&GatewayChannelCacheHealth{}, "idx_gateway_cache_health_route_source") {
+		create := "CREATE UNIQUE INDEX idx_gateway_cache_health_route_source ON gateway_channel_cache_health(gateway_group_id, route_id, source_kind, source_id)"
+		if !strings.EqualFold(db.Dialector.Name(), "mysql") {
+			create = "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_cache_health_route_source ON gateway_channel_cache_health(gateway_group_id, route_id, source_kind, source_id)"
+		}
+		if err := db.Exec(create).Error; err != nil {
+			return fmt.Errorf("ensure cache health route index: %w", err)
+		}
+	}
 	definitions := []struct {
 		name    string
 		columns string

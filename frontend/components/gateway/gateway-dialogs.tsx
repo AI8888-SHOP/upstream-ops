@@ -284,7 +284,7 @@ export function RoutePauseErrorDialog({
   onClose: () => void
   onClearPause: (id: number) => void
   onProbeModelCooldown?: (routeID: number, model: string) => void
-  onClearCacheHealth?: (sourceKind: GatewayRouteSourceKind, sourceID: number) => void
+  onClearCacheHealth?: (sourceKind: GatewayRouteSourceKind, sourceID: number, gatewayGroupID?: number, routeID?: number) => void
 }) {
   const modelCooldowns = pauseErrorRoute
     ? routeModelCooldownEntries(pauseErrorRoute)
@@ -468,7 +468,12 @@ export function RoutePauseErrorDialog({
                       className="h-6 gap-1 px-1.5 text-xs"
                       onClick={() => {
                         onClose()
-                        onClearCacheHealth(cacheHealthSourceKind, cacheHealthSourceID)
+                        onClearCacheHealth(
+                          cacheHealthSourceKind,
+                          cacheHealthSourceID,
+                          Number(pauseErrorRoute.gateway_group_id) || 0,
+                          Number(pauseErrorRoute.id) || 0,
+                        )
                       }}
                     >
                       <Unlock className="size-3" /> 解除缓存限制
@@ -925,6 +930,23 @@ export function GroupFormDialog({
               路由 User-Agent 选「网关组」时使用。留空表示未配置组级
               UA：转发时透传客户端；模型测试与拉取模型列表无客户端时可回落系统默认
               User-Agent（设置页上游 UA）。
+            </p>
+          </div>
+
+          <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
+            <Label>虚拟缓存比例（%）</Label>
+            <Input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={groupForm.virtual_cache_percent}
+              onChange={(e) =>
+                setGroupForm({ ...groupForm, virtual_cache_percent: e.target.value })
+              }
+            />
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              限制网关组对新鲜输入进行虚拟缓存读取重分类的最高比例。0 表示关闭，100 保持原有行为；直连渠道自身比例仍会作为更严格上限。
             </p>
           </div>
 

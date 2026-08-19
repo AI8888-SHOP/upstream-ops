@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from "react"
 import { Check, ChevronsUpDown, Loader2, RefreshCw, Search } from "lucide-react"
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from "recharts"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
@@ -32,7 +41,10 @@ import type {
   GatewayKey,
   GatewayUsageModelOption,
   GatewayUsagePage,
+  GatewayUsageSourceGroupOption,
+  GatewayUsageSourceOption,
   GatewayUsageStats,
+  GatewayUsageTimelinePoint,
 } from "@/lib/api-types"
 import { GatewayUsageTable } from "./usage-table"
 
@@ -258,8 +270,11 @@ type UsageQueryOpts = {
   success: string
   from: string
   to: string
+  source: string
+  sourceGroup: string
   page: number
   pageSize: number
+  aggregates?: boolean
 }
 
 type UsagePanelProps = {
@@ -275,6 +290,13 @@ type UsagePanelProps = {
   usageModelFilter: string
   setUsageModelFilter: (v: string) => void
   usageModelOptions: GatewayUsageModelOption[]
+  usageSourceOptions: GatewayUsageSourceOption[]
+  usageSourceGroupOptions: GatewayUsageSourceGroupOption[]
+  usageSourceFilter: string
+  setUsageSourceFilter: (v: string) => void
+  usageSourceGroupFilter: string
+  setUsageSourceGroupFilter: (v: string) => void
+  usageTimeline: GatewayUsageTimelinePoint[]
   usageRequestIDFilter: string
   setUsageRequestIDFilter: (v: string) => void
   usageSuccessFilter: string
@@ -292,6 +314,62 @@ type UsagePanelProps = {
   goUsagePage: (p: number) => void
 }
 
+function UsageTimelineChart({ points }: { points: GatewayUsageTimelinePoint[] }) {
+  const data = useMemo(
+    () =>
+      points.map((point) => ({
+        ...point,
+        label: new Date(point.bucket).toLocaleString([], {
+          month: "numeric",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      })),
+    [points],
+  )
+  return (
+    <Card className="border-border shadow-none">
+      <CardContent className="space-y-2 p-4 sm:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-medium">使用趋势</div>
+          <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-sky-500" />请求</span>
+            <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-500" />Token</span>
+            <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-amber-500" />费用</span>
+          </div>
+        </div>
+        <div className="h-[250px] w-full">
+          {data.length === 0 ? (
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">当前筛选范围暂无趋势数据</div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-border/60" />
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} minTickGap={28} />
+                <YAxis yAxisId="requests" tick={{ fontSize: 10 }} width={42} allowDecimals={false} />
+                <YAxis yAxisId="tokens" orientation="right" tick={{ fontSize: 10 }} width={48} tickFormatter={(v) => formatTokens(Number(v))} />
+                <YAxis yAxisId="cost" hide />
+                <RechartsTooltip
+                  formatter={(value: number, name: string) => {
+                    if (name === "cost") return [`$${Number(value).toFixed(6)}`, "费用"]
+                    if (name === "tokens") return [formatTokens(Number(value)), "Token"]
+                    return [Number(value).toLocaleString(), "请求"]
+                  }}
+                  labelFormatter={(label) => String(label)}
+                />
+                <Line yAxisId="requests" type="monotone" dataKey="requests" name="requests" stroke="#0ea5e9" strokeWidth={2} dot={data.length <= 24 ? { r: 2.5 } : false} activeDot={{ r: 4 }} />
+                <Line yAxisId="tokens" type="monotone" dataKey="tokens" name="tokens" stroke="#10b981" strokeWidth={2} dot={data.length <= 24 ? { r: 2.5 } : false} activeDot={{ r: 4 }} />
+                <Line yAxisId="cost" type="monotone" dataKey="cost" name="cost" stroke="#f59e0b" strokeWidth={2} dot={data.length <= 24 ? { r: 2.5 } : false} activeDot={{ r: 4 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function UsagePanel({
   usage,
   usageStats,
@@ -305,6 +383,13 @@ export function UsagePanel({
   usageModelFilter,
   setUsageModelFilter,
   usageModelOptions,
+  usageSourceOptions,
+  usageSourceGroupOptions,
+  usageSourceFilter,
+  setUsageSourceFilter,
+  usageSourceGroupFilter,
+  setUsageSourceGroupFilter,
+  usageTimeline,
   usageRequestIDFilter,
   setUsageRequestIDFilter,
   usageSuccessFilter,
@@ -425,11 +510,15 @@ export function UsagePanel({
               // 组变更：密钥联动重置为全部，并立即按新组查询
               setUsageGroupFilter(v)
               setUsageKeyFilter("all")
+              setUsageSourceFilter("all")
+              setUsageSourceGroupFilter("all")
               setUsagePage(1)
               void loadUsage({
                 ...usageQueryOpts(1, usagePageSize),
                 groupID: v,
                 keyID: "all",
+                source: "all",
+                sourceGroup: "all",
               })
             }}
           >
@@ -463,6 +552,56 @@ export function UsagePanel({
               })
             }}
           />
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs font-medium text-muted-foreground">上游渠道</Label>
+          <Select
+            value={usageSourceFilter || "all"}
+            onValueChange={(v) => {
+              setUsageSourceFilter(v)
+              setUsageSourceGroupFilter("all")
+              setUsagePage(1)
+              void loadUsage({ ...usageQueryOpts(1, usagePageSize), source: v, sourceGroup: "all" })
+            }}
+          >
+            <SelectTrigger className="h-9 w-full bg-background"><SelectValue placeholder="全部上游渠道" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部上游渠道</SelectItem>
+              {usageSourceOptions.map((source) => (
+                <SelectItem key={`${source.source_kind}:${source.source_id}`} value={`${source.source_kind}:${source.source_id}`}>
+                  {source.name} · {source.count}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs font-medium text-muted-foreground">渠道分组</Label>
+          <Select
+            value={usageSourceGroupFilter || "all"}
+            onValueChange={(v) => {
+              setUsageSourceGroupFilter(v)
+              setUsagePage(1)
+              void loadUsage({ ...usageQueryOpts(1, usagePageSize), sourceGroup: v })
+            }}
+          >
+            <SelectTrigger className="h-9 w-full bg-background"><SelectValue placeholder="全部渠道分组" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部渠道分组</SelectItem>
+              {usageSourceGroupOptions
+                .filter((item) => usageSourceFilter === "all" || `${item.source_kind}:${item.source_id}` === usageSourceFilter)
+                .map((item) => {
+                  const groupKey = item.group_id != null
+                    ? `${item.source_kind}:${item.source_id}:id:${item.group_id}`
+                    : `${item.source_kind}:${item.source_id}:name:${encodeURIComponent(item.group_name)}`
+                  return (
+                    <SelectItem key={groupKey} value={groupKey}>
+                      {item.channel_name ? `${item.channel_name} · ` : ""}{item.group_name} · {item.count}
+                    </SelectItem>
+                  )
+                })}
+            </SelectContent>
+          </Select>
         </div>
         <div className="space-y-1.5">
           <Label className="text-xs font-medium text-muted-foreground">
@@ -629,6 +768,8 @@ export function UsagePanel({
                   groupID: usageGroupFilter,
                   keyID: usageKeyFilter,
                   model: usageModelFilter,
+                  source: usageSourceFilter,
+                  sourceGroup: usageSourceGroupFilter,
                   requestID: usageRequestIDFilter,
                   success: usageSuccessFilter,
                   from: fromStr,
@@ -653,6 +794,8 @@ export function UsagePanel({
               setUsageGroupFilter("all")
               setUsageKeyFilter("all")
               setUsageModelFilter("all")
+              setUsageSourceFilter("all")
+              setUsageSourceGroupFilter("all")
               setUsageRequestIDFilter("")
               setUsageSuccessFilter("all")
               setUsageFrom("")
@@ -662,6 +805,8 @@ export function UsagePanel({
                 groupID: "all",
                 keyID: "all",
                 model: "all",
+                source: "all",
+                sourceGroup: "all",
                 requestID: "",
                 success: "all",
                 from: "",
@@ -704,6 +849,8 @@ export function UsagePanel({
         </div>
       </div>
     </div>
+
+    <UsageTimelineChart points={usageTimeline} />
 
     {usageLoading && !usage ? (
       <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
@@ -766,7 +913,7 @@ export function UsagePanel({
                   const size = Number(v) || 50
                   setUsagePageSize(size)
                   setUsagePage(1)
-                  void loadUsage(usageQueryOpts(1, size))
+                  void loadUsage({ ...usageQueryOpts(1, size), aggregates: false })
                 }}
               >
                 <SelectTrigger className="h-8 w-[4.5rem]">

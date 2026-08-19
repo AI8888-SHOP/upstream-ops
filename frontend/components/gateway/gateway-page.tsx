@@ -32,6 +32,11 @@ import type {
   GatewayRoute,
   GatewayRouteSourceKind,
   GatewayUsageModelOption,
+  GatewayUsageSourceGroupOption,
+  GatewayUsageSourceOption,
+  GatewayUsageSourceOptions,
+  GatewayUsageTimelinePoint,
+  GatewayGroupUsageOverview,
   GatewayUsagePage,
   GatewayUsageStats,
   ModelDefaultPrice,
@@ -139,6 +144,13 @@ export function GatewayPage() {
   const [usageModelOptions, setUsageModelOptions] = useState<
     GatewayUsageModelOption[]
   >([])
+  const [usageSourceOptions, setUsageSourceOptions] = useState<GatewayUsageSourceOption[]>([])
+  const [usageSourceGroupOptions, setUsageSourceGroupOptions] = useState<GatewayUsageSourceGroupOption[]>([])
+  const [usageSourceFilter, setUsageSourceFilter] = useState("all")
+  const [usageSourceGroupFilter, setUsageSourceGroupFilter] = useState("all")
+  const [usageTimeline, setUsageTimeline] = useState<GatewayUsageTimelinePoint[]>([])
+  const [groupOverview, setGroupOverview] = useState<GatewayGroupUsageOverview | null>(null)
+  const [groupOverviewNonce, setGroupOverviewNonce] = useState(0)
   const [usageRequestIDFilter, setUsageRequestIDFilter] = useState("")
   /** all | success | client | fail | multi | multi_success | multi_fail */
   const [usageSuccessFilter, setUsageSuccessFilter] = useState<string>("all")
@@ -204,6 +216,22 @@ export function GatewayPage() {
     const res = await apiFetch<{ items: GatewayGroup[] }>("/gateway/groups")
     return res.items ?? []
   }, [])
+
+  useEffect(() => {
+    if (!selectedGroupID) {
+      setGroupOverview(null)
+      return
+    }
+    let cancelled = false
+    void apiFetch<GatewayGroupUsageOverview>(`/gateway/groups/${selectedGroupID}/overview`)
+      .then((value) => {
+        if (!cancelled) setGroupOverview(value)
+      })
+      .catch(() => {
+        if (!cancelled) setGroupOverview(null)
+      })
+    return () => { cancelled = true }
+  }, [selectedGroupID, groupOverviewNonce])
 
   const loadGroups = useCallback(async () => {
     setLoading(true)
@@ -367,6 +395,8 @@ export function GatewayPage() {
     async (opts?: {
       groupID?: string | number | null
       keyID?: string
+      source?: string
+      sourceGroup?: string
       from?: string
       to?: string
     }) => {
@@ -378,6 +408,26 @@ export function GatewayPage() {
         }
         if (opts?.keyID && opts.keyID !== "all") {
           qs.set("gateway_key_id", opts.keyID)
+        }
+        const source = (opts?.source ?? "all").trim()
+        if (source && source !== "all") {
+          const [kind, rawID] = source.split(":", 2)
+          const sourceID = Number(rawID)
+          if (kind === "monitor" && sourceID > 0) qs.set("channel_id", String(sourceID))
+          if (kind === "provider" && sourceID > 0) qs.set("provider_id", String(sourceID))
+        }
+        const sourceGroup = (opts?.sourceGroup ?? "all").trim()
+        if ((source === "" || source === "all") && sourceGroup && sourceGroup !== "all") {
+          const [groupKind, groupSourceID] = sourceGroup.split(":", 2)
+          const sourceID = Number(groupSourceID)
+          if (groupKind === "monitor" && sourceID > 0) qs.set("channel_id", String(sourceID))
+          if (groupKind === "provider" && sourceID > 0) qs.set("provider_id", String(sourceID))
+        }
+        const groupIDMarker = sourceGroup.indexOf(":id:")
+        const groupNameMarker = sourceGroup.indexOf(":name:")
+        if (groupIDMarker >= 0) qs.set("source_group_id", sourceGroup.slice(groupIDMarker + 4))
+        if (groupNameMarker >= 0) {
+          try { qs.set("source_group_name", decodeURIComponent(sourceGroup.slice(groupNameMarker + 6))) } catch { /* ignore */ }
         }
         if (opts?.from?.trim()) {
           const iso = usageTimeToRFC3339(opts.from)
@@ -415,6 +465,9 @@ export function GatewayPage() {
       success?: string
       from?: string
       to?: string
+      source?: string
+      sourceGroup?: string
+      aggregates?: boolean
       page?: number
       pageSize?: number
     }) => {
@@ -438,6 +491,30 @@ export function GatewayPage() {
           qs.set("group_id", String(gid))
         }
         if (opts?.keyID && opts.keyID !== "all") qs.set("gateway_key_id", opts.keyID)
+        const source = (opts?.source ?? "all").trim()
+        if (source && source !== "all") {
+          const [kind, rawID] = source.split(":", 2)
+          const sourceID = Number(rawID)
+          if (sourceID > 0 && kind === "monitor") qs.set("channel_id", String(sourceID))
+          if (sourceID > 0 && kind === "provider") qs.set("provider_id", String(sourceID))
+        }
+        const sourceGroup = (opts?.sourceGroup ?? "all").trim()
+        if ((source === "" || source === "all") && sourceGroup && sourceGroup !== "all") {
+          const [groupKind, groupSourceID] = sourceGroup.split(":", 2)
+          const sourceID = Number(groupSourceID)
+          if (groupKind === "monitor" && sourceID > 0) qs.set("channel_id", String(sourceID))
+          if (groupKind === "provider" && sourceID > 0) qs.set("provider_id", String(sourceID))
+        }
+        if (sourceGroup && sourceGroup !== "all") {
+          const marker = sourceGroup.indexOf(":id:")
+          const nameMarker = sourceGroup.indexOf(":name:")
+          if (marker >= 0) {
+            const groupID = Number(sourceGroup.slice(marker + 4))
+            if (groupID > 0) qs.set("source_group_id", String(groupID))
+          } else if (nameMarker >= 0) {
+            try { qs.set("source_group_name", decodeURIComponent(sourceGroup.slice(nameMarker + 6))) } catch { /* ignore malformed option */ }
+          }
+        }
         const model = (opts?.model ?? "").trim()
         if (model && model !== "all") qs.set("model", model)
         if (opts?.requestID?.trim()) qs.set("request_id", opts.requestID.trim())
@@ -458,13 +535,26 @@ export function GatewayPage() {
         }
         const statsQS = new URLSearchParams(qs)
         statsQS.set("include_endpoints", "0")
-        const [page, stats] = await Promise.all([
+        const aggregateRequest = opts?.aggregates === false
+          ? Promise.resolve(null)
+          : Promise.all([
+              apiFetch<GatewayUsageStats>(`/gateway/usage/stats?${statsQS}`),
+              apiFetch<{ items: GatewayUsageTimelinePoint[] }>(`/gateway/usage/timeline?${statsQS}`),
+              apiFetch<GatewayUsageSourceOptions>(`/gateway/usage/source-groups?${qs}`),
+            ])
+        const [page, aggregate] = await Promise.all([
           apiFetch<GatewayUsagePage>(`/gateway/usage?${qs}`),
-          apiFetch<GatewayUsageStats>(`/gateway/usage/stats?${statsQS}`),
+          aggregateRequest,
         ])
         if (seq !== usageSeqRef.current) return
         setUsage(page)
-        setUsageStats(stats)
+        if (aggregate) {
+          const [stats, timeline, sourceOptions] = aggregate
+          setUsageStats(stats)
+          setUsageTimeline(timeline.items ?? [])
+          setUsageSourceOptions(sourceOptions.sources ?? [])
+          setUsageSourceGroupOptions(sourceOptions.source_groups ?? [])
+        }
         setUsagePage(page.page || pageNum)
         if (page.page_size > 0) setUsagePageSize(page.page_size)
       } catch (e) {
@@ -510,12 +600,16 @@ export function GatewayPage() {
     void loadUsageModels({
       groupID: usageGroupFilter,
       keyID: usageKeyFilter,
+      source: usageSourceFilter,
+      sourceGroup: usageSourceGroupFilter,
       from: usageFrom,
       to: usageTo,
     })
   }, [
     usageGroupFilter,
     usageKeyFilter,
+    usageSourceFilter,
+    usageSourceGroupFilter,
     usageFrom,
     usageTo,
     loadUsageModels,
@@ -526,6 +620,8 @@ export function GatewayPage() {
       groupID: usageGroupFilter,
       keyID: usageKeyFilter,
       model: usageModelFilter,
+      source: usageSourceFilter,
+      sourceGroup: usageSourceGroupFilter,
       requestID: usageRequestIDFilter,
       success: usageSuccessFilter,
       from: usageFrom,
@@ -537,6 +633,8 @@ export function GatewayPage() {
       usageGroupFilter,
       usageKeyFilter,
       usageModelFilter,
+      usageSourceFilter,
+      usageSourceGroupFilter,
       usageRequestIDFilter,
       usageSuccessFilter,
       usageFrom,
@@ -607,6 +705,8 @@ export function GatewayPage() {
       void loadUsageModels({
         groupID: opts.groupID,
         keyID: opts.keyID,
+        source: opts.source,
+        sourceGroup: opts.sourceGroup,
         from: opts.from,
         to: opts.to,
       })
@@ -639,6 +739,7 @@ export function GatewayPage() {
         if (g) {
           // 同组 id 时切换组 useEffect 不会触发，必须主动重拉密钥/路由
           await reloadGroupDetail(g)
+          setGroupOverviewNonce((value) => value + 1)
         }
       } else {
         loadSeqRef.current += 1
@@ -655,6 +756,8 @@ export function GatewayPage() {
       void loadUsageModels({
         groupID: opts.groupID,
         keyID: opts.keyID,
+        source: opts.source,
+        sourceGroup: opts.sourceGroup,
         from: opts.from,
         to: opts.to,
       })
@@ -684,7 +787,7 @@ export function GatewayPage() {
     const pages = Math.max(1, usage?.pages ?? 1)
     const next = Math.max(1, Math.min(pages, p))
     setUsagePage(next)
-    void loadUsage(usageQueryOpts(next, usagePageSize))
+    void loadUsage({ ...usageQueryOpts(next, usagePageSize), aggregates: false })
   }
 
   // 使用记录：网关组变更时刷新密钥选项（选组=排除非本组；全部=全部密钥可选）
@@ -770,6 +873,7 @@ export function GatewayPage() {
       hedge_max_parallel: String(g.hedge_max_parallel ?? 2),
       hedge_max_attempts: String(g.hedge_max_attempts ?? 4),
       hedge_virtual_cache_enabled: !!g.hedge_virtual_cache_enabled,
+      virtual_cache_percent: String(g.virtual_cache_percent ?? 100),
       response_validation_enabled: !!g.response_validation_enabled,
       response_validation_virtual_cache_enabled:
         !!g.response_validation_virtual_cache_enabled,
@@ -833,6 +937,10 @@ export function GatewayPage() {
       1,
       Math.min(64, Math.floor(Number(groupForm.load_balance_route_count) || 1)),
     )
+    const virtualCachePercent = Math.max(
+      0,
+      Math.min(100, Math.floor(Number(groupForm.virtual_cache_percent) || 0)),
+    )
     const policy = {
       rate_resort_enabled: groupForm.rate_resort_enabled,
       max_billing_rate_multiplier: maxBillingRateMultiplier,
@@ -850,6 +958,7 @@ export function GatewayPage() {
       hedge_max_parallel: hedgeMaxParallel,
       hedge_max_attempts: hedgeMaxAttempts,
       hedge_virtual_cache_enabled: groupForm.hedge_virtual_cache_enabled,
+      virtual_cache_percent: virtualCachePercent,
       response_validation_enabled: groupForm.response_validation_enabled,
       response_validation_virtual_cache_enabled:
         groupForm.response_validation_virtual_cache_enabled,
@@ -885,6 +994,7 @@ export function GatewayPage() {
       }
       setGroupDialogOpen(false)
       await loadGroups()
+      setGroupOverviewNonce((value) => value + 1)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "保存失败")
     } finally {
@@ -989,6 +1099,7 @@ export function GatewayPage() {
       setRouteDrafts((res.items ?? []).map((r) => ({ ...r })))
       toast.success("组配置已保存，路由已按倍率重排")
       await loadGroups()
+      setGroupOverviewNonce((value) => value + 1)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "保存失败")
     } finally {
@@ -1189,6 +1300,7 @@ export function GatewayPage() {
         { method: "PUT", body: JSON.stringify({ routes }) },
       )
       setRouteDrafts((res.items ?? []).map((r) => ({ ...r })))
+      setGroupOverviewNonce((value) => value + 1)
       toast.success("路由已保存")
       const missing = (res.items ?? []).some(
         (r) => routeSourceKind(r) === "monitor" && !r.source_api_key_name,
@@ -1237,6 +1349,7 @@ export function GatewayPage() {
       await apiFetch(`/gateway/routes/${routeID}/clear-pause`, { method: "POST" })
       toast.success("已解除冷却")
       await loadRoutes(selectedGroup.id)
+      setGroupOverviewNonce((value) => value + 1)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "解除冷却失败")
     }
@@ -1255,6 +1368,7 @@ export function GatewayPage() {
         toast.error(response.result?.error || `模型 ${model} 探测失败`)
       }
       await loadRoutes(selectedGroup.id)
+      setGroupOverviewNonce((value) => value + 1)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "主动探测失败")
     }
@@ -1263,22 +1377,37 @@ export function GatewayPage() {
   async function clearCacheHealth(
     sourceKind: GatewayRouteSourceKind,
     sourceID: number,
+    gatewayGroupID = 0,
+    routeID = 0,
   ) {
     if (!sourceID) return
     const sourceLabel = sourceKind === "provider" ? "直连渠道" : "监控渠道"
     const ok = await confirm({
       title: "解除缓存限制",
-      description: `确定立即解除该${sourceLabel}的缓存健康拉黑？命中率统计会保留，来源下的全部路由都会恢复调度，并在统计窗口内暂不重复拉黑。`,
+      description:
+        routeID > 0
+          ? `确定立即解除该${sourceLabel}当前渠道分组的缓存健康拉黑？同一渠道下的其它分组不受影响，命中率统计会保留。`
+          : gatewayGroupID > 0
+          ? `确定立即解除该${sourceLabel}在当前网关分组中的缓存健康拉黑？其它网关分组不受影响，命中率统计会保留。`
+          : `确定立即解除该${sourceLabel}的缓存健康拉黑？命中率统计会保留，来源下的全部路由都会恢复调度，并在统计窗口内暂不重复拉黑。`,
       confirmLabel: "解除限制",
     })
     if (!ok) return
     try {
       await apiFetch("/gateway/cache-health/clear", {
         method: "POST",
-        body: JSON.stringify({ source_kind: sourceKind, source_id: sourceID }),
+        body: JSON.stringify({
+          source_kind: sourceKind,
+          source_id: sourceID,
+          ...(gatewayGroupID > 0 ? { gateway_group_id: gatewayGroupID } : {}),
+          ...(routeID > 0 ? { route_id: routeID } : {}),
+        }),
       })
       toast.success("已解除缓存限制")
-      if (selectedGroup) await loadRoutes(selectedGroup.id)
+      if (selectedGroup) {
+        await loadRoutes(selectedGroup.id)
+        setGroupOverviewNonce((value) => value + 1)
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "解除缓存限制失败")
     }
@@ -1665,6 +1794,51 @@ export function GatewayPage() {
                     </Button>
                   </div>
 
+                  {groupOverview ? (
+                    <Card className="border-border shadow-none">
+                      <CardContent className="space-y-3 p-3 sm:p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-sm font-medium">当前有效分组</div>
+                          <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                            <span>有效分组 {groupOverview.active_source_groups?.length ?? 0}</span>
+                            <span>近 24 小时请求 {groupOverview.totals?.total_requests ?? 0}</span>
+                            <span>近 24 小时 Token {(groupOverview.totals?.total_tokens ?? 0).toLocaleString()}</span>
+                          </div>
+                        </div>
+                        {(groupOverview.active_source_groups?.length ?? 0) === 0 ? (
+                          <div className="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">暂无有效激活的上游分组</div>
+                        ) : (
+                          <div className="overflow-x-auto rounded-md border border-border/70">
+                            <table className="w-full min-w-[620px] text-xs">
+                              <thead className="bg-muted/30 text-left text-muted-foreground">
+                                <tr>
+                                  <th className="px-3 py-2 font-medium">渠道</th>
+                                  <th className="px-3 py-2 font-medium">源分组</th>
+                                  <th className="px-3 py-2 font-medium">请求</th>
+                                  <th className="px-3 py-2 font-medium">Token</th>
+                                  <th className="px-3 py-2 font-medium">渠道分组倍率</th>
+                                  <th className="px-3 py-2 font-medium">最近使用</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {groupOverview.active_source_groups.map((item) => (
+                                  <tr key={`${item.source_kind}:${item.source_id}:${item.source_group_id ?? item.source_group_name}`} className="border-t border-border/60">
+                                    <td className="px-3 py-2 font-medium">{item.channel_name || `${item.source_kind} #${item.source_id}`}</td>
+                                    <td className="px-3 py-2">{item.source_group_name || "直连渠道"}</td>
+                                    <td className="px-3 py-2 tabular-nums">{item.request_count.toLocaleString()}</td>
+                                    <td className="px-3 py-2 tabular-nums">{item.tokens.toLocaleString()}</td>
+                                    <td className="px-3 py-2 tabular-nums">{(item.account_rate_multiplier || 1).toFixed(4)}x</td>
+                                    <td className="px-3 py-2 text-muted-foreground">{item.last_used_at ? new Date(item.last_used_at).toLocaleString() : "暂无"}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  ) : null}
+
                   <Tabs
                     value={configTab}
                     onValueChange={(v) => setConfigTab(v as ConfigTab)}
@@ -1725,8 +1899,8 @@ export function GatewayPage() {
                         onProbeModelCooldown={(routeID, model) =>
                           void probeModelCooldown(routeID, model)
                         }
-                        onClearCacheHealth={(kind, id) =>
-                          void clearCacheHealth(kind, id)
+                        onClearCacheHealth={(kind, id, groupID, routeID) =>
+						  void clearCacheHealth(kind, id, groupID, routeID)
                         }
                         onShowPauseError={setPauseErrorRoute}
                       />
@@ -1788,6 +1962,13 @@ export function GatewayPage() {
             usageModelFilter={usageModelFilter}
             setUsageModelFilter={setUsageModelFilter}
             usageModelOptions={usageModelOptions}
+            usageSourceOptions={usageSourceOptions}
+            usageSourceGroupOptions={usageSourceGroupOptions}
+            usageSourceFilter={usageSourceFilter}
+            setUsageSourceFilter={setUsageSourceFilter}
+            usageSourceGroupFilter={usageSourceGroupFilter}
+            setUsageSourceGroupFilter={setUsageSourceGroupFilter}
+            usageTimeline={usageTimeline}
             usageRequestIDFilter={usageRequestIDFilter}
             setUsageRequestIDFilter={setUsageRequestIDFilter}
             usageSuccessFilter={usageSuccessFilter}
@@ -1845,7 +2026,9 @@ export function GatewayPage() {
         onProbeModelCooldown={(routeID, model) =>
           void probeModelCooldown(routeID, model)
         }
-        onClearCacheHealth={(kind, id) => void clearCacheHealth(kind, id)}
+        onClearCacheHealth={(kind, id, groupID, routeID) =>
+		  void clearCacheHealth(kind, id, groupID, routeID)
+        }
       />
 
       <EnsureKeysResultDialog

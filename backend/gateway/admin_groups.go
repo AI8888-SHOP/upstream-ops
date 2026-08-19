@@ -108,41 +108,49 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.LoadBalanceRouteCount != nil {
 		loadBalanceRouteCount = normalizeLoadBalanceRouteCount(*in.LoadBalanceRouteCount)
 	}
+	virtualCachePercent := 100
+	if in.VirtualCachePercent != nil {
+		if *in.VirtualCachePercent < 0 || *in.VirtualCachePercent > 100 {
+			return nil, errors.New("virtual_cache_percent must be between 0 and 100")
+		}
+		virtualCachePercent = *in.VirtualCachePercent
+	}
 	pos, err := a.Groups.NextPosition()
 	if err != nil {
 		return nil, err
 	}
 	item := &storage.GatewayGroup{
-		Name:                              name,
-		Description:                       strings.TrimSpace(in.Description),
-		Position:                          pos,
-		Status:                            storage.GatewayGroupStatusActive,
-		RateSortDirection:                 dir,
-		RateResortEnabled:                 rateResort,
-		MaxBillingRateMultiplier:          maxBillingRate,
-		LoadBalanceRouteCount:             loadBalanceRouteCount,
-		ModelMappingJSON:                  strings.TrimSpace(in.ModelMappingJSON),
-		ModelsJSON:                        strings.TrimSpace(in.ModelsJSON),
-		ModelsMode:                        mode,
-		RetryEnabled:                      retryEnabled,
-		RetryCount:                        retryCount,
-		FailoverEnabled:                   failoverEnabled,
-		FailoverMax:                       failoverMax,
-		FailoverOn4xx:                     failoverOn4xx,
-		CooldownSeconds:                   cooldown,
-		FirstTokenTimeoutSec:              ftTimeout,
-		HedgeEnabled:                      hedgeEnabled,
-		HedgeDelaySeconds:                 hedgeDelay,
-		HedgeMaxParallel:                  hedgeParallel,
-		HedgeMaxAttempts:                  hedgeAttempts,
-		HedgeVirtualCacheEnabled:          hedgeVirtualCache,
-		ResponseValidationEnabled:         validationEnabled,
+		Name:                                  name,
+		Description:                           strings.TrimSpace(in.Description),
+		Position:                              pos,
+		Status:                                storage.GatewayGroupStatusActive,
+		RateSortDirection:                     dir,
+		RateResortEnabled:                     rateResort,
+		MaxBillingRateMultiplier:              maxBillingRate,
+		LoadBalanceRouteCount:                 loadBalanceRouteCount,
+		ModelMappingJSON:                      strings.TrimSpace(in.ModelMappingJSON),
+		ModelsJSON:                            strings.TrimSpace(in.ModelsJSON),
+		ModelsMode:                            mode,
+		RetryEnabled:                          retryEnabled,
+		RetryCount:                            retryCount,
+		FailoverEnabled:                       failoverEnabled,
+		FailoverMax:                           failoverMax,
+		FailoverOn4xx:                         failoverOn4xx,
+		CooldownSeconds:                       cooldown,
+		FirstTokenTimeoutSec:                  ftTimeout,
+		HedgeEnabled:                          hedgeEnabled,
+		HedgeDelaySeconds:                     hedgeDelay,
+		HedgeMaxParallel:                      hedgeParallel,
+		HedgeMaxAttempts:                      hedgeAttempts,
+		HedgeVirtualCacheEnabled:              hedgeVirtualCache,
+		VirtualCachePercent:                   virtualCachePercent,
+		ResponseValidationEnabled:             validationEnabled,
 		ResponseValidationVirtualCacheEnabled: validationVirtualCache,
-		ResponseValidationRetryCount:      validationRetryCount,
-		ResponseValidationStreamMode:      validationMode,
-		ResponseValidationPrefixBytes:     prefixBytes,
-		ResponseValidationPrefixTimeoutMS: prefixTimeoutMS,
-		UserAgent:                         strings.TrimSpace(in.UserAgent),
+		ResponseValidationRetryCount:          validationRetryCount,
+		ResponseValidationStreamMode:          validationMode,
+		ResponseValidationPrefixBytes:         prefixBytes,
+		ResponseValidationPrefixTimeoutMS:     prefixTimeoutMS,
+		UserAgent:                             strings.TrimSpace(in.UserAgent),
 	}
 	if err := a.Groups.Create(item); err != nil {
 		return nil, err
@@ -305,6 +313,12 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	}
 	if in.HedgeVirtualCacheEnabled != nil {
 		item.HedgeVirtualCacheEnabled = *in.HedgeVirtualCacheEnabled
+	}
+	if in.VirtualCachePercent != nil {
+		if *in.VirtualCachePercent < 0 || *in.VirtualCachePercent > 100 {
+			return nil, errors.New("virtual_cache_percent must be between 0 and 100")
+		}
+		item.VirtualCachePercent = *in.VirtualCachePercent
 	}
 	hd, hp, ha := item.HedgeDelaySeconds, item.HedgeMaxParallel, item.HedgeMaxAttempts
 	if in.HedgeDelaySeconds != nil {

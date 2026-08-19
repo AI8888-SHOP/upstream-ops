@@ -32,6 +32,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.GET("/groups/:id", func(c *gin.Context) { getGatewayGroup(c, d) })
 		gp.PUT("/groups/:id", func(c *gin.Context) { updateGatewayGroup(c, d) })
 		gp.DELETE("/groups/:id", func(c *gin.Context) { deleteGatewayGroup(c, d) })
+		gp.GET("/groups/:id/overview", func(c *gin.Context) { gatewayGroupOverview(c, d) })
 
 		// keys under group
 		gp.GET("/groups/:id/keys", func(c *gin.Context) { listGatewayGroupKeys(c, d) })
@@ -80,6 +81,8 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.GET("/usage", func(c *gin.Context) { listGatewayUsage(c, d) })
 		gp.GET("/usage/stats", func(c *gin.Context) { statsGatewayUsage(c, d) })
 		gp.GET("/usage/models", func(c *gin.Context) { listGatewayUsageModels(c, d) })
+		gp.GET("/usage/source-groups", func(c *gin.Context) { listGatewayUsageSourceOptions(c, d) })
+		gp.GET("/usage/timeline", func(c *gin.Context) { timelineGatewayUsage(c, d) })
 		gp.POST("/usage/cleanup", func(c *gin.Context) { cleanupGatewayUsage(c, d) })
 		gp.GET("/cache-health", func(c *gin.Context) { listGatewayCacheHealth(c, d) })
 		gp.POST("/cache-health/clear", func(c *gin.Context) { clearGatewayCacheHealth(c, d) })
@@ -496,6 +499,18 @@ func listGatewayCacheHealth(c *gin.Context, d *Deps) {
 		return
 	}
 	var ids []uint
+	groupID := uint(0)
+	routeID := uint(0)
+	if raw := strings.TrimSpace(c.Query("gateway_group_id")); raw != "" {
+		if id, err := strconv.ParseUint(raw, 10, 64); err == nil && id > 0 {
+			groupID = uint(id)
+		}
+	}
+	if raw := strings.TrimSpace(c.Query("route_id")); raw != "" {
+		if id, err := strconv.ParseUint(raw, 10, 64); err == nil && id > 0 {
+			routeID = uint(id)
+		}
+	}
 	if raw := strings.TrimSpace(c.Query("source_id")); raw != "" {
 		if id, err := strconv.ParseUint(raw, 10, 64); err == nil && id > 0 {
 			ids = append(ids, uint(id))
@@ -508,7 +523,19 @@ func listGatewayCacheHealth(c *gin.Context, d *Deps) {
 			}
 		}
 	}
-	stats, err := d.Gateway.CacheHealthStats(kind, uniqueUintIDs(ids))
+	var stats []gateway.CacheHealthStat
+	var err error
+	if routeID > 0 {
+		if groupID == 0 || len(ids) != 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "route_id requires gateway_group_id and one source_id"})
+			return
+		}
+		stats, err = d.Gateway.CacheHealthStatsForRoute(kind, ids[0], groupID, routeID)
+	} else if groupID > 0 {
+		stats, err = d.Gateway.CacheHealthStatsForGroup(kind, uniqueUintIDs(ids), groupID)
+	} else {
+		stats, err = d.Gateway.CacheHealthStats(kind, uniqueUintIDs(ids))
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -551,8 +578,10 @@ func clearGatewayProviderCacheHealth(c *gin.Context, d *Deps) {
 }
 
 type clearGatewayCacheHealthInput struct {
-	SourceKind string `json:"source_kind"`
-	SourceID   uint   `json:"source_id"`
+	SourceKind     string `json:"source_kind"`
+	SourceID       uint   `json:"source_id"`
+	GatewayGroupID uint   `json:"gateway_group_id"`
+	RouteID        uint   `json:"route_id"`
 }
 
 func clearGatewayCacheHealth(c *gin.Context, d *Deps) {
@@ -570,7 +599,19 @@ func clearGatewayCacheHealth(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "source_id is required"})
 		return
 	}
-	if err := d.Gateway.ClearCacheHealthBlacklist(kind, input.SourceID); err != nil {
+	var err error
+	if input.RouteID > 0 {
+		if input.GatewayGroupID == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "gateway_group_id is required with route_id"})
+			return
+		}
+		err = d.Gateway.ClearCacheHealthBlacklistForRoute(kind, input.SourceID, input.GatewayGroupID, input.RouteID)
+	} else if input.GatewayGroupID > 0 {
+		err = d.Gateway.ClearCacheHealthBlacklistForGroup(kind, input.SourceID, input.GatewayGroupID)
+	} else {
+		err = d.Gateway.ClearCacheHealthBlacklist(kind, input.SourceID)
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1072,6 +1113,12 @@ func parseGatewayUsageQuery(c *gin.Context) storage.GatewayUsageQuery {
 			q.GatewayProviderID = uint(n)
 		}
 	}
+	if v := strings.TrimSpace(c.Query("source_group_id")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			q.SourceGroupID = &n
+		}
+	}
+	q.SourceGroupName = strings.TrimSpace(c.Query("source_group_name"))
 	q.Model = strings.TrimSpace(c.Query("model"))
 	q.RequestID = strings.TrimSpace(c.Query("request_id"))
 	if v := c.Query("request_type"); v != "" {
@@ -1160,6 +1207,112 @@ func statsGatewayUsage(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, stats)
+}
+
+func listGatewayUsageSourceOptions(c *gin.Context, d *Deps) {
+	if d.GatewayUsage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage storage unavailable"})
+		return
+	}
+	items, err := d.GatewayUsage.ListSourceOptions(parseGatewayUsageQuery(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func timelineGatewayUsage(c *gin.Context, d *Deps) {
+	if d.GatewayUsage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage storage unavailable"})
+		return
+	}
+	items, err := d.GatewayUsage.Timeline(parseGatewayUsageQuery(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func gatewayGroupOverview(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group id"})
+		return
+	}
+	if d.Gateway == nil || d.Gateway.Groups == nil || d.Gateway.Routes == nil || d.GatewayUsage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "gateway overview unavailable"})
+		return
+	}
+	group, err := d.Gateway.GetGroup(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "gateway group not found"})
+		return
+	}
+	routes := []storage.GatewayRoute{}
+	if group.Status == storage.GatewayGroupStatusActive {
+		// Use the admin read path so legacy routes with only a source-group ID
+		// are enriched with their current upstream group name before aggregation.
+		routes, err = d.Gateway.ListRoutes(id)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	overview, err := d.GatewayUsage.GroupOverview(id, routes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Add human-readable channel/provider names without coupling storage's
+	// aggregation types to the API's channel service.
+	channelIDs := make([]uint, 0)
+	providerIDs := make([]uint, 0)
+	for _, item := range overview.ActiveSourceGroups {
+		if item.SourceKind == storage.GatewayRouteSourceProvider {
+			providerIDs = append(providerIDs, item.SourceID)
+		} else {
+			channelIDs = append(channelIDs, item.SourceID)
+		}
+	}
+	channelNames := map[uint]string{}
+	providerNames := map[uint]string{}
+	if len(channelIDs) > 0 && d.DB != nil {
+		var rows []storage.Channel
+		if err := d.DB.Select("id", "name").Where("id IN ?", channelIDs).Find(&rows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		for _, row := range rows {
+			channelNames[row.ID] = row.Name
+		}
+	}
+	if len(providerIDs) > 0 && d.DB != nil {
+		var rows []storage.GatewayProvider
+		if err := d.DB.Select("id", "name").Where("id IN ?", providerIDs).Find(&rows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		for _, row := range rows {
+			providerNames[row.ID] = row.Name
+		}
+	}
+	for i := range overview.ActiveSourceGroups {
+		item := &overview.ActiveSourceGroups[i]
+		if item.SourceKind == storage.GatewayRouteSourceProvider {
+			item.ChannelName = providerNames[item.SourceID]
+			if item.ChannelName == "" {
+				item.ChannelName = "直连 #" + strconv.FormatUint(uint64(item.SourceID), 10)
+			}
+		} else {
+			item.ChannelName = channelNames[item.SourceID]
+			if item.ChannelName == "" {
+				item.ChannelName = "渠道 #" + strconv.FormatUint(uint64(item.SourceID), 10)
+			}
+		}
+	}
+	c.JSON(http.StatusOK, overview)
 }
 
 // listGatewayUsageModels 使用记录中出现过的模型聚合（下拉选项）。

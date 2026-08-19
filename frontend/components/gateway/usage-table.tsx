@@ -350,6 +350,7 @@ type UsageColId =
   | "reasoning"
   | "endpoint"
   | "group"
+  | "channelRate"
   | "type"
   | "billing"
   | "token"
@@ -373,6 +374,7 @@ const USAGE_COLUMNS: {
   { id: "reasoning", label: "推理强度", defaultVisible: true },
   { id: "endpoint", label: "端点", defaultVisible: true },
   { id: "group", label: "分组", defaultVisible: true },
+  { id: "channelRate", label: "渠道分组倍率", defaultVisible: true },
   { id: "type", label: "类型", defaultVisible: true },
   { id: "billing", label: "计费模式", defaultVisible: true },
   { id: "token", label: "Token", defaultVisible: true },
@@ -1814,48 +1816,34 @@ export function GatewayUsageTable({
                         <TableCell className="text-xs">
                           {(() => {
                             const groupName = (u.gateway_group_name || "").trim()
-                            const sg = formatSourceGroupDisplay(u.source_group_name)
-                            const sourceTip = sg.tip
-                              ? sg.tip
-                              : sg.label
-                                ? `源 ${sg.label}`
-                                : undefined
+                            const sg = formatSourceGroupDisplay(u.source_group_name, u.source_group_id)
                             const tagClass =
                               "inline-flex whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200"
 
-                            if (!groupName) {
+                            if (!groupName && !sg.label) {
                               return (
                                 <span className="text-muted-foreground">—</span>
                               )
                             }
-
-                            if (sourceTip) {
-                              return (
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <span
-                                      className={cn(tagClass, "cursor-default")}
-                                    >
-                                      {groupName}
-                                    </span>
-                                  </TooltipTrigger>
-                                  <TooltipContent
-                                    side="top"
-                                    className="space-y-0.5 text-xs"
-                                  >
-                                    <div className="font-medium">{groupName}</div>
-                                    <div className="text-muted-foreground">
-                                      {sourceTip}
-                                    </div>
-                                  </TooltipContent>
-                                </Tooltip>
-                              )
-                            }
-
                             return (
-                              <span className={tagClass}>{groupName}</span>
+                              <div className="flex flex-col items-start gap-1">
+                                {groupName ? <span className={tagClass}>{groupName}</span> : null}
+                                {sg.label ? (
+                                  <span className="whitespace-nowrap text-[11px] text-muted-foreground" title={sg.tip}>
+                                    {sg.label}{sg.tip ? ` · ${sg.tip}` : ""}
+                                  </span>
+                                ) : null}
+                              </div>
                             )
                           })()}
+                        </TableCell>
+                      )}
+
+                      {show("channelRate") && (
+                        <TableCell className="text-xs tabular-nums">
+                          <span className="font-medium text-sky-700 dark:text-sky-300">
+                            {(u.account_rate_multiplier || u.billing_rate_multiplier || u.rate_multiplier || 1).toFixed(4)}x
+                          </span>
                         </TableCell>
                       )}
 

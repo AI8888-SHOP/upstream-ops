@@ -681,6 +681,7 @@ export interface GatewayGroup {
   /** 单个客户端请求允许启动的上游 attempt 总数 */
   hedge_max_attempts?: number
   hedge_virtual_cache_enabled?: boolean
+  virtual_cache_percent?: number
   /** 是否启用响应内容正则校验 */
   response_validation_enabled?: boolean
   /** 正则预提交拒绝并切换其它渠道后，将 winner 输入按虚拟缓存读取计费 */
@@ -768,6 +769,8 @@ export interface GatewayProvider {
 }
 
 export interface GatewayCacheHealthStat {
+  gateway_group_id: number
+  route_id: number
   source_kind: GatewayRouteSourceKind
   source_id: number
   hit_rate: number
@@ -1054,6 +1057,7 @@ export interface GatewayUsageLog {
   gateway_key_name?: string
   gateway_group_name?: string
   channel_name?: string
+  source_group_id?: number | null
   source_group_name?: string
   source_api_key_name?: string
 }
@@ -1086,6 +1090,36 @@ export interface GatewayUsagePage {
   page_size: number
   pages: number
   sum_cost: number
+}
+
+export interface GatewayUsageTimelinePoint {
+  bucket: string
+  requests: number
+  tokens: number
+  cost: number
+  success: number
+  errors: number
+}
+
+export interface GatewayUsageSourceOption {
+  source_kind: GatewayRouteSourceKind
+  source_id: number
+  name: string
+  count: number
+}
+
+export interface GatewayUsageSourceGroupOption {
+  source_kind: GatewayRouteSourceKind
+  source_id: number
+  group_id?: number | null
+  group_name: string
+  channel_name?: string
+  count: number
+}
+
+export interface GatewayUsageSourceOptions {
+  sources: GatewayUsageSourceOption[]
+  source_groups: GatewayUsageSourceGroupOption[]
 }
 
 export interface GatewayUsageStats {
@@ -1129,6 +1163,25 @@ export interface GatewayUsageStats {
 export interface GatewayUsageModelOption {
   model: string
   count: number
+}
+
+export interface GatewayGroupActiveSource {
+  source_kind: GatewayRouteSourceKind
+  source_id: number
+  source_group_id?: number | null
+  source_group_name?: string
+  channel_name?: string
+  request_count: number
+  tokens: number
+  last_used_at?: string | null
+  account_rate_multiplier: number
+  active: boolean
+}
+
+export interface GatewayGroupUsageOverview {
+  group_id: number
+  active_source_groups: GatewayGroupActiveSource[]
+  totals: GatewayUsageStats | null
 }
 
 export interface ModelPriceOverride {

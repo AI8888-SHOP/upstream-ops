@@ -191,12 +191,13 @@ func (rt *Runtime) recordUsage(
 		}
 		return 0
 	}
-	// Cache-health evaluation is source-level and debounced; keep it off the
-	// request critical path so usage accounting never waits on aggregate SQL.
+	// Cache-health evaluation is scoped to this gateway group and debounced;
+	// keep it off the request critical path so usage accounting never waits on
+	// aggregate SQL.
 	if providerID > 0 {
-		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceProvider, providerID)
+		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceProvider, providerID, group.ID, route.ID)
 	} else if channelID > 0 {
-		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceMonitor, channelID)
+		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceMonitor, channelID, group.ID, route.ID)
 	}
 	if settleNow {
 		if _, err := rt.Usage.FinalizeRequest(storage.GatewayFinalizeRequestInput{
@@ -268,13 +269,15 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 		model = strings.TrimSpace(req.requestedModel)
 	}
 	tokens := NormalizeUsageBuckets(winner.Tokens, protocol.Kind(winner.UsageMeta.UpstreamProtocol))
-	percent := 100
+	percent := effectiveGatewayVirtualCachePercent(req.group, 0)
 	if reason == storage.GatewayVirtualCacheReasonProviderGlobal {
-		var err error
-		percent, err = ProviderVirtualCachePercentForModel(winner.Target.Provider, model)
-		if err != nil || percent <= 0 {
+		percent = providerVirtualCachePercentForGroup(winner.Target.Provider, model, req.group)
+		if percent <= 0 {
 			return storage.GatewayFinalizeRequestInput{}
 		}
+	}
+	if percent <= 0 {
+		return storage.GatewayFinalizeRequestInput{}
 	}
 	virtualTokens := virtualCacheTokenPercent(tokens.InputTokens, percent)
 	if virtualTokens <= 0 {
@@ -329,12 +332,13 @@ func (rt *Runtime) buildProviderVirtualCacheSettlement(
 	upstreamKind protocol.Kind,
 	rate, billingRate float64,
 	eligible bool,
+	group *storage.GatewayGroup,
 ) storage.GatewayFinalizeRequestInput {
 	if rt == nil || provider == nil || !eligible || tokens.ImageOutputTokens > 0 {
 		return storage.GatewayFinalizeRequestInput{}
 	}
-	percent, err := ProviderVirtualCachePercentForModel(provider, model)
-	if err != nil || percent <= 0 {
+	percent := providerVirtualCachePercentForGroup(provider, model, group)
+	if percent <= 0 {
 		return storage.GatewayFinalizeRequestInput{}
 	}
 	tokens = NormalizeUsageBuckets(tokens, upstreamKind)
@@ -376,12 +380,47 @@ func (rt *Runtime) buildProviderVirtualCacheSettlement(
 	}
 }
 
-func virtualCachePercentForSettlement(settlement storage.GatewayFinalizeRequestInput, provider *storage.GatewayProvider, model string) int {
+func virtualCachePercentForSettlement(settlement storage.GatewayFinalizeRequestInput, provider *storage.GatewayProvider, model string, group *storage.GatewayGroup) int {
 	if settlement.VirtualCacheReason != storage.GatewayVirtualCacheReasonProviderGlobal {
-		return 100
+		return effectiveGatewayVirtualCachePercent(group, 0)
 	}
-	percent, _ := ProviderVirtualCachePercentForModel(provider, model)
-	return percent
+	return providerVirtualCachePercentForGroup(provider, model, group)
+}
+
+func providerVirtualCachePercentForGroup(provider *storage.GatewayProvider, model string, group *storage.GatewayGroup) int {
+	percent, err := ProviderVirtualCachePercentForModel(provider, model)
+	if err != nil || percent <= 0 {
+		return 0
+	}
+	return effectiveGatewayVirtualCachePercent(group, percent)
+}
+
+// effectiveGatewayVirtualCachePercent applies the gateway-group ceiling to a
+// provider's own virtual-cache policy. A zero group value deliberately
+// disables virtual-cache reclassification; newly migrated rows receive the
+// model default of 100% through AutoMigrate.
+func effectiveGatewayVirtualCachePercent(group *storage.GatewayGroup, providerPercent int) int {
+	groupPercent := 100
+	if group != nil {
+		groupPercent = group.VirtualCachePercent
+		// Unit callers and legacy in-memory auth fixtures may construct a group
+		// without an ID/AutoMigrate default; preserve the pre-group-policy 100%
+		// behavior for those transient values. Persisted groups (ID > 0) can use
+		// 0 explicitly to disable virtual-cache reclassification.
+		if groupPercent == 0 && group.ID == 0 {
+			groupPercent = 100
+		}
+		if groupPercent < 0 {
+			groupPercent = 0
+		}
+		if groupPercent > 100 {
+			groupPercent = 100
+		}
+	}
+	if providerPercent > 0 && providerPercent < groupPercent {
+		groupPercent = providerPercent
+	}
+	return groupPercent
 }
 
 func (rt *Runtime) finalizeUsageFailure(reqID string, key *storage.GatewayKey) {

@@ -343,7 +343,7 @@ IMAGE_TAG=latest
 生产环境建议锁定具体版本，例如：
 
 ```env
-IMAGE_TAG=v0.0.32
+IMAGE_TAG=v0.0.33
 ```
 
 ## MySQL 部署
@@ -377,13 +377,13 @@ MYSQL_PORT=33069
 
 ```bash
 chmod +x scripts/upgrade.sh
-TARGET_TAG=v0.0.32 ./scripts/upgrade.sh
+TARGET_TAG=v0.0.33 ./scripts/upgrade.sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-.\scripts\upgrade.ps1 -TargetTag v0.0.32
+.\scripts\upgrade.ps1 -TargetTag v0.0.33
 ```
 
 脚本会备份 `data/` 与 `.env`、为旧镜像建立不可变的本地回滚标签、拉取目标版本、等待容器健康检查，并在成功后把目标 `IMAGE_TAG` 持久化到 `.env`；启动或健康检查失败时自动恢复旧镜像。非默认 compose 文件、服务名或端口可通过 `COMPOSE_FILE`、`SERVICE`、`HEALTH_URL`、`HEALTH_TIMEOUT_SECONDS` 覆盖。请在新版本完成请求、重试、计费核对后再清理 `backups/` 和回滚镜像标签。
@@ -1046,7 +1046,7 @@ x-api-key: sk-...
 - 默认可顺延：无响应、429、5xx；组开启「4xx 顺延」时全部 4xx 也可顺延。
 - 失败路由可写入临时不可调度截止时间（冷却秒数，默认来自 `gateway.tempPauseSeconds` / 组配置）。
 - 自动冷却按“路由 + 最终上游模型”隔离：某个模型失败不会暂停同一渠道的其它模型；映射到同一最终上游模型的别名共享冷却。管理端“清除暂停”会清除该路由的全部模型冷却。
-- 路由页会展示模型级冷却、缓存健康拉黑截止时间与原因；可分别提前解除路由冷却或来源级缓存限制。人工解除缓存限制后，系统会在一个完整统计窗口内暂缓重新拉黑。
+- 路由页会按具体渠道分组展示模型级冷却、缓存健康拉黑截止时间与原因；可分别提前解除路由冷却或单个分组的缓存限制。人工解除缓存限制后，系统会在一个完整统计窗口内暂缓重新拉黑。
 - 组级：`retry_count`、`response_validation_retry_count`、`failover_max`、`cooldown_seconds`。
 - **首字超时**：配置后，仅当「本请求仍可切换到其它路由」时启用；最后一条可试路由会关闭首字掐断，避免无意义超时。
 - **并发兜底（默认关闭）**：主 attempt 立即开始；超过 `hedge_delay_seconds` 仍没有通过校验的响应时，按延迟阶梯启动其它路由。`hedge_max_parallel` 包含主请求，`hedge_max_attempts` 是整个请求可启动的 attempt 总上限。第一个通过校验的响应获胜，其余未完成请求会被取消。
@@ -1194,7 +1194,7 @@ curl -sN http://127.0.0.1:8418/v1/responses \
 | `usageErrorHeadersJSONBytes` | 65536 | 错误响应头 JSON 总上限 |
 | `cacheHitRateWindowMinutes` | 0（关闭） | 按最近窗口统计真实上游缓存命中率（分钟） |
 | `cacheHitRateThresholdPercent` | 0（关闭） | 命中率低于该百分比时触发保护 |
-| `cacheHitRateBlacklistMinutes` | 0（关闭） | 触发后暂停该来源全部路由的分钟数 |
+| `cacheHitRateBlacklistMinutes` | 0（关闭） | 触发后暂停该渠道分组路由的分钟数 |
 | `cacheHitRateMinimumRequests` | 10（默认/最低） | 可在设置页调整；来源累计达到设置的成功请求数后才触发自动拉黑，最低 10 次，避免冷启动误判 |
 | `modelCooldownProbeEnabled` | true | 模型错误冷却到期前由后台主动探测；成功后自动恢复，探测不写入本地网关用量 |
 | `modelCooldownProbeIntervalMinutes` | 5 | 探测失败后的基础重试间隔；连续失败时指数退避 |

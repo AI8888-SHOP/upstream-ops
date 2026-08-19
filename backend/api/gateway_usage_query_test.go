@@ -40,3 +40,14 @@ func TestParseGatewayUsageQueryAcceptsProviderFilter(t *testing.T) {
 		t.Fatalf("provider id = %d, want 42", query.GatewayProviderID)
 	}
 }
+
+func TestParseGatewayUsageQueryAcceptsSourceGroupFilter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	request := httptest.NewRequest("GET", "/api/gateway/usage?channel_id=9&source_group_id=41&source_group_name=premium", nil)
+	context, _ := gin.CreateTestContext(httptest.NewRecorder())
+	context.Request = request
+	query := parseGatewayUsageQuery(context)
+	if query.ChannelID != 9 || query.SourceGroupID == nil || *query.SourceGroupID != 41 || query.SourceGroupName != "premium" {
+		t.Fatalf("source group query = %+v", query)
+	}
+}

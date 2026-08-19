@@ -208,7 +208,7 @@ type RoutesPanelProps = {
   onEnsureKeys: () => void
   onClearRoutePause: (routeID?: number) => void
   onProbeModelCooldown: (routeID: number, model: string) => void
-  onClearCacheHealth: (sourceKind: GatewayRouteSourceKind, sourceID: number) => void
+  onClearCacheHealth: (sourceKind: GatewayRouteSourceKind, sourceID: number, gatewayGroupID?: number, routeID?: number) => void
   onShowPauseError: (route: Partial<GatewayRoute>) => void
 }
 
@@ -745,6 +745,8 @@ export function RoutesPanel({
                                 onClearCacheHealth(
                                   kind,
                                   cacheHealthSourceID,
+                                  Number(r.gateway_group_id) || 0,
+                                  Number(r.id) || 0,
                                 )
                               }
                             >

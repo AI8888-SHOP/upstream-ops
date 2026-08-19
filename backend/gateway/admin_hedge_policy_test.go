@@ -86,6 +86,35 @@ func TestCreateAndUpdateGroupHedgePolicyBounds(t *testing.T) {
 	}
 }
 
+func TestGatewayGroupVirtualCachePercentValidation(t *testing.T) {
+	db := openGatewayTestDB(t)
+	svc := NewService(
+		storage.NewGatewayGroups(db), storage.NewGatewayKeys(db), storage.NewGatewayRoutes(db),
+		storage.NewGatewayUsageLogs(db), storage.NewModelPriceOverrides(db), storage.NewChannels(db),
+		nil, nil, nil,
+	)
+	percent := 37
+	group, err := svc.CreateGroup(CreateGroupInput{Name: "virtual-cache-percent", VirtualCachePercent: &percent})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if group.VirtualCachePercent != 37 {
+		t.Fatalf("virtual_cache_percent = %d, want 37", group.VirtualCachePercent)
+	}
+	percent = 101
+	if _, err := svc.UpdateGroup(group.ID, UpdateGroupInput{VirtualCachePercent: &percent}); err == nil {
+		t.Fatal("UpdateGroup accepted virtual_cache_percent > 100")
+	}
+	percent = 0
+	updated, err := svc.UpdateGroup(group.ID, UpdateGroupInput{VirtualCachePercent: &percent})
+	if err != nil {
+		t.Fatalf("disable virtual cache: %v", err)
+	}
+	if updated.VirtualCachePercent != 0 {
+		t.Fatalf("virtual_cache_percent = %d, want 0", updated.VirtualCachePercent)
+	}
+}
+
 func TestResponseValidationRetryCountIsIndependentAndCompatible(t *testing.T) {
 	db := openGatewayTestDB(t)
 	groups := storage.NewGatewayGroups(db)

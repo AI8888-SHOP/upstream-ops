@@ -51,10 +51,10 @@ func TestGatewayUsageStatsOptionalEndpointAggregateAndCache(t *testing.T) {
 	db := openTestDB(t)
 	logs := NewGatewayUsageLogs(db)
 	if err := logs.Create(&GatewayUsageLog{
-		RequestID:      "stats-endpoint-request",
+		RequestID:       "stats-endpoint-request",
 		InboundEndpoint: "/v1/responses",
-		ActualCost:     0.5,
-		CreatedAt:      time.Now().UTC(),
+		ActualCost:      0.5,
+		CreatedAt:       time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("create usage: %v", err)
 	}
@@ -131,5 +131,87 @@ func TestGatewayUsageListOptionalSumAggregate(t *testing.T) {
 	}
 	if withSumQueries != withoutSumQueries+1 {
 		t.Fatalf("query counts with/without sum = %d/%d, want one fewer query", withSumQueries, withoutSumQueries)
+	}
+}
+
+func TestGatewayUsageSourceFiltersTimelineAndGroupOverview(t *testing.T) {
+	db := openTestDB(t)
+	logs := NewGatewayUsageLogs(db)
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := int64(41)
+	rows := []GatewayUsageLog{
+		{
+			GatewayGroupID: 7, ChannelID: 11, SourceGroupID: &groupID,
+			SourceGroupName: "premium", RequestID: "source-monitor",
+			Winner: true, Success: true, InputTokens: 100, OutputTokens: 20,
+			ActualCost: 0.12, AccountRateMultiplier: 1.25, CreatedAt: now.Add(-30 * time.Minute),
+		},
+		{
+			GatewayGroupID: 7, GatewayProviderID: 12, ProviderName: "direct-b",
+			RequestID: "source-provider", Winner: true, Success: true,
+			InputTokens: 50, ActualCost: 0.05, CreatedAt: now.Add(-10 * time.Minute),
+		},
+		{
+			GatewayGroupID: 7, ChannelID: 11, SourceGroupID: &groupID,
+			SourceGroupName: "premium-renamed", RequestID: "source-monitor-renamed",
+			Winner: true, Success: true, InputTokens: 25, OutputTokens: 5,
+			ActualCost: 0.03, AccountRateMultiplier: 1.5, CreatedAt: now.Add(-5 * time.Minute),
+		},
+	}
+	for i := range rows {
+		if err := logs.Create(&rows[i]); err != nil {
+			t.Fatalf("create usage %d: %v", i, err)
+		}
+	}
+
+	page, err := logs.List(GatewayUsageQuery{
+		GatewayGroupID: 7, ChannelID: 11, SourceGroupID: &groupID, PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("list source group: %v", err)
+	}
+	if page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("filtered page = %+v", page)
+	}
+
+	options, err := logs.ListSourceOptions(GatewayUsageQuery{GatewayGroupID: 7})
+	if err != nil {
+		t.Fatalf("source options: %v", err)
+	}
+	if len(options.Sources) != 2 || len(options.SourceGroups) != 1 {
+		t.Fatalf("source options = %+v", options)
+	}
+	if got := options.SourceGroups[0]; got.GroupID == nil || *got.GroupID != groupID || got.GroupName != "premium-renamed" || got.Count != 2 {
+		t.Fatalf("source group option = %+v", got)
+	}
+
+	from, to := now.Add(-time.Hour), now.Add(time.Minute)
+	timeline, err := logs.Timeline(GatewayUsageQuery{GatewayGroupID: 7, From: &from, To: &to})
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	var requests, tokens int64
+	for _, point := range timeline {
+		requests += point.Requests
+		tokens += point.Tokens
+	}
+	if requests != 3 || tokens != 200 {
+		t.Fatalf("timeline requests/tokens = %d/%d, want 3/200: %+v", requests, tokens, timeline)
+	}
+
+	overview, err := logs.GroupOverview(7, []GatewayRoute{{
+		ID: 1, GatewayGroupID: 7, SourceKind: GatewayRouteSourceMonitor,
+		SourceChannelID: 11, SourceGroupID: &groupID, SourceGroupName: "premium-renamed",
+		Enabled: true, BillingRateMultiplier: 1.5,
+	}})
+	if err != nil {
+		t.Fatalf("group overview: %v", err)
+	}
+	if len(overview.ActiveSourceGroups) != 1 {
+		t.Fatalf("active sources = %+v", overview.ActiveSourceGroups)
+	}
+	active := overview.ActiveSourceGroups[0]
+	if active.RequestCount != 2 || active.Tokens != 150 || active.AccountRateMultiplier != 1.5 {
+		t.Fatalf("active source = %+v", active)
 	}
 }

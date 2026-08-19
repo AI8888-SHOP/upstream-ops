@@ -104,6 +104,30 @@ func TestBuildProviderVirtualCacheSettlementPreservesUncachedInput(t *testing.T)
 	}
 }
 
+func TestGatewayGroupVirtualCachePercentCapsProviderAndHedge(t *testing.T) {
+	group := &storage.GatewayGroup{ID: 1, VirtualCachePercent: 20}
+	provider := &storage.GatewayProvider{
+		VirtualCacheEnabled: true, VirtualCachePercent: 50, VirtualCacheModelsJSON: `[]`,
+	}
+	if got := effectiveGatewayVirtualCachePercent(group, provider.VirtualCachePercent); got != 20 {
+		t.Fatalf("effective provider percent = %d, want 20", got)
+	}
+	if got := effectiveGatewayVirtualCachePercent(group, 0); got != 20 {
+		t.Fatalf("effective hedge percent = %d, want 20", got)
+	}
+	if got := providerVirtualCachePercentForGroup(provider, "text-model", group); got != 20 {
+		t.Fatalf("effective enabled provider percent = %d, want 20", got)
+	}
+	provider.VirtualCacheEnabled = false
+	if got := providerVirtualCachePercentForGroup(provider, "text-model", group); got != 0 {
+		t.Fatalf("disabled provider percent = %d, want 0", got)
+	}
+	group.VirtualCachePercent = 0
+	if got := effectiveGatewayVirtualCachePercent(group, provider.VirtualCachePercent); got != 0 {
+		t.Fatalf("disabled group percent = %d, want 0", got)
+	}
+}
+
 func TestCoordinatedAttemptSuppressesDeterministicSameRouteRetries(t *testing.T) {
 	attempt := &coordinatedForwardAttempt{
 		Status: http.StatusForbidden,
@@ -579,11 +603,11 @@ func TestBuildCoordinatedRoutePlanValidationSwitchesWithoutFailoverToggle(t *tes
 
 func TestBuildCoordinatedRoutePlanValidationIgnoresZeroTransportBudget(t *testing.T) {
 	group := &storage.GatewayGroup{
-		RetryEnabled:                true,
-		RetryCount:                  2,
+		RetryEnabled:                 true,
+		RetryCount:                   2,
 		ResponseValidationRetryCount: -1,
-		FailoverEnabled:             true,
-		FailoverMax:                 0,
+		FailoverEnabled:              true,
+		FailoverMax:                  0,
 	}
 	candidates := []ScoredRoute{
 		{Route: storage.GatewayRoute{ID: 1}},
@@ -604,11 +628,11 @@ func TestBuildCoordinatedRoutePlanValidationIgnoresZeroTransportBudget(t *testin
 
 func TestBuildCoordinatedRoutePlanUsesIndependentResponseRetryBudget(t *testing.T) {
 	group := &storage.GatewayGroup{
-		RetryEnabled:                true,
-		RetryCount:                  3,
+		RetryEnabled:                 true,
+		RetryCount:                   3,
 		ResponseValidationRetryCount: 1,
-		FailoverEnabled:             true,
-		FailoverMax:                 0,
+		FailoverEnabled:              true,
+		FailoverMax:                  0,
 	}
 	candidates := []ScoredRoute{
 		{Route: storage.GatewayRoute{ID: 1}},
@@ -699,10 +723,10 @@ func TestValidateCoordinatedAttemptDoesNotRetryHardExcludedRoute(t *testing.T) {
 
 func TestCoordinatedPlanSchedulerPromotesSameRouteRetry(t *testing.T) {
 	group := &storage.GatewayGroup{
-		RetryEnabled:                true,
-		RetryCount:                  1,
+		RetryEnabled:                 true,
+		RetryCount:                   1,
 		ResponseValidationRetryCount: -1,
-		HedgeMaxAttempts:            3,
+		HedgeMaxAttempts:             3,
 	}
 	candidates := []ScoredRoute{
 		{Route: storage.GatewayRoute{ID: 1}},

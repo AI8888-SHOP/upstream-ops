@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -160,6 +161,8 @@ func (r *GatewayProviders) Delete(id uint) error {
 // GatewayCacheHealthAggregate is the rolling, real-upstream cache usage
 // summary for one source. Virtual cache credits are deliberately excluded.
 type GatewayCacheHealthAggregate struct {
+	GatewayGroupID      uint      `json:"gateway_group_id"`
+	RouteID             uint      `json:"route_id"`
 	SourceKind          string    `json:"source_kind"`
 	SourceID            uint      `json:"source_id"`
 	HitRate             float64   `json:"hit_rate"`
@@ -185,11 +188,64 @@ func cacheHealthSourceWhere(db *gorm.DB, sourceKind string, sourceID uint) *gorm
 	return db.Where("gateway_provider_id = 0 AND channel_id = ?", sourceID)
 }
 
+func cacheHealthGroupWhere(db *gorm.DB, groupID uint) *gorm.DB {
+	if groupID > 0 {
+		return db.Where("gateway_group_id = ?", groupID)
+	}
+	return db
+}
+
 func cacheHealthFromWhere(db *gorm.DB, from time.Time) *gorm.DB {
 	if isSQLite(db) {
 		return db.Where("CAST(strftime('%s', created_at) AS INTEGER) >= ?", from.Unix())
 	}
 	return db.Where("created_at >= ?", from)
+}
+
+// CacheHealthGroupIDs returns the gateway groups that have recent successful
+// usage for one source. It lets the legacy source-wide evaluator fan out to
+// the new group-scoped state without losing compatibility with old callers.
+func (r *GatewayUsageLogs) CacheHealthGroupIDs(sourceKind string, sourceID uint, from time.Time) ([]uint, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	if sourceID == 0 {
+		return nil, fmt.Errorf("cache health source id is required")
+	}
+	if from.IsZero() {
+		from = time.Now()
+	}
+	kind := normalizeCacheHealthSource(sourceKind)
+	query := cacheHealthFromWhere(cacheHealthSourceWhere(r.db.Model(&GatewayUsageLog{}), kind, sourceID), from).
+		Where("success = ?", true).Select("DISTINCT gateway_group_id").Order("gateway_group_id ASC")
+	var groups []uint
+	if err := query.Pluck("gateway_group_id", &groups).Error; err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+// CacheHealthRouteIDsForGroup returns the independently schedulable routes
+// represented by recent successful usage for one source inside one group.
+func (r *GatewayUsageLogs) CacheHealthRouteIDsForGroup(sourceKind string, sourceID, groupID uint, from time.Time) ([]uint, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	if sourceID == 0 {
+		return nil, fmt.Errorf("cache health source id is required")
+	}
+	if from.IsZero() {
+		from = time.Now()
+	}
+	kind := normalizeCacheHealthSource(sourceKind)
+	query := cacheHealthFromWhere(cacheHealthSourceWhere(r.db.Model(&GatewayUsageLog{}), kind, sourceID), from).
+		Where("gateway_group_id = ? AND success = ?", groupID, true).
+		Select("DISTINCT route_id").Order("route_id ASC")
+	var routeIDs []uint
+	if err := query.Pluck("route_id", &routeIDs).Error; err != nil {
+		return nil, err
+	}
+	return routeIDs, nil
 }
 
 func cacheHitRatePercent(inputTokens, cacheReadTokens, cacheCreationTokens int64) float64 {
@@ -208,6 +264,23 @@ func cacheHitRatePercent(inputTokens, cacheReadTokens, cacheCreationTokens int64
 // attempts. InputTokens is the fresh-input bucket; cache read/creation buckets
 // are mutually exclusive, so the hit rate is read/(fresh+read+creation).
 func (r *GatewayUsageLogs) CacheHealthAggregate(sourceKind string, sourceID uint, from time.Time) (*GatewayCacheHealthAggregate, error) {
+	return r.cacheHealthAggregate(sourceKind, sourceID, 0, 0, from, false, false)
+}
+
+// CacheHealthAggregateForGroup computes cache health for one source inside
+// one gateway group. This is the scheduling/display path; the legacy method
+// above intentionally keeps its all-groups behavior for provider summaries.
+func (r *GatewayUsageLogs) CacheHealthAggregateForGroup(sourceKind string, sourceID, groupID uint, from time.Time) (*GatewayCacheHealthAggregate, error) {
+	return r.cacheHealthAggregate(sourceKind, sourceID, groupID, 0, from, true, false)
+}
+
+// CacheHealthAggregateForRoute computes cache health for one concrete route.
+// RouteID is the source-group boundary used by scheduling and cooldown state.
+func (r *GatewayUsageLogs) CacheHealthAggregateForRoute(sourceKind string, sourceID, groupID, routeID uint, from time.Time) (*GatewayCacheHealthAggregate, error) {
+	return r.cacheHealthAggregate(sourceKind, sourceID, groupID, routeID, from, true, true)
+}
+
+func (r *GatewayUsageLogs) cacheHealthAggregate(sourceKind string, sourceID, groupID, routeID uint, from time.Time, exactGroup, exactRoute bool) (*GatewayCacheHealthAggregate, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("usage storage is unavailable")
 	}
@@ -224,9 +297,16 @@ func (r *GatewayUsageLogs) CacheHealthAggregate(sourceKind string, sourceID uint
 		CacheReadTokens     int64
 		CacheCreationTokens int64
 	}
-	query := cacheHealthFromWhere(
-		cacheHealthSourceWhere(r.db.Model(&GatewayUsageLog{}), kind, sourceID), from,
-	).Where("success = ?", true)
+	base := cacheHealthSourceWhere(r.db.Model(&GatewayUsageLog{}), kind, sourceID)
+	if exactGroup {
+		base = base.Where("gateway_group_id = ?", groupID)
+	} else {
+		base = cacheHealthGroupWhere(base, groupID)
+	}
+	if exactRoute {
+		base = base.Where("route_id = ?", routeID)
+	}
+	query := cacheHealthFromWhere(base, from).Where("success = ?", true)
 	var value row
 	if err := query.Select(`
 		COUNT(DISTINCT request_id) AS request_count,
@@ -238,7 +318,7 @@ func (r *GatewayUsageLogs) CacheHealthAggregate(sourceKind string, sourceID uint
 	}
 	rate := cacheHitRatePercent(value.InputTokens, value.CacheReadTokens, value.CacheCreationTokens)
 	return &GatewayCacheHealthAggregate{
-		SourceKind: kind, SourceID: sourceID, HitRate: rate,
+		GatewayGroupID: groupID, RouteID: routeID, SourceKind: kind, SourceID: sourceID, HitRate: rate,
 		RequestCount: value.RequestCount, InputTokens: value.InputTokens,
 		CacheReadTokens: value.CacheReadTokens, CacheCreationTokens: value.CacheCreationTokens,
 		WindowStart: from,
@@ -248,6 +328,16 @@ func (r *GatewayUsageLogs) CacheHealthAggregate(sourceKind string, sourceID uint
 // CacheHealthAggregates returns grouped rolling aggregates for an optional
 // source id list. An empty list means all sources of the requested kind.
 func (r *GatewayUsageLogs) CacheHealthAggregates(sourceKind string, sourceIDs []uint, from time.Time) ([]GatewayCacheHealthAggregate, error) {
+	return r.cacheHealthAggregates(sourceKind, sourceIDs, 0, from, false)
+}
+
+// CacheHealthAggregatesForGroup returns source aggregates scoped to one
+// gateway group. It is used by route/admin views that must not mix groups.
+func (r *GatewayUsageLogs) CacheHealthAggregatesForGroup(sourceKind string, sourceIDs []uint, groupID uint, from time.Time) ([]GatewayCacheHealthAggregate, error) {
+	return r.cacheHealthAggregates(sourceKind, sourceIDs, groupID, from, true)
+}
+
+func (r *GatewayUsageLogs) cacheHealthAggregates(sourceKind string, sourceIDs []uint, groupID uint, from time.Time, exactGroup bool) ([]GatewayCacheHealthAggregate, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("usage storage is unavailable")
 	}
@@ -257,33 +347,50 @@ func (r *GatewayUsageLogs) CacheHealthAggregates(sourceKind string, sourceIDs []
 	kind := normalizeCacheHealthSource(sourceKind)
 	type row struct {
 		SourceID            uint  `gorm:"column:source_id"`
+		RouteID             uint  `gorm:"column:route_id"`
 		RequestCount        int64 `gorm:"column:request_count"`
 		InputTokens         int64 `gorm:"column:input_tokens"`
 		CacheReadTokens     int64 `gorm:"column:cache_read_tokens"`
 		CacheCreationTokens int64 `gorm:"column:cache_creation_tokens"`
 	}
 	var rows []row
-	db := cacheHealthFromWhere(r.db.Model(&GatewayUsageLog{}), from).Where("success = ?", true)
+	base := r.db.Model(&GatewayUsageLog{})
+	if exactGroup {
+		base = base.Where("gateway_group_id = ?", groupID)
+	}
+	db := cacheHealthFromWhere(base, from).Where("success = ?", true)
 	if kind == GatewayRouteSourceProvider {
 		db = db.Where("gateway_provider_id > 0")
 		if len(sourceIDs) > 0 {
 			db = db.Where("gateway_provider_id IN ?", sourceIDs)
 		}
-		db = db.Select(`gateway_provider_id AS source_id,
+		selectSQL := `gateway_provider_id AS source_id,
 			COUNT(DISTINCT request_id) AS request_count,
 			COALESCE(SUM(input_tokens), 0) AS input_tokens,
 			COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens`).Group("gateway_provider_id")
+			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens`
+		groupBy := "gateway_provider_id"
+		if exactGroup {
+			selectSQL = "gateway_provider_id AS source_id, route_id AS route_id," + strings.TrimPrefix(selectSQL, "gateway_provider_id AS source_id,")
+			groupBy += ", route_id"
+		}
+		db = db.Select(selectSQL).Group(groupBy)
 	} else {
 		db = db.Where("gateway_provider_id = 0 AND channel_id > 0")
 		if len(sourceIDs) > 0 {
 			db = db.Where("channel_id IN ?", sourceIDs)
 		}
-		db = db.Select(`channel_id AS source_id,
+		selectSQL := `channel_id AS source_id,
 			COUNT(DISTINCT request_id) AS request_count,
 			COALESCE(SUM(input_tokens), 0) AS input_tokens,
 			COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens`).Group("channel_id")
+			COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens`
+		groupBy := "channel_id"
+		if exactGroup {
+			selectSQL = "channel_id AS source_id, route_id AS route_id," + strings.TrimPrefix(selectSQL, "channel_id AS source_id,")
+			groupBy += ", route_id"
+		}
+		db = db.Select(selectSQL).Group(groupBy)
 	}
 	if err := db.Scan(&rows).Error; err != nil {
 		return nil, err
@@ -292,7 +399,7 @@ func (r *GatewayUsageLogs) CacheHealthAggregates(sourceKind string, sourceIDs []
 	for _, row := range rows {
 		rate := cacheHitRatePercent(row.InputTokens, row.CacheReadTokens, row.CacheCreationTokens)
 		out = append(out, GatewayCacheHealthAggregate{
-			SourceKind: kind, SourceID: row.SourceID, HitRate: rate,
+			GatewayGroupID: groupID, RouteID: row.RouteID, SourceKind: kind, SourceID: row.SourceID, HitRate: rate,
 			RequestCount: row.RequestCount, InputTokens: row.InputTokens,
 			CacheReadTokens: row.CacheReadTokens, CacheCreationTokens: row.CacheCreationTokens,
 			WindowStart: from,
@@ -303,11 +410,33 @@ func (r *GatewayUsageLogs) CacheHealthAggregates(sourceKind string, sourceIDs []
 
 // CacheHealthStates loads persisted evaluator state for the requested sources.
 func (r *GatewayUsageLogs) CacheHealthStates(sourceKind string, sourceIDs []uint) ([]GatewayChannelCacheHealth, error) {
+	return r.cacheHealthStates(sourceKind, sourceIDs, 0, 0, false, false)
+}
+
+// CacheHealthStatesForGroup loads persisted cache health for one gateway
+// group. A zero group ID is reserved for legacy/global state.
+func (r *GatewayUsageLogs) CacheHealthStatesForGroup(sourceKind string, sourceIDs []uint, groupID uint) ([]GatewayChannelCacheHealth, error) {
+	return r.cacheHealthStates(sourceKind, sourceIDs, groupID, 0, true, false)
+}
+
+// CacheHealthStatesForRoute loads only the concrete route state. Callers that
+// need compatibility fallback can separately inspect the route_id=0 row.
+func (r *GatewayUsageLogs) CacheHealthStatesForRoute(sourceKind string, sourceID, groupID, routeID uint) ([]GatewayChannelCacheHealth, error) {
+	return r.cacheHealthStates(sourceKind, []uint{sourceID}, groupID, routeID, true, true)
+}
+
+func (r *GatewayUsageLogs) cacheHealthStates(sourceKind string, sourceIDs []uint, groupID, routeID uint, exactGroup, exactRoute bool) ([]GatewayChannelCacheHealth, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("usage storage is unavailable")
 	}
 	kind := normalizeCacheHealthSource(sourceKind)
 	db := r.db.Where("source_kind = ?", kind)
+	if exactGroup {
+		db = db.Where("gateway_group_id = ?", groupID)
+	}
+	if exactRoute {
+		db = db.Where("route_id = ?", routeID)
+	}
 	if len(sourceIDs) > 0 {
 		db = db.Where("source_id IN ?", sourceIDs)
 	}
@@ -328,7 +457,7 @@ func (r *GatewayUsageLogs) UpsertCacheHealth(state *GatewayChannelCacheHealth) e
 	}
 	state.SourceKind = normalizeCacheHealthSource(state.SourceKind)
 	return r.db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "source_kind"}, {Name: "source_id"}},
+		Columns: []clause.Column{{Name: "gateway_group_id"}, {Name: "route_id"}, {Name: "source_kind"}, {Name: "source_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"hit_rate", "request_count", "input_tokens", "cache_read_tokens",
 			"cache_creation_tokens", "window_start", "evaluated_at",
@@ -372,17 +501,35 @@ func (r *GatewayUsageLogs) ClearCacheHealthBlacklistsBelowMinimum(minimum int64)
 // ClearCacheHealthBlacklist removes the automatic pause for one upstream
 // source while retaining its rolling statistics and evaluation timestamp.
 func (r *GatewayUsageLogs) ClearCacheHealthBlacklist(sourceKind string, sourceID uint) error {
-	return r.clearCacheHealthBlacklist(sourceKind, sourceID, time.Time{})
+	return r.clearCacheHealthBlacklist(sourceKind, sourceID, 0, 0, false, time.Time{})
 }
 
 // ClearCacheHealthBlacklistWithSuppression releases one source and records a
 // grace period during which rolling low-hit-rate data cannot immediately
 // reapply the automatic blacklist.
 func (r *GatewayUsageLogs) ClearCacheHealthBlacklistWithSuppression(sourceKind string, sourceID uint, until time.Time) error {
-	return r.clearCacheHealthBlacklist(sourceKind, sourceID, until)
+	return r.clearCacheHealthBlacklist(sourceKind, sourceID, 0, 0, false, until)
 }
 
-func (r *GatewayUsageLogs) clearCacheHealthBlacklist(sourceKind string, sourceID uint, until time.Time) error {
+// ClearCacheHealthBlacklistForGroup releases one source only inside one
+// gateway group. The source-wide method remains available for provider admin.
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklistForGroup(sourceKind string, sourceID, groupID uint) error {
+	return r.clearCacheHealthBlacklist(sourceKind, sourceID, groupID, 0, false, time.Time{})
+}
+
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklistWithSuppressionForGroup(sourceKind string, sourceID, groupID uint, until time.Time) error {
+	return r.clearCacheHealthBlacklist(sourceKind, sourceID, groupID, 0, false, until)
+}
+
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklistForRoute(sourceKind string, sourceID, groupID, routeID uint) error {
+	return r.clearCacheHealthBlacklist(sourceKind, sourceID, groupID, routeID, true, time.Time{})
+}
+
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklistWithSuppressionForRoute(sourceKind string, sourceID, groupID, routeID uint, until time.Time) error {
+	return r.clearCacheHealthBlacklist(sourceKind, sourceID, groupID, routeID, true, until)
+}
+
+func (r *GatewayUsageLogs) clearCacheHealthBlacklist(sourceKind string, sourceID, groupID, routeID uint, exactRoute bool, until time.Time) error {
 	if r == nil || r.db == nil {
 		return nil
 	}
@@ -394,12 +541,19 @@ func (r *GatewayUsageLogs) clearCacheHealthBlacklist(sourceKind string, sourceID
 	if !until.IsZero() {
 		manualClearUntil = until
 	}
-	return r.db.Exec(
-		`UPDATE gateway_channel_cache_health
+	query := `UPDATE gateway_channel_cache_health
 		 SET blacklisted_until = NULL, blacklist_reason = '', manual_clear_until = ?, updated_at = ?
-		 WHERE source_kind = ? AND source_id = ?`,
-		manualClearUntil, time.Now(), kind, sourceID,
-	).Error
+		 WHERE source_kind = ? AND source_id = ?`
+	args := []any{manualClearUntil, time.Now(), kind, sourceID}
+	if groupID > 0 {
+		query += " AND gateway_group_id = ?"
+		args = append(args, groupID)
+	}
+	if exactRoute {
+		query += " AND route_id = ?"
+		args = append(args, routeID)
+	}
+	return r.db.Exec(query, args...).Error
 }
 
 // GatewayGroups 网关组仓储。
@@ -517,6 +671,9 @@ func (r *GatewayGroups) Delete(id uint) error {
 			if err := tx.Where("route_id IN ?", routeIDs).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
 				return err
 			}
+		}
+		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayChannelCacheHealth{}).Error; err != nil {
+			return err
 		}
 		if err := tx.Where("gateway_group_id = ?", id).Delete(&GatewayRoute{}).Error; err != nil {
 			return err
@@ -1449,9 +1606,9 @@ func (r *GatewayRoutes) loadModelCooldowns(routes []GatewayRoute) error {
 	return nil
 }
 
-// loadCacheHealth hydrates the source-level automatic blacklist into the
-// request-local route snapshot. The route cache keeps this for its short TTL;
-// evaluator writes call InvalidateCacheHealthSource immediately afterwards.
+// loadCacheHealth hydrates route-scoped automatic blacklist state into the
+// request-local snapshot. Legacy route_id=0 rows are used only when a concrete
+// route has not yet produced its own evaluator state.
 func (r *GatewayRoutes) loadCacheHealth(routes []GatewayRoute) error {
 	if r == nil || r.db == nil || len(routes) == 0 {
 		return nil
@@ -1473,13 +1630,20 @@ func (r *GatewayRoutes) loadCacheHealth(routes []GatewayRoute) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	groupID := routes[0].GatewayGroupID
 	var states []GatewayChannelCacheHealth
-	if err := r.db.Where("source_id IN ?", ids).Find(&states).Error; err != nil {
+	if err := r.db.Where("gateway_group_id = ? AND source_id IN ?", groupID, ids).Find(&states).Error; err != nil {
 		return err
 	}
-	bySource := make(map[string]GatewayChannelCacheHealth, len(states))
+	byRoute := make(map[string]GatewayChannelCacheHealth, len(states))
+	legacyBySource := make(map[string]GatewayChannelCacheHealth, len(states))
 	for _, state := range states {
-		bySource[fmt.Sprintf("%s:%d", normalizeCacheHealthSource(state.SourceKind), state.SourceID)] = state
+		sourceKey := fmt.Sprintf("%s:%d", normalizeCacheHealthSource(state.SourceKind), state.SourceID)
+		if state.RouteID == 0 {
+			legacyBySource[sourceKey] = state
+			continue
+		}
+		byRoute[fmt.Sprintf("%s:%d", sourceKey, state.RouteID)] = state
 	}
 	for i := range routes {
 		kind := routes[i].NormalizeSourceKind()
@@ -1487,7 +1651,11 @@ func (r *GatewayRoutes) loadCacheHealth(routes []GatewayRoute) error {
 		if kind != GatewayRouteSourceProvider {
 			id = routes[i].SourceChannelID
 		}
-		state, ok := bySource[fmt.Sprintf("%s:%d", kind, id)]
+		sourceKey := fmt.Sprintf("%s:%d", kind, id)
+		state, ok := byRoute[fmt.Sprintf("%s:%d", sourceKey, routes[i].ID)]
+		if !ok {
+			state, ok = legacyBySource[sourceKey]
+		}
 		if !ok {
 			continue
 		}
@@ -1502,14 +1670,34 @@ func (r *GatewayRoutes) loadCacheHealth(routes []GatewayRoute) error {
 }
 
 // InvalidateCacheHealthSource invalidates every cached route referencing a
-// source after its health state changes.
+// source after its health state changes. It remains source-wide for legacy
+// callers; new request-driven evaluation uses the group-scoped variant below.
 func (r *GatewayRoutes) InvalidateCacheHealthSource(sourceKind string, sourceID uint) {
+	r.InvalidateCacheHealthRoute(sourceKind, sourceID, 0, 0)
+}
+
+// InvalidateCacheHealthSourceForGroup invalidates only route snapshots in one
+// gateway group after that group's cache health state changes.
+func (r *GatewayRoutes) InvalidateCacheHealthSourceForGroup(sourceKind string, sourceID, groupID uint) {
+	r.InvalidateCacheHealthRoute(sourceKind, sourceID, groupID, 0)
+}
+
+// InvalidateCacheHealthRoute invalidates route snapshots affected by one
+// route-scoped evaluator write. Route caches are stored per gateway group, so
+// the matching group entry is discarded atomically.
+func (r *GatewayRoutes) InvalidateCacheHealthRoute(sourceKind string, sourceID, groupID, routeID uint) {
 	if r == nil || r.readCaches == nil || sourceID == 0 {
 		return
 	}
 	kind := normalizeCacheHealthSource(sourceKind)
 	r.readCaches.gatewayRoutes.invalidateWhere(func(routes []GatewayRoute) bool {
+		if groupID > 0 && len(routes) > 0 && routes[0].GatewayGroupID != groupID {
+			return false
+		}
 		for _, route := range routes {
+			if routeID > 0 && route.ID != routeID {
+				continue
+			}
 			if route.NormalizeSourceKind() != kind {
 				continue
 			}
@@ -1605,6 +1793,9 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 					if err := tx.Where("route_id = ?", list[i].ID).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
 						return err
 					}
+					if err := tx.Where("route_id = ?", list[i].ID).Delete(&GatewayChannelCacheHealth{}).Error; err != nil {
+						return err
+					}
 				}
 				if err := tx.Save(&list[i]).Error; err != nil {
 					return err
@@ -1622,6 +1813,9 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 				continue
 			}
 			if err := tx.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("route_id = ?", id).Delete(&GatewayChannelCacheHealth{}).Error; err != nil {
 				return err
 			}
 			if err := tx.Delete(&GatewayRoute{}, id).Error; err != nil {
@@ -2479,6 +2673,9 @@ type gatewayStatsQueryKey struct {
 	gatewayKeyID     uint
 	channelID        uint
 	providerID       uint
+	sourceGroupID    int64
+	sourceGroupIDSet bool
+	sourceGroupName  string
 	includeEndpoints bool
 	model            string
 	requestID        string
@@ -2932,6 +3129,11 @@ type GatewayUsageQuery struct {
 	// GatewayProviderID filters direct-provider usage independently from
 	// ChannelID, which is reserved for monitored channels.
 	GatewayProviderID uint
+	// SourceGroupID/Name identify the upstream channel's source group. The
+	// optional ID is authoritative for new snapshots; name keeps old logs
+	// searchable when they predate the ID snapshot.
+	SourceGroupID   *int64
+	SourceGroupName string
 	// IncludeSum and IncludeEndpoints keep optional dashboard aggregates out of
 	// latency-sensitive list/stat calls. The HTTP API enables both by default
 	// for backwards compatibility; the bundled UI explicitly opts out.
@@ -3020,6 +3222,64 @@ type GatewayUsageModelOption struct {
 	Count int64  `json:"count"`
 }
 
+// GatewayUsageTimelinePoint is a compact time bucket used by the usage chart.
+// Bucket is always returned in UTC so clients in different time zones render
+// the same data without parsing database-specific timestamp strings.
+type GatewayUsageTimelinePoint struct {
+	Bucket   time.Time `json:"bucket"`
+	Requests int64     `json:"requests"`
+	Tokens   int64     `json:"tokens"`
+	Cost     float64   `json:"cost"`
+	Success  int64     `json:"success"`
+	Errors   int64     `json:"errors"`
+}
+
+// GatewayUsageSourceOption identifies a monitored channel or direct provider
+// which appears in the current usage filter scope.
+type GatewayUsageSourceOption struct {
+	SourceKind string `json:"source_kind"`
+	SourceID   uint   `json:"source_id"`
+	Name       string `json:"name"`
+	Count      int64  `json:"count"`
+}
+
+// GatewayUsageSourceGroupOption identifies one upstream channel source group.
+// GroupID is nullable for legacy rows which only stored the display name.
+type GatewayUsageSourceGroupOption struct {
+	SourceKind  string `json:"source_kind"`
+	SourceID    uint   `json:"source_id"`
+	GroupID     *int64 `json:"group_id,omitempty"`
+	GroupName   string `json:"group_name"`
+	ChannelName string `json:"channel_name,omitempty"`
+	Count       int64  `json:"count"`
+}
+
+type GatewayUsageSourceOptions struct {
+	Sources      []GatewayUsageSourceOption      `json:"sources"`
+	SourceGroups []GatewayUsageSourceGroupOption `json:"source_groups"`
+}
+
+// GatewayGroupActiveSource is one currently schedulable source group in a
+// gateway group, enriched with recent usage counters.
+type GatewayGroupActiveSource struct {
+	SourceKind            string     `json:"source_kind"`
+	SourceID              uint       `json:"source_id"`
+	SourceGroupID         *int64     `json:"source_group_id,omitempty"`
+	SourceGroupName       string     `json:"source_group_name,omitempty"`
+	ChannelName           string     `json:"channel_name,omitempty"`
+	RequestCount          int64      `json:"request_count"`
+	Tokens                int64      `json:"tokens"`
+	LastUsedAt            *time.Time `json:"last_used_at,omitempty"`
+	AccountRateMultiplier float64    `json:"account_rate_multiplier"`
+	Active                bool       `json:"active"`
+}
+
+type GatewayGroupUsageOverview struct {
+	GroupID            uint                       `json:"group_id"`
+	ActiveSourceGroups []GatewayGroupActiveSource `json:"active_source_groups"`
+	Totals             *GatewayUsageStats         `json:"totals"`
+}
+
 type GatewayEndpointStat struct {
 	Endpoint string `json:"endpoint"`
 	Requests int64  `json:"requests"`
@@ -3038,6 +3298,12 @@ func (r *GatewayUsageLogs) applyFilters(db *gorm.DB, q GatewayUsageQuery) *gorm.
 	}
 	if q.GatewayProviderID > 0 {
 		db = db.Where("gateway_provider_id = ?", q.GatewayProviderID)
+	}
+	if q.SourceGroupID != nil && *q.SourceGroupID > 0 {
+		db = db.Where("source_group_id = ?", *q.SourceGroupID)
+	}
+	if name := strings.TrimSpace(q.SourceGroupName); name != "" {
+		db = db.Where("source_group_name = ?", name)
 	}
 	if m := strings.TrimSpace(q.Model); m != "" {
 		// 下拉精确匹配请求模型 / 上游模型（兼容历史模糊：含 * 或 % 时走 LIKE）
@@ -3571,10 +3837,15 @@ func gatewayStatsCacheKey(q GatewayUsageQuery) gatewayStatsQueryKey {
 		gatewayKeyID:     q.GatewayKeyID,
 		channelID:        q.ChannelID,
 		providerID:       q.GatewayProviderID,
+		sourceGroupName:  strings.TrimSpace(q.SourceGroupName),
 		includeEndpoints: q.IncludeEndpoints,
 		model:            strings.TrimSpace(q.Model),
 		requestID:        strings.TrimSpace(q.RequestID),
 		resultMode:       strings.ToLower(strings.TrimSpace(q.ResultMode)),
+	}
+	if q.SourceGroupID != nil {
+		key.sourceGroupIDSet = true
+		key.sourceGroupID = *q.SourceGroupID
 	}
 	if q.From != nil {
 		key.fromSet = true
@@ -3637,6 +3908,356 @@ func (r *GatewayUsageLogs) ListModels(q GatewayUsageQuery) ([]GatewayUsageModelO
 		out = append(out, GatewayUsageModelOption{Model: m, Count: row.Count})
 	}
 	return out, nil
+}
+
+// ListSourceOptions returns upstream channels and source groups visible under
+// the supplied base filters. Source selectors themselves are ignored so a
+// selected option does not disappear from its own dropdown.
+func (r *GatewayUsageLogs) ListSourceOptions(q GatewayUsageQuery) (*GatewayUsageSourceOptions, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	q.ChannelID = 0
+	q.GatewayProviderID = 0
+	q.SourceGroupID = nil
+	q.SourceGroupName = ""
+	q.Model = ""
+	q.RequestID = ""
+	q.ResultMode = ""
+	q.SuccessOnly = nil
+	q.RequestType = nil
+	base := r.applyFilters(r.db.Model(&GatewayUsageLog{}), q)
+	type countRow struct {
+		ID    uint
+		Count int64
+	}
+	var channels, providers []countRow
+	if err := base.Session(&gorm.Session{}).
+		Select("channel_id as id, COUNT(DISTINCT request_id) as count").
+		Where("channel_id > 0").Group("channel_id").Order("count DESC").Scan(&channels).Error; err != nil {
+		return nil, err
+	}
+	if err := base.Session(&gorm.Session{}).
+		Select("gateway_provider_id as id, COUNT(DISTINCT request_id) as count").
+		Where("gateway_provider_id > 0").Group("gateway_provider_id").Order("count DESC").Scan(&providers).Error; err != nil {
+		return nil, err
+	}
+	channelNames := map[uint]string{}
+	if len(channels) > 0 {
+		ids := make([]uint, 0, len(channels))
+		for _, row := range channels {
+			ids = append(ids, row.ID)
+		}
+		var items []Channel
+		if err := r.db.Select("id", "name").Where("id IN ?", ids).Find(&items).Error; err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			channelNames[item.ID] = item.Name
+		}
+	}
+	providerNames := map[uint]string{}
+	if len(providers) > 0 {
+		ids := make([]uint, 0, len(providers))
+		for _, row := range providers {
+			ids = append(ids, row.ID)
+		}
+		var items []GatewayProvider
+		if err := r.db.Select("id", "name").Where("id IN ?", ids).Find(&items).Error; err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			providerNames[item.ID] = item.Name
+		}
+	}
+	out := &GatewayUsageSourceOptions{
+		Sources:      make([]GatewayUsageSourceOption, 0, len(channels)+len(providers)),
+		SourceGroups: []GatewayUsageSourceGroupOption{},
+	}
+	for _, row := range channels {
+		name := channelNames[row.ID]
+		if strings.TrimSpace(name) == "" {
+			name = fmt.Sprintf("渠道 #%d", row.ID)
+		}
+		out.Sources = append(out.Sources, GatewayUsageSourceOption{SourceKind: GatewayRouteSourceMonitor, SourceID: row.ID, Name: name, Count: row.Count})
+	}
+	for _, row := range providers {
+		name := providerNames[row.ID]
+		if strings.TrimSpace(name) == "" {
+			name = fmt.Sprintf("直连 #%d", row.ID)
+		}
+		out.Sources = append(out.Sources, GatewayUsageSourceOption{SourceKind: GatewayRouteSourceProvider, SourceID: row.ID, Name: name, Count: row.Count})
+	}
+
+	type groupRow struct {
+		ChannelID       uint   `gorm:"column:channel_id"`
+		ProviderID      uint   `gorm:"column:gateway_provider_id"`
+		GroupID         *int64 `gorm:"column:source_group_id"`
+		LegacyGroupName string `gorm:"column:legacy_group_name"`
+		Count           int64  `gorm:"column:count"`
+		LatestID        uint   `gorm:"column:latest_id"`
+	}
+	var groups []groupRow
+	// A stable source_group_id identifies the same upstream group across display
+	// name changes. Legacy rows without an ID still use their snapshotted name.
+	legacyNameExpr := "CASE WHEN source_group_id IS NOT NULL AND source_group_id > 0 THEN '' ELSE source_group_name END"
+	if err := base.Session(&gorm.Session{}).
+		Select(fmt.Sprintf("channel_id, gateway_provider_id, source_group_id, %s as legacy_group_name, COUNT(DISTINCT request_id) as count, MAX(id) as latest_id", legacyNameExpr)).
+		Where("(source_group_id IS NOT NULL AND source_group_id > 0) OR TRIM(source_group_name) <> ''").
+		Group("channel_id, gateway_provider_id, source_group_id, " + legacyNameExpr).
+		Order("count DESC, latest_id DESC").Limit(1000).Scan(&groups).Error; err != nil {
+		return nil, err
+	}
+	latestIDs := make([]uint, 0, len(groups))
+	for _, row := range groups {
+		if row.GroupID != nil && *row.GroupID > 0 && row.LatestID > 0 {
+			latestIDs = append(latestIDs, row.LatestID)
+		}
+	}
+	latestGroupNames := map[uint]string{}
+	if len(latestIDs) > 0 {
+		var snapshots []GatewayUsageLog
+		if err := r.db.Select("id", "source_group_name").Where("id IN ?", latestIDs).Find(&snapshots).Error; err != nil {
+			return nil, err
+		}
+		for _, snapshot := range snapshots {
+			latestGroupNames[snapshot.ID] = strings.TrimSpace(snapshot.SourceGroupName)
+		}
+	}
+	for _, row := range groups {
+		kind := GatewayRouteSourceMonitor
+		sourceID := row.ChannelID
+		name := channelNames[row.ChannelID]
+		if row.ProviderID > 0 {
+			kind, sourceID, name = GatewayRouteSourceProvider, row.ProviderID, providerNames[row.ProviderID]
+		}
+		if name == "" {
+			if kind == GatewayRouteSourceProvider {
+				name = fmt.Sprintf("直连 #%d", sourceID)
+			} else {
+				name = fmt.Sprintf("渠道 #%d", sourceID)
+			}
+		}
+		groupID := row.GroupID
+		if groupID != nil && *groupID <= 0 {
+			groupID = nil
+		}
+		groupName := strings.TrimSpace(row.LegacyGroupName)
+		if groupID != nil {
+			groupName = latestGroupNames[row.LatestID]
+		}
+		if groupName == "" && groupID != nil {
+			groupName = fmt.Sprintf("源分组 #%d", *groupID)
+		}
+		if groupName == "" {
+			groupName = "未命名源分组"
+		}
+		out.SourceGroups = append(out.SourceGroups, GatewayUsageSourceGroupOption{
+			SourceKind: kind, SourceID: sourceID, GroupID: groupID,
+			GroupName: groupName, ChannelName: name, Count: row.Count,
+		})
+	}
+	return out, nil
+}
+
+// Timeline aggregates the same filtered usage rows used by the table/stats.
+// The bucket size is selected from the requested time window and capped to a
+// manageable number of points for the admin dashboard.
+func (r *GatewayUsageLogs) Timeline(q GatewayUsageQuery) ([]GatewayUsageTimelinePoint, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	now := time.Now()
+	if q.To == nil {
+		q.To = &now
+	}
+	if q.From == nil {
+		from := now.Add(-24 * time.Hour)
+		q.From = &from
+	}
+	if q.To.Before(*q.From) {
+		q.From, q.To = q.To, q.From
+	}
+	bucketSeconds := usageTimelineBucketSeconds(q.To.Sub(*q.From))
+	db := r.applyFilters(r.db.Model(&GatewayUsageLog{}), q)
+	expr := usageTimelineBucketExpression(r.db, bucketSeconds)
+	type row struct {
+		Bucket   int64
+		Requests int64
+		Tokens   int64
+		Cost     float64
+		Success  int64
+	}
+	var rows []row
+	selectSQL := fmt.Sprintf("%s as bucket, COUNT(DISTINCT request_id) as requests, COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) as tokens, COALESCE(SUM(actual_cost),0) as cost, COUNT(DISTINCT CASE WHEN winner THEN request_id END) as success", expr)
+	if err := db.Session(&gorm.Session{}).Select(selectSQL).Group("bucket").Order("bucket ASC").Limit(400).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]GatewayUsageTimelinePoint, 0, len(rows))
+	for _, item := range rows {
+		if item.Bucket <= 0 {
+			continue
+		}
+		success := item.Success
+		if success > item.Requests {
+			success = item.Requests
+		}
+		out = append(out, GatewayUsageTimelinePoint{
+			Bucket: time.Unix(item.Bucket, 0).UTC(), Requests: item.Requests,
+			Tokens: item.Tokens, Cost: item.Cost, Success: success,
+			Errors: item.Requests - success,
+		})
+	}
+	return out, nil
+}
+
+func usageTimelineBucketSeconds(d time.Duration) int64 {
+	switch {
+	case d <= 6*time.Hour:
+		return 5 * 60
+	case d <= 48*time.Hour:
+		return 60 * 60
+	case d <= 14*24*time.Hour:
+		return 6 * 60 * 60
+	case d <= 120*24*time.Hour:
+		return 24 * 60 * 60
+	default:
+		return 7 * 24 * 60 * 60
+	}
+}
+
+func usageTimelineBucketExpression(db *gorm.DB, seconds int64) string {
+	if seconds < 1 {
+		seconds = 3600
+	}
+	s := fmt.Sprintf("%d", seconds)
+	switch strings.ToLower(db.Dialector.Name()) {
+	case "mysql":
+		return fmt.Sprintf("CAST(FLOOR(UNIX_TIMESTAMP(created_at) / %s) * %s AS SIGNED)", s, s)
+	case "postgres":
+		return fmt.Sprintf("CAST(FLOOR(EXTRACT(EPOCH FROM created_at) / %s) * %s AS BIGINT)", s, s)
+	default: // sqlite
+		return fmt.Sprintf("CAST(CAST(strftime('%%s', created_at) AS INTEGER) / %s AS INTEGER) * %s", s, s)
+	}
+}
+
+func usageCreatedAtUnixExpression(db *gorm.DB) string {
+	switch strings.ToLower(db.Dialector.Name()) {
+	case "mysql":
+		return "CAST(UNIX_TIMESTAMP(created_at) AS SIGNED)"
+	case "postgres":
+		return "CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT)"
+	default:
+		return "CAST(strftime('%s', created_at) AS INTEGER)"
+	}
+}
+
+// GroupOverview combines currently schedulable routes with the last 24 hours
+// of usage. Routes which have been removed or disabled are intentionally not
+// reported as active even if historical usage rows still exist.
+func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*GatewayGroupUsageOverview, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("usage storage is unavailable")
+	}
+	if groupID == 0 {
+		return nil, fmt.Errorf("gateway group id is required")
+	}
+	type sourceAggregate struct {
+		RequestCount int64
+		Tokens       int64
+		Last         *time.Time
+	}
+	aggs := map[string]sourceAggregate{}
+	keyFor := func(kind string, sourceID uint, groupID *int64, groupName string) string {
+		// IDs survive a source-group rename; only legacy snapshots without an ID
+		// fall back to the display name.
+		if groupID != nil && *groupID > 0 {
+			return fmt.Sprintf("%s:%d:id:%d", kind, sourceID, *groupID)
+		}
+		return fmt.Sprintf("%s:%d:name:%s", kind, sourceID, strings.TrimSpace(groupName))
+	}
+	active := map[string]GatewayGroupActiveSource{}
+	now := time.Now()
+	for _, route := range routes {
+		kind := route.NormalizeSourceKind()
+		sourceID := route.SourceChannelID
+		if kind == GatewayRouteSourceProvider {
+			sourceID = route.GatewayProviderID
+		}
+		if sourceID == 0 || !route.Enabled || route.RateLimitAutoDisabled {
+			continue
+		}
+		if route.TempUnschedulableUntil != nil && route.TempUnschedulableUntil.After(now) {
+			continue
+		}
+		if route.CacheHealthBlacklistedUntil != nil && route.CacheHealthBlacklistedUntil.After(now) {
+			continue
+		}
+		name := strings.TrimSpace(route.SourceGroupName)
+		key := keyFor(kind, sourceID, route.SourceGroupID, name)
+		if _, ok := active[key]; !ok {
+			active[key] = GatewayGroupActiveSource{SourceKind: kind, SourceID: sourceID, SourceGroupID: route.SourceGroupID, SourceGroupName: name, AccountRateMultiplier: route.BillingRateMultiplier, Active: true}
+		}
+	}
+	from := now.Add(-24 * time.Hour)
+	type overviewRow struct {
+		ChannelID    uint   `gorm:"column:channel_id"`
+		ProviderID   uint   `gorm:"column:gateway_provider_id"`
+		GroupID      *int64 `gorm:"column:source_group_id"`
+		GroupName    string `gorm:"column:source_group_name"`
+		RequestCount int64  `gorm:"column:request_count"`
+		Tokens       int64  `gorm:"column:tokens"`
+		LastUsedUnix int64  `gorm:"column:last_used_unix"`
+	}
+	var rows []overviewRow
+	lastUsedExpr := usageCreatedAtUnixExpression(r.db)
+	legacyGroupNameExpr := "CASE WHEN source_group_id IS NOT NULL AND source_group_id > 0 THEN '' ELSE source_group_name END"
+	if err := r.applyFilters(r.db.Model(&GatewayUsageLog{}), GatewayUsageQuery{GatewayGroupID: groupID, From: &from}).
+		Select(fmt.Sprintf("channel_id, gateway_provider_id, source_group_id, %s as source_group_name, COUNT(DISTINCT request_id) as request_count, COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) as tokens, MAX(%s) as last_used_unix", legacyGroupNameExpr, lastUsedExpr)).
+		Group("channel_id, gateway_provider_id, source_group_id, " + legacyGroupNameExpr).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		kind := GatewayRouteSourceMonitor
+		sourceID := row.ChannelID
+		if row.ProviderID > 0 {
+			kind, sourceID = GatewayRouteSourceProvider, row.ProviderID
+		}
+		if sourceID == 0 {
+			continue
+		}
+		key := keyFor(kind, sourceID, row.GroupID, row.GroupName)
+		var last *time.Time
+		if row.LastUsedUnix > 0 {
+			t := time.Unix(row.LastUsedUnix, 0).UTC()
+			last = &t
+		}
+		aggs[key] = sourceAggregate{RequestCount: row.RequestCount, Tokens: row.Tokens, Last: last}
+	}
+	items := make([]GatewayGroupActiveSource, 0, len(active))
+	for key, item := range active {
+		if agg, ok := aggs[key]; ok {
+			item.RequestCount = agg.RequestCount
+			item.Tokens = agg.Tokens
+			item.LastUsedAt = agg.Last
+		}
+		items = append(items, item)
+	}
+	// Stable order follows source kind/id/group name, making refreshes easy to scan.
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].SourceKind != items[j].SourceKind {
+			return items[i].SourceKind < items[j].SourceKind
+		}
+		if items[i].SourceID != items[j].SourceID {
+			return items[i].SourceID < items[j].SourceID
+		}
+		return items[i].SourceGroupName < items[j].SourceGroupName
+	})
+	stats, err := r.Stats(GatewayUsageQuery{GatewayGroupID: groupID, From: &from, IncludeEndpoints: false})
+	if err != nil {
+		return nil, err
+	}
+	return &GatewayGroupUsageOverview{GroupID: groupID, ActiveSourceGroups: items, Totals: stats}, nil
 }
 
 // performanceRPMAndTPM 近 5 分钟平均：RPM = 请求数/5，TPM = (input+output)/5。
