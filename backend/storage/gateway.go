@@ -1603,6 +1603,41 @@ func (r *GatewayRoutes) loadModelCooldowns(routes []GatewayRoute) error {
 			routes[i].ModelCooldowns = models
 		}
 	}
+
+	// Shared model cooldowns are projected into every route that uses the same
+	// actual upstream credential. They intentionally overwrite a same-model
+	// legacy row: the shared row is the canonical lease/state after migration.
+	scopes := make([]string, 0, len(routes))
+	routesByScope := make(map[string][]int, len(routes))
+	for i := range routes {
+		scope := GatewaySharedModelCooldownScope(&routes[i])
+		if scope == "" {
+			continue
+		}
+		if _, exists := routesByScope[scope]; !exists {
+			scopes = append(scopes, scope)
+		}
+		routesByScope[scope] = append(routesByScope[scope], i)
+	}
+	if len(scopes) == 0 {
+		return nil
+	}
+	var shared []GatewaySharedModelCooldown
+	if err := r.db.Where("scope_key IN ?", scopes).Find(&shared).Error; err != nil {
+		return err
+	}
+	for _, cooldown := range shared {
+		model := NormalizeGatewayModel(cooldown.Model)
+		if model == "" {
+			continue
+		}
+		for _, i := range routesByScope[cooldown.ScopeKey] {
+			if routes[i].ModelCooldowns == nil {
+				routes[i].ModelCooldowns = make(map[string]GatewayRouteModelCooldown)
+			}
+			routes[i].ModelCooldowns[model] = sharedCooldownAsRouteCooldown(cooldown, routes[i].ID)
+		}
+	}
 	return nil
 }
 
@@ -1969,6 +2004,9 @@ func (r *GatewayRoutes) UpdateSourceKey(id uint, keyID int64, keyName, keyCipher
 		"source_api_key_cipher": keyCipher,
 	})
 	if result.Error == nil && result.RowsAffected > 0 {
+		if err := r.promoteRouteLocalModelCooldownsToShared(id); err != nil {
+			return err
+		}
 		r.readCaches.invalidateGatewayRoute(id)
 	}
 	return result.Error
@@ -2031,6 +2069,9 @@ func (r *GatewayRoutes) setModelTempUnschedulable(id uint, model string, until t
 	model = NormalizeGatewayModel(model)
 	if id == 0 || model == "" {
 		return nil
+	}
+	if handled, err := r.setSharedModelTempUnschedulable(id, model, until, reason, failedAt, requestID, probeEnabled, inboundProtocol); handled {
+		return err
 	}
 	if failedAt.IsZero() {
 		failedAt = time.Now()
@@ -2112,6 +2153,9 @@ func (r *GatewayRoutes) ConfigureModelCooldownProbes(enabled bool, now time.Time
 	}
 	if now.IsZero() {
 		now = time.Now()
+	}
+	if err := r.configureSharedModelCooldownProbes(enabled, now); err != nil {
+		return err
 	}
 	var rows []GatewayRouteModelCooldown
 	if err := r.db.Where(
@@ -2195,20 +2239,27 @@ func (r *GatewayRoutes) ClaimDueModelCooldownProbes(now time.Time, limit int, le
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
+	claimed, err := r.claimDueSharedModelCooldownProbes(now, limit, lease)
+	if err != nil || len(claimed) >= limit {
+		return claimed, err
+	}
+	remaining := limit - len(claimed)
 	// Read a small cushion because some rows may be claimed by another worker
 	// between SELECT and the conditional UPDATE below.
 	var candidates []GatewayRouteModelCooldown
 	probeDueBefore := now.Add(10 * time.Second)
-	err := r.db.Where("temp_unschedulable_until IS NOT NULL").
+	err = r.db.Where("temp_unschedulable_until IS NOT NULL").
 		Where("(next_probe_at <= ? OR (next_probe_at IS NULL AND temp_unschedulable_until <= ?))", now, probeDueBefore).
 		Where("(probe_status IS NULL OR probe_status <> ?)", GatewayModelProbeStatusManual).
 		Where("(probe_status IS NULL OR probe_status <> ? OR probe_lease_until IS NULL OR probe_lease_until <= ?)", GatewayModelProbeStatusProbing, now).
 		Order("next_probe_at ASC, updated_at ASC, id ASC").
-		Limit(limit * 4).Find(&candidates).Error
+		Limit(remaining * 4).Find(&candidates).Error
 	if err != nil {
 		return nil, err
 	}
-	claimed := make([]GatewayRouteModelCooldown, 0, limit)
+	if claimed == nil {
+		claimed = make([]GatewayRouteModelCooldown, 0, limit)
+	}
 	for _, candidate := range candidates {
 		if len(claimed) >= limit {
 			break
@@ -2266,6 +2317,9 @@ func (r *GatewayRoutes) ClaimModelCooldownProbe(id uint, model string, now time.
 	if r == nil || r.db == nil || id == 0 || model == "" {
 		return nil, nil
 	}
+	if claim, handled, err := r.claimSharedModelCooldownProbe(id, model, now, lease); handled {
+		return claim, err
+	}
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -2314,6 +2368,9 @@ func (r *GatewayRoutes) MarkModelProbeSuccess(claim GatewayRouteModelCooldown, n
 	if r == nil || r.db == nil || claim.ID == 0 {
 		return false, nil
 	}
+	if handled, updated, err := r.markSharedModelProbeSuccess(claim, now, statusCode); handled {
+		return updated, err
+	}
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -2352,6 +2409,9 @@ func (r *GatewayRoutes) MarkModelProbeSuccess(claim GatewayRouteModelCooldown, n
 func (r *GatewayRoutes) MarkModelProbeFailure(claim GatewayRouteModelCooldown, now, next time.Time, statusCode int, message string, permanent bool) (bool, error) {
 	if r == nil || r.db == nil || claim.ID == 0 {
 		return false, nil
+	}
+	if handled, updated, err := r.markSharedModelProbeFailure(claim, now, next, statusCode, message, permanent); handled {
+		return updated, err
 	}
 	if now.IsZero() {
 		now = time.Now()
@@ -2400,6 +2460,9 @@ func (r *GatewayRoutes) MarkManualModelProbeFailure(claim GatewayRouteModelCoold
 	if r == nil || r.db == nil || claim.ID == 0 {
 		return false, nil
 	}
+	if handled, updated, err := r.markSharedManualModelProbeFailure(claim, now, statusCode, message); handled {
+		return updated, err
+	}
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -2437,6 +2500,9 @@ func (r *GatewayRoutes) ClearModelTempUnschedulable(id uint, model string) error
 	if id == 0 || model == "" {
 		return nil
 	}
+	if handled, err := r.clearSharedModelTempUnschedulable(id, model, false); handled {
+		return err
+	}
 	result := r.db.Exec(
 		`UPDATE gateway_route_model_cooldowns
 		 SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '',
@@ -2461,6 +2527,9 @@ func (r *GatewayRoutes) ClearModelTempUnschedulableUntil(id uint, model string) 
 	model = NormalizeGatewayModel(model)
 	if id == 0 || model == "" {
 		return nil
+	}
+	if handled, err := r.clearSharedModelTempUnschedulable(id, model, true); handled {
+		return err
 	}
 	result := r.db.Exec(
 		`UPDATE gateway_route_model_cooldowns
@@ -2490,6 +2559,9 @@ func (r *GatewayRoutes) ClearModelTempUnschedulableUntilIfMatch(
 	model = NormalizeGatewayModel(model)
 	if id == 0 || model == "" || until.IsZero() {
 		return false, nil
+	}
+	if handled, cleared, err := r.clearSharedModelTempUnschedulableUntilIfMatch(id, model, until, failedAt, requestID); handled {
+		return cleared, err
 	}
 	query := `UPDATE gateway_route_model_cooldowns
 		SET temp_unschedulable_until = NULL, next_probe_at = NULL,
@@ -2524,6 +2596,9 @@ func (r *GatewayRoutes) NoteSuccessForModelPauseError(
 	model = NormalizeGatewayModel(model)
 	if id == 0 || model == "" {
 		return nil
+	}
+	if handled, err := r.noteSharedSuccessForModelPauseError(id, model, failedAt, requestID); handled {
+		return err
 	}
 	requestID = strings.TrimSpace(requestID)
 	generationSQL := ` AND temp_unschedulable_request_id = ?`
@@ -2577,6 +2652,9 @@ func (r *GatewayRoutes) NoteSuccessForModelPauseError(
 
 // ClearTempUnschedulable 手动清除暂停时间与错误信息。
 func (r *GatewayRoutes) ClearTempUnschedulable(id uint) error {
+	if err := r.clearSharedCooldownsForRoute(id, true); err != nil {
+		return err
+	}
 	// 用 Exec 强制写 NULL；GORM Updates(map) 对 nil 在部分版本会跳过
 	if err := r.db.Exec(
 		`UPDATE gateway_routes SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '', temp_unschedulable_at = NULL, temp_unschedulable_request_id = '', recover_success_streak = 0, updated_at = ? WHERE id = ?`,
@@ -2591,6 +2669,9 @@ func (r *GatewayRoutes) ClearTempUnschedulable(id uint) error {
 
 // ClearTempUnschedulableUntil 仅结束临时暂停（恢复调度），保留 reason / request_id / at 供排查。
 func (r *GatewayRoutes) ClearTempUnschedulableUntil(id uint) error {
+	if err := r.clearSharedCooldownsForRoute(id, false); err != nil {
+		return err
+	}
 	if err := r.db.Exec(
 		`UPDATE gateway_routes SET temp_unschedulable_until = NULL, updated_at = ? WHERE id = ?`,
 		time.Now(), id,

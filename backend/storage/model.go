@@ -700,9 +700,14 @@ func (GatewayRoute) TableName() string { return "gateway_routes" }
 // GatewayRouteModelCooldown pauses one model on one route while allowing the
 // same route to continue serving other models.
 type GatewayRouteModelCooldown struct {
-	ID                         uint       `gorm:"primaryKey" json:"id"`
-	RouteID                    uint       `gorm:"not null;index;uniqueIndex:idx_gateway_route_model_cooldown" json:"route_id"`
-	Model                      string     `gorm:"size:256;not null;uniqueIndex:idx_gateway_route_model_cooldown" json:"model"`
+	ID      uint   `gorm:"primaryKey" json:"id"`
+	RouteID uint   `gorm:"not null;index;uniqueIndex:idx_gateway_route_model_cooldown" json:"route_id"`
+	Model   string `gorm:"size:256;not null;uniqueIndex:idx_gateway_route_model_cooldown" json:"model"`
+	// SharedCooldownID / SharedScopeKey are hydrated from
+	// gateway_shared_model_cooldowns and are never persisted in this legacy
+	// route-local table. Mutation methods use them to update the canonical row.
+	SharedCooldownID           uint       `gorm:"-" json:"-"`
+	SharedScopeKey             string     `gorm:"-" json:"-"`
 	TempUnschedulableUntil     *time.Time `json:"temp_unschedulable_until,omitempty"`
 	TempUnschedulableReason    string     `gorm:"type:text" json:"temp_unschedulable_reason,omitempty"`
 	TempUnschedulableAt        *time.Time `json:"temp_unschedulable_at,omitempty"`
@@ -736,6 +741,39 @@ const (
 )
 
 func (GatewayRouteModelCooldown) TableName() string { return "gateway_route_model_cooldowns" }
+
+// GatewaySharedModelCooldown is the canonical health state for one actual
+// upstream credential, final upstream model, and route protocol. Multiple
+// gateway routes may project this row into their ModelCooldowns view, while
+// only this row owns the probe lease. Cache-health blacklists deliberately use
+// a different, route-scoped table and are never represented here.
+type GatewaySharedModelCooldown struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// The generated scope is compact (numeric IDs plus a fixed protocol name).
+	// Keeping it within 191 characters keeps the composite unique index portable
+	// to MySQL installations that still use the older utf8mb4 index limit.
+	ScopeKey                   string     `gorm:"size:191;not null;uniqueIndex:idx_gateway_shared_model_cooldown_scope" json:"scope_key"`
+	Model                      string     `gorm:"size:256;not null;uniqueIndex:idx_gateway_shared_model_cooldown_scope" json:"model"`
+	PreferredRouteID           uint       `gorm:"not null;default:0;index" json:"preferred_route_id"`
+	TempUnschedulableUntil     *time.Time `json:"temp_unschedulable_until,omitempty"`
+	TempUnschedulableReason    string     `gorm:"type:text" json:"temp_unschedulable_reason,omitempty"`
+	TempUnschedulableAt        *time.Time `json:"temp_unschedulable_at,omitempty"`
+	TempUnschedulableRequestID string     `gorm:"size:64;not null;default:''" json:"temp_unschedulable_request_id,omitempty"`
+	RecoverSuccessStreak       int        `gorm:"not null;default:0" json:"recover_success_streak,omitempty"`
+	NextProbeAt                *time.Time `gorm:"index:idx_gateway_shared_model_probe_due" json:"next_probe_at,omitempty"`
+	LastProbeAt                *time.Time `json:"last_probe_at,omitempty"`
+	ProbeLeaseUntil            *time.Time `json:"probe_lease_until,omitempty"`
+	ProbeStatus                string     `gorm:"size:24;not null;default:'';index:idx_gateway_shared_model_probe_status" json:"probe_status,omitempty"`
+	ProbeFailureCount          int        `gorm:"not null;default:0" json:"probe_failure_count,omitempty"`
+	ProbeRequestID             string     `gorm:"size:96;not null;default:''" json:"probe_request_id,omitempty"`
+	ProbeInboundProtocol       string     `gorm:"size:24;not null;default:'openai_chat'" json:"probe_inbound_protocol,omitempty"`
+	ProbeLastStatusCode        int        `gorm:"not null;default:0" json:"probe_last_status_code,omitempty"`
+	ProbeLastError             string     `gorm:"type:text" json:"probe_last_error,omitempty"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
+}
+
+func (GatewaySharedModelCooldown) TableName() string { return "gateway_shared_model_cooldowns" }
 
 // GatewayChannelCacheHealth stores rolling cache statistics and the optional
 // automatic blacklist for one concrete route. SourceKind/SourceID identify a

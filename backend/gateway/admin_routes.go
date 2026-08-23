@@ -225,14 +225,9 @@ func (a *AdminService) EnsureRouteKeys(ctx context.Context, groupID uint) (*Ensu
 		return &EnsureKeysResult{Items: list, Routes: results}, nil
 	}
 
-	// 同名上游 Key 串行 ensure，避免并发 Create 裂变；不同 Key 可并行。
-	var keyLocks sync.Map // keyName -> *sync.Mutex
-	lockKeyName := func(name string) func() {
-		v, _ := keyLocks.LoadOrStore(name, &sync.Mutex{})
-		m := v.(*sync.Mutex)
-		m.Lock()
-		return m.Unlock
-	}
+	// 同名上游 Key 串行 ensure，避免并发 Create 裂变；锁属于 Service，
+	// 因而并发操作不同网关组时也会复用同一把受管上游 Key。
+	lockKeyName := a.lockEnsureUpstreamKey
 
 	sem := make(chan struct{}, a.gatewayRuntime().RouteBatchConcurrency)
 	var wg sync.WaitGroup
@@ -356,29 +351,11 @@ func (a *AdminService) ensureSourceAPIKey(ctx context.Context, groupID uint, rou
 	unlimitedQuota := boolPtr(sourceChannel.Type == storage.ChannelTypeNewAPI)
 	neverExpire := int64PtrIf(sourceChannel.Type == storage.ChannelTypeNewAPI, -1)
 
-	// 优先按统一名搜索
-	page, err := a.ChannelAPI.ListAPIKeys(ctx, route.SourceChannelID, connector.APIKeyQuery{
-		Page: 1, PageSize: 100, Search: keyName,
-	})
+	// 优先复用统一名。部分上游的 search 接口不完整，且密钥可能不在
+	// 第一页，所以查找会回退到完整分页列表；不能因为第一页未命中就新建。
+	key, err := a.findManagedSourceAPIKey(ctx, route.SourceChannelID, keyName, route.SourceAPIKeyID, legacyName)
 	if err != nil {
 		return err
-	}
-	var key *connector.APIKey
-	key = a.findAPIKeyByName(page.Items, keyName)
-
-	// 全量页再找：统一名 / 路由上已记的 key id / 旧名
-	if key == nil {
-		page, err = a.ChannelAPI.ListAPIKeys(ctx, route.SourceChannelID, connector.APIKeyQuery{Page: 1, PageSize: 100})
-		if err != nil {
-			return err
-		}
-		key = a.findAPIKeyByName(page.Items, keyName)
-		if key == nil && route.SourceAPIKeyID > 0 {
-			key = a.findAPIKeyByID(page.Items, route.SourceAPIKeyID)
-		}
-		if key == nil && legacyName != "" && legacyName != keyName {
-			key = a.findAPIKeyByName(page.Items, legacyName)
-		}
 	}
 
 	groupName := strings.TrimSpace(route.SourceGroupName)
@@ -405,7 +382,12 @@ func (a *AdminService) ensureSourceAPIKey(ctx context.Context, groupID uint, rou
 			ExpiredTime:    neverExpire,
 		})
 		if err != nil {
-			return err
+			// 另一进程可能恰好在本次远程 Create 前创建了同名受管 Key。
+			// 若能重新查到它，安全地绑定它；否则保留原始创建错误。
+			key, lookupErr := a.findManagedSourceAPIKey(ctx, route.SourceChannelID, keyName, 0, "")
+			if lookupErr != nil || key == nil {
+				return err
+			}
 		}
 	}
 	secret, err := a.ChannelAPI.RevealAPIKey(ctx, route.SourceChannelID, key.ID)
@@ -417,6 +399,74 @@ func (a *AdminService) ensureSourceAPIKey(ctx context.Context, groupID uint, rou
 		return err
 	}
 	return a.Routes.UpdateSourceKey(route.ID, key.ID, keyName, cipherText)
+}
+
+// findManagedSourceAPIKey resolves only the stable managed name, then a key
+// already bound to this route (including its former legacy name). It never
+// adopts an arbitrary key from the same source group because that key may
+// belong to another workflow with different quota or ownership semantics.
+func (a *AdminService) findManagedSourceAPIKey(
+	ctx context.Context,
+	channelID uint,
+	keyName string,
+	knownID int64,
+	legacyName string,
+) (*connector.APIKey, error) {
+	if a == nil || a.ChannelAPI == nil {
+		return nil, fmt.Errorf("channel API key service is unavailable")
+	}
+	keyName = strings.TrimSpace(keyName)
+	legacyName = strings.TrimSpace(legacyName)
+	if keyName == "" {
+		return nil, nil
+	}
+
+	// Search is cheap when supported, but is intentionally only an
+	// optimization: connector implementations may ignore or partially support
+	// it, so the complete list below remains authoritative.
+	page, err := a.ChannelAPI.ListAPIKeys(ctx, channelID, connector.APIKeyQuery{
+		Page: 1, PageSize: 100, Search: keyName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if page != nil {
+		if key := a.findAPIKeyByName(page.Items, keyName); key != nil {
+			return key, nil
+		}
+	}
+
+	var byID, byLegacy *connector.APIKey
+	for pageNo := 1; ; pageNo++ {
+		page, err = a.ChannelAPI.ListAPIKeys(ctx, channelID, connector.APIKeyQuery{Page: pageNo, PageSize: 100})
+		if err != nil {
+			return nil, err
+		}
+		if page == nil {
+			break
+		}
+		if key := a.findAPIKeyByName(page.Items, keyName); key != nil {
+			return key, nil
+		}
+		if byID == nil && knownID > 0 {
+			byID = a.findAPIKeyByID(page.Items, knownID)
+		}
+		if byLegacy == nil && legacyName != "" && legacyName != keyName {
+			byLegacy = a.findAPIKeyByName(page.Items, legacyName)
+		}
+
+		pages := page.Pages
+		if pages <= 0 && page.Total > 0 && page.PageSize > 0 {
+			pages = int((page.Total + int64(page.PageSize) - 1) / int64(page.PageSize))
+		}
+		if pages <= pageNo || pages <= 0 {
+			break
+		}
+	}
+	if byID != nil {
+		return byID, nil
+	}
+	return byLegacy, nil
 }
 
 // ClearRoutePause 清除路由暂停。

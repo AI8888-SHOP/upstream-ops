@@ -243,6 +243,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&GatewayKey{},
 		&GatewayRoute{},
 		&GatewayRouteModelCooldown{},
+		&GatewaySharedModelCooldown{},
 		&GatewayChannelCacheHealth{},
 		&GatewayProvider{},
 		&GatewayResponseRule{},
@@ -253,7 +254,10 @@ func AutoMigrate(db *gorm.DB) error {
 	); err != nil {
 		return err
 	}
-	return ensurePerformanceIndexes(db)
+	if err := ensurePerformanceIndexes(db); err != nil {
+		return err
+	}
+	return migrateLegacyModelCooldownsToShared(db)
 }
 
 // ensurePerformanceIndexes adds the indexes that cannot be expressed by a

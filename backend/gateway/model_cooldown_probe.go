@@ -84,7 +84,25 @@ func (s *Service) RunModelCooldownProbes(ctx context.Context) {
 }
 
 func (s *Service) runClaimedModelCooldownProbe(ctx context.Context, cfg config.GatewayConfig, claim storage.GatewayRouteModelCooldown) {
-	route, err := s.Routes.FindByID(claim.RouteID)
+	var route *storage.GatewayRoute
+	var err error
+	if strings.TrimSpace(claim.SharedScopeKey) != "" {
+		route, err = s.Routes.FindActiveRouteForSharedModelCooldown(claim.SharedScopeKey, claim.RouteID)
+		if err == nil && route == nil {
+			s.recordModelProbeFailureCurrentMode(claim, cfg, 0, "no active route uses this shared upstream credential", false, 0)
+			if s.Log != nil {
+				s.Log.Debug("skip shared model cooldown probe without active route", "scope", claim.SharedScopeKey, "model", claim.Model)
+			}
+			return
+		}
+		if route != nil {
+			// The canonical cooldown state stays the same; this only chooses the
+			// concrete route used to probe it and improves diagnostics.
+			claim.RouteID = route.ID
+		}
+	} else {
+		route, err = s.Routes.FindByID(claim.RouteID)
+	}
 	if err != nil {
 		// A deleted route is normally removed together with this row, but a
 		// transient read failure must still release the lease promptly.

@@ -12,6 +12,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +102,11 @@ type Service struct {
 	// modelProbeMu serializes a scheduler tick inside one process. Database
 	// leases still protect multiple processes/instances.
 	modelProbeMu sync.Mutex
+
+	// ensureKeyLocks serializes creation of a managed upstream key by its
+	// stable channel/group name. It lives on Service rather than one admin
+	// request so two gateway groups cannot both create the same key.
+	ensureKeyLocks sync.Map // key name -> *sync.Mutex
 }
 
 type modelsCacheEntry struct {
@@ -149,6 +155,20 @@ func NewService(
 	s.Admin = &AdminService{Service: s}
 	s.Runtime = &Runtime{Service: s}
 	return s
+}
+
+func (s *Service) lockEnsureUpstreamKey(name string) func() {
+	if s == nil {
+		return func() {}
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return func() {}
+	}
+	v, _ := s.ensureKeyLocks.LoadOrStore(name, &sync.Mutex{})
+	m := v.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
 }
 
 // SetProviders 注入直连渠道仓储（main 组装时调用，保持 NewService 签名兼容）。
