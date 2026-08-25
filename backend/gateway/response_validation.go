@@ -1792,6 +1792,221 @@ func extractSSEAssistantPayload(payload []byte) (string, bool) {
 	return "", false
 }
 
+// responsesSSEEventStartsVisibleOutput mirrors the TTFT semantics used by the
+// Responses gateway in the downstream compatibility layer: lifecycle and
+// structural events do not start the clock unless they actually carry content
+// that a client can consume. This is intentionally kept on the lightweight
+// streaming path so large lifecycle payloads are not decoded wholesale.
+func responsesSSEEventStartsVisibleOutput(eventName, data string) bool {
+	payload := bytes.TrimSpace([]byte(data))
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return false
+	}
+
+	return responsesSSEEventStartsVisibleOutputBytes(eventName, payload, nil)
+}
+
+func responsesSSEEventStartsVisibleOutputBytes(eventName string, payload, payloadType []byte) bool {
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return false
+	}
+	if len(payloadType) == 0 {
+		payloadType = responsesPayloadTypeBytes(payload)
+	}
+	eventType := payloadType
+	if len(eventType) == 0 {
+		eventType = bytes.TrimSpace([]byte(eventName))
+	}
+	if len(eventType) == 0 {
+		return false
+	}
+
+	// Responses delta events carry their visible fragment in one string field.
+	// Keep this branch allocation-free for the common high-frequency case.
+	if bytes.HasSuffix(eventType, []byte(".delta")) {
+		return responsesJSONRootStringNonEmpty(payload, "delta")
+	}
+
+	switch {
+	case bytes.EqualFold(eventType, []byte("response.output_text.done")),
+		bytes.EqualFold(eventType, []byte("response.reasoning_summary_text.done")),
+		bytes.EqualFold(eventType, []byte("response.reasoning_text.done")),
+		bytes.EqualFold(eventType, []byte("response.audio_transcript.done")):
+		return responsesJSONRootStringNonEmpty(payload, "text")
+	case bytes.EqualFold(eventType, []byte("response.function_call_arguments.done")):
+		return responsesJSONRootStringNonEmpty(payload, "arguments")
+	case bytes.EqualFold(eventType, []byte("response.custom_tool_call_input.done")):
+		return responsesJSONRootStringNonEmpty(payload, "input")
+	case bytes.EqualFold(eventType, []byte("response.image_generation_call.partial_image")):
+		return responsesJSONRootStringNonEmpty(payload, "partial_image_b64")
+	case bytes.EqualFold(eventType, []byte("response.content_part.added")),
+		bytes.EqualFold(eventType, []byte("response.content_part.done")),
+		bytes.EqualFold(eventType, []byte("response.reasoning_summary_part.added")),
+		bytes.EqualFold(eventType, []byte("response.reasoning_summary_part.done")):
+		part, ok := partialJSONRootMember(payload, "part")
+		return ok && responsesJSONValueHasVisibleText(part)
+	case bytes.EqualFold(eventType, []byte("response.output_item.added")),
+		bytes.EqualFold(eventType, []byte("response.output_item.done")):
+		item, ok := partialJSONRootMember(payload, "item")
+		return ok && responsesJSONValueHasVisibleItem(item)
+	case bytes.EqualFold(eventType, []byte("response.completed")),
+		bytes.EqualFold(eventType, []byte("response.done")):
+		response, ok := partialJSONRootMember(payload, "response")
+		if !ok {
+			return false
+		}
+		output, ok := partialJSONRootMember(response, "output")
+		return ok && responsesJSONValueHasVisibleOutputArray(output)
+	default:
+		return false
+	}
+}
+
+func responsesJSONRootStringNonEmpty(payload []byte, key string) bool {
+	value, ok := partialJSONRootMember(payload, key)
+	if !ok {
+		return false
+	}
+	pos := 0
+	skipJSONSpaceBytes(value, &pos)
+	if pos >= len(value) || value[pos] != '"' {
+		return false
+	}
+	textLen, complete := scanJSONStringNonEmpty(value, &pos)
+	return complete && textLen > 0
+}
+
+// scanJSONStringNonEmpty validates just enough of a JSON string to decide
+// whether it contains a value, without allocating the decoded string.
+func scanJSONStringNonEmpty(data []byte, pos *int) (length int, complete bool) {
+	if pos == nil || *pos >= len(data) || data[*pos] != '"' {
+		return 0, false
+	}
+	(*pos)++
+	for *pos < len(data) {
+		switch current := data[*pos]; current {
+		case '"':
+			(*pos)++
+			return length, true
+		case '\\':
+			(*pos)++
+			if *pos >= len(data) {
+				return 0, false
+			}
+			escape := data[*pos]
+			if escape == 'u' {
+				if *pos+4 >= len(data) {
+					return 0, false
+				}
+				for index := 1; index <= 4; index++ {
+					digit := data[*pos+index]
+					if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f') || (digit >= 'A' && digit <= 'F')) {
+						return 0, false
+					}
+				}
+				*pos += 5
+				length++
+				continue
+			}
+			if escape != '"' && escape != '\\' && escape != '/' && escape != 'b' && escape != 'f' && escape != 'n' && escape != 'r' && escape != 't' {
+				return 0, false
+			}
+			(*pos)++
+			length++
+		default:
+			if current < utf8.RuneSelf && current < 0x20 {
+				return 0, false
+			}
+			if current >= utf8.RuneSelf {
+				if !utf8.FullRune(data[*pos:]) {
+					return 0, false
+				}
+				_, size := utf8.DecodeRune(data[*pos:])
+				*pos += size
+				length++
+				continue
+			}
+			(*pos)++
+			length++
+		}
+	}
+	return 0, false
+}
+
+func responsesJSONValueHasVisibleText(value []byte) bool {
+	return responsesJSONRootStringNonEmpty(value, "text") ||
+		responsesJSONRootStringNonEmpty(value, "transcript")
+}
+
+func responsesJSONValueHasVisibleItem(value []byte) bool {
+	for _, key := range []string{"arguments", "input", "result"} {
+		if responsesJSONRootStringNonEmpty(value, key) {
+			return true
+		}
+	}
+	for _, key := range []string{"content", "summary"} {
+		parts, ok := partialJSONRootMember(value, key)
+		if ok && responsesJSONArrayHasVisibleText(parts) {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesJSONArrayHasVisibleText(value []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '[' {
+		return false
+	}
+	found := false
+	for decoder.More() {
+		var part json.RawMessage
+		if err := decoder.Decode(&part); err != nil {
+			return false
+		}
+		if responsesJSONValueHasVisibleText(part) {
+			found = true
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	delimiter, ok := closing.(json.Delim)
+	return ok && delimiter == ']' && found
+}
+
+func responsesJSONValueHasVisibleOutputArray(value []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '[' {
+		return false
+	}
+	found := false
+	for decoder.More() {
+		var item json.RawMessage
+		if err := decoder.Decode(&item); err != nil {
+			return false
+		}
+		if responsesJSONValueHasVisibleItem(item) {
+			found = true
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	delimiter, ok := closing.(json.Delim)
+	return ok && delimiter == ']' && found
+}
+
 func appendAssistantJSON(out *strings.Builder, value any) {
 	object, ok := value.(map[string]any)
 	if !ok {

@@ -18,8 +18,8 @@ import (
 // flushRecorder 实现 http.Flusher，便于观察流式写出。
 type flushRecorder struct {
 	*httptest.ResponseRecorder
-	flushes  int
-	flushCh  chan struct{}
+	flushes int
+	flushCh chan struct{}
 }
 
 func (f *flushRecorder) Flush() {
@@ -220,6 +220,11 @@ func TestForwardStream_ResponsesLifecycleFlushesWithFirstOutput(t *testing.T) {
 		if flusher != nil {
 			flusher.Flush()
 		}
+		// An empty output item is structural metadata, not client-visible output.
+		_, _ = io.WriteString(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"summary\":[]}}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
 		time.Sleep(80 * time.Millisecond)
 		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
 		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n")
@@ -247,6 +252,39 @@ func TestForwardStream_ResponsesLifecycleFlushesWithFirstOutput(t *testing.T) {
 	body := rec.Body.String()
 	if created, output := strings.Index(body, "response.created"), strings.Index(body, "response.output_text.delta"); created < 0 || output < 0 || created > output {
 		t.Fatalf("buffered lifecycle/output order is invalid: %s", body)
+	}
+}
+
+func TestResponsesSSEEventStartsVisibleOutput(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventName string
+		data      string
+		want      bool
+	}{
+		{name: "keepalive", data: `{"type":"keepalive"}`},
+		{name: "created", data: `{"type":"response.created"}`},
+		{name: "empty output item", data: `{"type":"response.output_item.added","item":{"id":"item-1","type":"reasoning","summary":[]}}`},
+		{name: "empty delta", data: `{"type":"response.output_text.delta","delta":""}`},
+		{name: "escaped delta", data: `{"type":"response.output_text.delta","delta":"\\n"}`, want: true},
+		{name: "invalid delta", data: `{"type":"response.output_text.delta","delta":"\q"}`},
+		{name: "text delta", data: `{"type":"response.output_text.delta","delta":"hello"}`, want: true},
+		{name: "tool arguments", data: `{"type":"response.function_call_arguments.delta","delta":"{}"}`, want: true},
+		{name: "partial image", data: `{"type":"response.image_generation_call.partial_image","partial_image_b64":"dGVzdA=="}`, want: true},
+		{name: "completed image item", data: `{"type":"response.output_item.done","item":{"type":"image_generation_call","result":"dGVzdA=="}}`, want: true},
+		{name: "completed function call", data: `{"type":"response.output_item.done","item":{"type":"function_call","arguments":"{}"}}`, want: true},
+		{name: "completed empty", data: `{"type":"response.completed","response":{"output":[]}}`},
+		{name: "completed usage only", data: `{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`},
+		{name: "completed text", data: `{"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}`, want: true},
+		{name: "content part transcript", data: `{"type":"response.content_part.added","part":{"type":"audio","transcript":"hello"}}`, want: true},
+		{name: "done marker", data: `[DONE]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := responsesSSEEventStartsVisibleOutput(tc.eventName, tc.data); got != tc.want {
+				t.Fatalf("event=%q data=%q got=%v want=%v", tc.eventName, tc.data, got, tc.want)
+			}
+		})
 	}
 }
 

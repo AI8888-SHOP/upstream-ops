@@ -699,6 +699,7 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		data               string
 		hasPayload         bool
 		responsesLifecycle bool
+		responsesVisible   bool
 		upstreamTerminal   bool
 	}
 	var (
@@ -724,9 +725,13 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 			}
 		}
 		lifecycle := false
+		visible := false
 		if hasPayload && upKind == protocol.KindOpenAIResponses {
+			payload := []byte(trimmedData)
 			var responsesTerminal bool
-			lifecycle, responsesTerminal = classifyResponsesSSEEvent(eventName, data)
+			var payloadType []byte
+			lifecycle, responsesTerminal, payloadType = classifyResponsesSSEEventWithPayload(eventName, payload)
+			visible = responsesSSEEventStartsVisibleOutputBytes(eventName, payload, payloadType)
 			terminal = terminal || responsesTerminal
 		} else if !terminal && trimmedData != "" {
 			payload := []byte(trimmedData)
@@ -744,6 +749,7 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 			data:               data,
 			hasPayload:         hasPayload,
 			responsesLifecycle: lifecycle,
+			responsesVisible:   visible,
 			upstreamTerminal:   terminal,
 		}
 	}
@@ -777,7 +783,13 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 	}
 
 	markFirstToken := func(event parsedStreamEvent) bool {
-		counts := event.hasPayload && (upKind != protocol.KindOpenAIResponses || !event.responsesLifecycle || event.upstreamTerminal)
+		counts := event.hasPayload
+		if upKind == protocol.KindOpenAIResponses {
+			// Responses emits several structural events before any usable output.
+			// Count only an event carrying visible text/tool data so first_token_ms
+			// matches the client-facing TTFT reported by downstream gateways.
+			counts = event.responsesVisible
+		}
 		if counts && !sawUpstreamData {
 			sawUpstreamData = true
 			stopFirstTimer()

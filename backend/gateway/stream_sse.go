@@ -73,36 +73,45 @@ func responsesSSEEventIsLifecycle(eventName, data string) bool {
 // event name while the nested response status is already terminal, so keep the
 // two flags independent.
 func classifyResponsesSSEEvent(eventName, data string) (lifecycle, terminal bool) {
+	lifecycle, terminal, _ = classifyResponsesSSEEventWithPayload(eventName, bytes.TrimSpace([]byte(data)))
+	return lifecycle, terminal
+}
+
+// classifyResponsesSSEEventWithPayload is the allocation-aware form used by
+// the streaming hot path. It returns the already extracted payload type so
+// callers that need a second semantic classification do not scan the JSON a
+// second time.
+func classifyResponsesSSEEventWithPayload(eventName string, payload []byte) (lifecycle, terminal bool, payloadType []byte) {
 	eventType := []byte(strings.TrimSpace(eventName))
-	payload := bytes.TrimSpace([]byte(data))
 	if bytes.Equal(payload, []byte("[DONE]")) {
-		return false, true
+		return false, true, nil
 	}
 	if len(payload) > 0 {
-		if payloadType := responsesPayloadTypeBytes(payload); len(payloadType) > 0 {
-			eventType = payloadType
+		if extracted := responsesPayloadTypeBytes(payload); len(extracted) > 0 {
+			payloadType = extracted
+			eventType = extracted
 		}
 	}
 	lifecycle = isResponsesLifecycleEventBytes(eventType)
 	terminal = isResponsesTerminalEventBytes(eventType)
 	if terminal || len(payload) == 0 {
-		return lifecycle, terminal
+		return lifecycle, terminal, payloadType
 	}
 	if bytes.Contains(payload, []byte(`"error"`)) {
 		if _, ok := partialJSONRootMember(payload, "error"); ok {
-			return lifecycle, true
+			return lifecycle, true, payloadType
 		}
 	}
 	if !bytes.Contains(payload, []byte(`"response"`)) {
-		return lifecycle, false
+		return lifecycle, false, payloadType
 	}
 	response, ok := partialJSONRootMember(payload, "response")
 	if !ok {
-		return lifecycle, false
+		return lifecycle, false, payloadType
 	}
 	statusValue, ok := partialJSONRootMember(response, "status")
 	if !ok {
-		return lifecycle, false
+		return lifecycle, false, payloadType
 	}
 	parser := partialJSONParser{data: statusValue}
 	status, _ := parser.parseString()
@@ -110,7 +119,7 @@ func classifyResponsesSSEEvent(eventName, data string) (lifecycle, terminal bool
 	case "completed", "done", "failed", "incomplete", "error", "canceled", "cancelled":
 		terminal = true
 	}
-	return lifecycle, terminal
+	return lifecycle, terminal, payloadType
 }
 
 // sseEventHasPayload 判断 SSE 事件是否包含可提交的有效载荷（非纯注释）。
