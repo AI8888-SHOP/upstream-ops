@@ -868,6 +868,8 @@ export function GatewayPage() {
       failover_on_4xx: !!g.failover_on_4xx,
       cooldown_seconds: String(g.cooldown_seconds ?? 30),
       first_token_timeout_sec: String(g.first_token_timeout_sec ?? 0),
+      first_token_timeout_cooldown_enabled:
+        g.first_token_timeout_cooldown_enabled !== false,
       hedge_enabled: !!g.hedge_enabled,
       hedge_delay_seconds: String(g.hedge_delay_seconds ?? 10),
       hedge_max_parallel: String(g.hedge_max_parallel ?? 2),
@@ -953,6 +955,8 @@ export function GatewayPage() {
       failover_on_4xx: groupForm.failover_on_4xx,
       cooldown_seconds: cooldownSeconds,
       first_token_timeout_sec: firstTokenTimeout,
+      first_token_timeout_cooldown_enabled:
+        groupForm.first_token_timeout_cooldown_enabled,
       hedge_enabled: groupForm.hedge_enabled,
       hedge_delay_seconds: hedgeDelaySeconds,
       hedge_max_parallel: hedgeMaxParallel,

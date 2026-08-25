@@ -504,17 +504,29 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				}
 				lastTryOnRoute := tryOnRoute >= maxTriesOnRoute-1
 				var cooldownUntil *time.Time
-				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && !clientCanceled {
+				firstTokenTimedOut := rt.isFirstTokenTimeout(fwdErr)
+				firstTokenCooldownEnabled := group.FirstTokenTimeoutCooldownEnabled
+				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && !clientCanceled &&
+					(!firstTokenTimedOut || firstTokenCooldownEnabled) {
 					until := time.Now().Add(time.Duration(cooldownSec) * time.Second)
 					cooldownUntil = &until
 					pauseReason := errInfo.Summary
 					if strings.TrimSpace(errInfo.Detail) != "" {
 						pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 					}
-					cooldownErr := rt.Routes.SetModelTempUnschedulableWithProbeProtocol(
-						route.ID, upstreamModel, until, pauseReason, time.Now(), reqID,
-						gwCfg.ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(path, kind), string(kind),
-					)
+					var cooldownErr error
+					probeEnabled := gwCfg.ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(path, kind)
+					if firstTokenTimedOut {
+						cooldownErr = rt.Routes.SetGroupModelTempUnschedulableWithProbeProtocol(
+							route.ID, upstreamModel, until, pauseReason, time.Now(), reqID,
+							probeEnabled, string(kind),
+						)
+					} else {
+						cooldownErr = rt.Routes.SetModelTempUnschedulableWithProbeProtocol(
+							route.ID, upstreamModel, until, pauseReason, time.Now(), reqID,
+							probeEnabled, string(kind),
+						)
+					}
 					if cooldownErr == nil && storage.NormalizeGatewayModel(upstreamModel) != "" {
 						affinity.preservePreferredOnCooldown(route.ID)
 					}

@@ -86,6 +86,44 @@ func TestCreateAndUpdateGroupHedgePolicyBounds(t *testing.T) {
 	}
 }
 
+func TestGatewayGroupFirstTokenTimeoutCooldownPolicy(t *testing.T) {
+	db := openGatewayTestDB(t)
+	svc := NewService(
+		storage.NewGatewayGroups(db), storage.NewGatewayKeys(db), storage.NewGatewayRoutes(db),
+		storage.NewGatewayUsageLogs(db), storage.NewModelPriceOverrides(db), storage.NewChannels(db),
+		nil, nil, nil,
+	)
+
+	defaultGroup, err := svc.CreateGroup(CreateGroupInput{Name: "first-token-cooldown-default"})
+	if err != nil {
+		t.Fatalf("CreateGroup default: %v", err)
+	}
+	if !defaultGroup.FirstTokenTimeoutCooldownEnabled {
+		t.Fatal("first_token_timeout_cooldown_enabled default = false, want true")
+	}
+
+	disabled := false
+	group, err := svc.CreateGroup(CreateGroupInput{
+		Name:                             "first-token-cooldown-disabled",
+		FirstTokenTimeoutCooldownEnabled: &disabled,
+	})
+	if err != nil {
+		t.Fatalf("CreateGroup disabled: %v", err)
+	}
+	if group.FirstTokenTimeoutCooldownEnabled {
+		t.Fatal("first_token_timeout_cooldown_enabled = true, want false")
+	}
+
+	enabled := true
+	updated, err := svc.UpdateGroup(group.ID, UpdateGroupInput{FirstTokenTimeoutCooldownEnabled: &enabled})
+	if err != nil {
+		t.Fatalf("UpdateGroup: %v", err)
+	}
+	if !updated.FirstTokenTimeoutCooldownEnabled {
+		t.Fatal("updated first_token_timeout_cooldown_enabled = false, want true")
+	}
+}
+
 func TestGatewayGroupVirtualCachePercentValidation(t *testing.T) {
 	db := openGatewayTestDB(t)
 	svc := NewService(

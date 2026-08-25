@@ -672,6 +672,8 @@ export interface GatewayGroup {
    * 可能增加计费（上游已计费却换路由再请求）。
    */
   first_token_timeout_sec?: number
+  /** 首字超时触发后是否冷却当前网关组内的路由/模型。 */
+  first_token_timeout_cooldown_enabled?: boolean
   /** 超过延迟仍无有效响应时，并发启动其它路由（媒体与 Realtime 请求自动排除） */
   hedge_enabled?: boolean
   /** 并发兜底启动延迟，支持小数秒 */

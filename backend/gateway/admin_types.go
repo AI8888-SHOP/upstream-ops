@@ -28,6 +28,7 @@ type CreateGroupInput struct {
 	FailoverOn4xx                         *bool    `json:"failover_on_4xx"`
 	CooldownSeconds                       *int     `json:"cooldown_seconds"`
 	FirstTokenTimeoutSec                  *int     `json:"first_token_timeout_sec"`
+	FirstTokenTimeoutCooldownEnabled      *bool    `json:"first_token_timeout_cooldown_enabled"`
 	HedgeEnabled                          *bool    `json:"hedge_enabled"`
 	HedgeDelaySeconds                     *float64 `json:"hedge_delay_seconds"`
 	HedgeMaxParallel                      *int     `json:"hedge_max_parallel"`
@@ -63,6 +64,7 @@ type UpdateGroupInput struct {
 	FailoverOn4xx                         *bool    `json:"failover_on_4xx"`
 	CooldownSeconds                       *int     `json:"cooldown_seconds"`
 	FirstTokenTimeoutSec                  *int     `json:"first_token_timeout_sec"`
+	FirstTokenTimeoutCooldownEnabled      *bool    `json:"first_token_timeout_cooldown_enabled"`
 	HedgeEnabled                          *bool    `json:"hedge_enabled"`
 	HedgeDelaySeconds                     *float64 `json:"hedge_delay_seconds"`
 	HedgeMaxParallel                      *int     `json:"hedge_max_parallel"`

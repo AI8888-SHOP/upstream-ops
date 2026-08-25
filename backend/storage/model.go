@@ -572,6 +572,9 @@ type GatewayGroup struct {
 	// 首字/首字节超时（秒）：0=关闭；>0 时等待首字节超过该时间则主动断开并走重试/顺延。
 	// 可能造成上游已计费但客户端未收完，从而重复请求增加费用。
 	FirstTokenTimeoutSec int `gorm:"not null;default:0" json:"first_token_timeout_sec"`
+	// 首字超时触发后是否将当前路由/模型暂时冷却。首字超时冷却始终只在
+	// 当前网关组内生效；普通模型错误仍按共享上游凭据的策略处理。
+	FirstTokenTimeoutCooldownEnabled bool `gorm:"not null;default:true" json:"first_token_timeout_cooldown_enabled"`
 	// HedgeMaxParallel 包含主请求；HedgeMaxAttempts 是请求允许启动的 attempt 总数。
 	HedgeEnabled      bool    `gorm:"not null;default:false" json:"hedge_enabled"`
 	HedgeDelaySeconds float64 `gorm:"not null;default:10" json:"hedge_delay_seconds"`
@@ -708,6 +711,10 @@ type GatewayRouteModelCooldown struct {
 	// route-local table. Mutation methods use them to update the canonical row.
 	SharedCooldownID           uint       `gorm:"-" json:"-"`
 	SharedScopeKey             string     `gorm:"-" json:"-"`
+	// CooldownScope distinguishes legacy route-local rows from the explicit
+	// gateway-group cooldown used by first-token timeout protection. Empty is
+	// treated as "shared" for rows created by older releases.
+	CooldownScope string `gorm:"size:24;not null;default:'shared'" json:"-"`
 	TempUnschedulableUntil     *time.Time `json:"temp_unschedulable_until,omitempty"`
 	TempUnschedulableReason    string     `gorm:"type:text" json:"temp_unschedulable_reason,omitempty"`
 	TempUnschedulableAt        *time.Time `json:"temp_unschedulable_at,omitempty"`
@@ -738,6 +745,11 @@ const (
 	GatewayModelProbeStatusTransient = "transient_failure"
 	GatewayModelProbeStatusPermanent = "permanent_failure"
 	GatewayModelProbeStatusManual    = "manual"
+)
+
+const (
+	GatewayModelCooldownScopeShared = "shared"
+	GatewayModelCooldownScopeGroup  = "gateway_group"
 )
 
 func (GatewayRouteModelCooldown) TableName() string { return "gateway_route_model_cooldowns" }

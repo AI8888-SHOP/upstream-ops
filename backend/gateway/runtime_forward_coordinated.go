@@ -1094,18 +1094,29 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			attemptStatus = storage.GatewayAttemptStatusAccepted
 		}
 		suppressSameRouteRetry := !validation.IsRejected() && !isSameRouteRetryableUpstreamFailure(status, errInfo)
+		firstTokenTimedOut := rt.isFirstTokenTimeout(attemptErr)
 		if attemptStatus == storage.GatewayAttemptStatusError && req.group.RetryEnabled &&
 			req.group.CooldownSeconds > 0 &&
+			(!firstTokenTimedOut || req.group.FirstTokenTimeoutCooldownEnabled) &&
 			(suppressSameRouteRetry || !coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
 			until := time.Now().Add(time.Duration(req.group.CooldownSeconds) * time.Second)
 			pauseReason := errInfo.Summary
 			if strings.TrimSpace(errInfo.Detail) != "" {
 				pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
 			}
-			cooldownErr := rt.Routes.SetModelTempUnschedulableWithProbeProtocol(
-				attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID,
-				rt.gatewayRuntime().ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(req.path, req.kind), string(req.kind),
-			)
+			probeEnabled := rt.gatewayRuntime().ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(req.path, req.kind)
+			var cooldownErr error
+			if firstTokenTimedOut {
+				cooldownErr = rt.Routes.SetGroupModelTempUnschedulableWithProbeProtocol(
+					attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID,
+					probeEnabled, string(req.kind),
+				)
+			} else {
+				cooldownErr = rt.Routes.SetModelTempUnschedulableWithProbeProtocol(
+					attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID,
+					probeEnabled, string(req.kind),
+				)
+			}
 			if cooldownErr == nil && storage.NormalizeGatewayModel(attempt.UpstreamModel) != "" {
 				req.affinity.preservePreferredOnCooldown(attempt.Route.ID)
 			}

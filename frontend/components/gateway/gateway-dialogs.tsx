@@ -1111,6 +1111,22 @@ export function GroupFormDialog({
                   。请仅在能接受额外成本时开启。
                 </p>
               </div>
+              <div className="mt-3 flex items-center justify-between gap-2 border-t border-border/60 pt-3">
+                <div className="min-w-0 flex-1">
+                  <Label>首字超时冷却</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    首字超时后，将当前网关组中的该路由/模型暂停上方设置的失败冷却时长；不会影响其它网关组。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  checked={groupForm.first_token_timeout_cooldown_enabled}
+                  disabled={!groupForm.first_token_timeout_sec || Number(groupForm.first_token_timeout_sec) <= 0}
+                  onCheckedChange={(v) =>
+                    setGroupForm({ ...groupForm, first_token_timeout_cooldown_enabled: v })
+                  }
+                />
+              </div>
             </div>
             <div className="space-y-3 border-t border-border/60 pt-3">
               <div className="flex items-center justify-between gap-2">

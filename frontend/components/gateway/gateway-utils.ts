@@ -37,6 +37,7 @@ export type GroupFormState = {
   failover_on_4xx: boolean
   cooldown_seconds: string
   first_token_timeout_sec: string
+  first_token_timeout_cooldown_enabled: boolean
   hedge_enabled: boolean
   hedge_delay_seconds: string
   hedge_max_parallel: string
@@ -611,6 +612,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   failover_on_4xx: false,
   cooldown_seconds: "30",
   first_token_timeout_sec: "0",
+  first_token_timeout_cooldown_enabled: true,
   hedge_enabled: false,
   hedge_delay_seconds: "10",
   hedge_max_parallel: "2",

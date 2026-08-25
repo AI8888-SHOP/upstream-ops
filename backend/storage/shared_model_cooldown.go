@@ -10,6 +10,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+func isGatewayGroupScopedModelCooldown(cooldown GatewayRouteModelCooldown) bool {
+	return strings.EqualFold(strings.TrimSpace(cooldown.CooldownScope), GatewayModelCooldownScopeGroup)
+}
+
 // GatewaySharedModelCooldownScope returns the stable identity used to share a
 // model health state. A monitored route must have a real upstream API-key ID;
 // source channel IDs alone are insufficient because different keys can have
@@ -67,6 +71,7 @@ func sharedCooldownAsRouteCooldown(shared GatewaySharedModelCooldown, routeID ui
 		Model:                      NormalizeGatewayModel(shared.Model),
 		SharedCooldownID:           shared.ID,
 		SharedScopeKey:             shared.ScopeKey,
+		CooldownScope:              GatewayModelCooldownScopeShared,
 		TempUnschedulableUntil:     clonePointer(shared.TempUnschedulableUntil),
 		TempUnschedulableReason:    shared.TempUnschedulableReason,
 		TempUnschedulableAt:        clonePointer(shared.TempUnschedulableAt),
@@ -143,6 +148,11 @@ func migrateLegacyModelCooldownsToShared(db *gorm.DB) error {
 		}
 
 		for _, cooldown := range cooldowns {
+			// Explicit group-scoped rows (currently used for first-token timeout
+			// protection) must never be promoted into the shared credential state.
+			if isGatewayGroupScopedModelCooldown(cooldown) {
+				continue
+			}
 			route, ok := routes[cooldown.RouteID]
 			if !ok {
 				continue
@@ -198,6 +208,9 @@ func (r *GatewayRoutes) promoteRouteLocalModelCooldownsToShared(routeID uint) er
 			return err
 		}
 		for _, cooldown := range cooldowns {
+			if isGatewayGroupScopedModelCooldown(cooldown) {
+				continue
+			}
 			model := NormalizeGatewayModel(cooldown.Model)
 			if model == "" {
 				continue

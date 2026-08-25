@@ -53,6 +53,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.FirstTokenTimeoutSec != nil {
 		ftTimeout = a.clampFirstTokenTimeoutSec(*in.FirstTokenTimeoutSec)
 	}
+	firstTokenTimeoutCooldownEnabled := true
+	if in.FirstTokenTimeoutCooldownEnabled != nil {
+		firstTokenTimeoutCooldownEnabled = *in.FirstTokenTimeoutCooldownEnabled
+	}
 	hedgeEnabled := gwDefaults.Hedge.Enabled
 	if in.HedgeEnabled != nil {
 		hedgeEnabled = *in.HedgeEnabled
@@ -138,6 +142,7 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		FailoverOn4xx:                         failoverOn4xx,
 		CooldownSeconds:                       cooldown,
 		FirstTokenTimeoutSec:                  ftTimeout,
+		FirstTokenTimeoutCooldownEnabled:      firstTokenTimeoutCooldownEnabled,
 		HedgeEnabled:                          hedgeEnabled,
 		HedgeDelaySeconds:                     hedgeDelay,
 		HedgeMaxParallel:                      hedgeParallel,
@@ -154,6 +159,16 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	}
 	if err := a.Groups.Create(item); err != nil {
 		return nil, err
+	}
+	// GORM applies `default:true` to a zero-valued bool during INSERT, so an
+	// explicitly disabled policy must be written in a follow-up UPDATE. Keeping
+	// the schema default true preserves behavior for groups created by older
+	// callers and for rows added during migration.
+	if !firstTokenTimeoutCooldownEnabled {
+		item.FirstTokenTimeoutCooldownEnabled = false
+		if err := a.Groups.Update(item); err != nil {
+			return nil, err
+		}
 	}
 	return item, nil
 }
@@ -307,6 +322,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	item.ResponseValidationRetryCount = clampResponseValidationRetryCount(validationRetryCount)
 	if in.FirstTokenTimeoutSec != nil {
 		item.FirstTokenTimeoutSec = a.clampFirstTokenTimeoutSec(*in.FirstTokenTimeoutSec)
+	}
+	if in.FirstTokenTimeoutCooldownEnabled != nil {
+		item.FirstTokenTimeoutCooldownEnabled = *in.FirstTokenTimeoutCooldownEnabled
 	}
 	if in.HedgeEnabled != nil {
 		item.HedgeEnabled = *in.HedgeEnabled

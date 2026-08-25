@@ -97,6 +97,79 @@ func TestSharedModelCooldownFollowsSameUpstreamCredentialAcrossGatewayGroups(t *
 	}
 }
 
+func TestGroupModelCooldownDoesNotCrossGatewayGroups(t *testing.T) {
+	db := openTestDB(t)
+	routes := NewGatewayRoutes(db)
+	remoteGroupID := int64(88)
+	input := GatewayRoute{
+		SourceChannelID:  18,
+		SourceGroupID:    &remoteGroupID,
+		SourceGroupName:  "premium",
+		UpstreamProtocol: GatewayUpstreamProtocolOpenAIChat,
+		Enabled:          true,
+	}
+	if err := routes.SaveForGroup(9111, []GatewayRoute{input}); err != nil {
+		t.Fatalf("save first gateway group: %v", err)
+	}
+	if err := routes.SaveForGroup(9112, []GatewayRoute{input}); err != nil {
+		t.Fatalf("save second gateway group: %v", err)
+	}
+	first, err := routes.ListByGroupID(9111)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("list first gateway group: err=%v count=%d", err, len(first))
+	}
+	second, err := routes.ListByGroupID(9112)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("list second gateway group: err=%v count=%d", err, len(second))
+	}
+	until := time.Now().Add(-time.Second)
+	if err := routes.SetGroupModelTempUnschedulableWithProbeProtocol(
+		first[0].ID, "upstream-model", until, "first token timeout", time.Now(), "group-timeout", true, "responses",
+	); err != nil {
+		t.Fatalf("set group cooldown: %v", err)
+	}
+	first, err = routes.ListByGroupID(9111)
+	if err != nil {
+		t.Fatalf("reload first route: %v", err)
+	}
+	second, err = routes.ListByGroupID(9112)
+	if err != nil {
+		t.Fatalf("reload second route: %v", err)
+	}
+	left := first[0].ModelCooldowns["upstream-model"]
+	if left.CooldownScope != GatewayModelCooldownScopeGroup || left.SharedCooldownID != 0 || left.TempUnschedulableUntil == nil {
+		t.Fatalf("group cooldown was not kept route-local: %+v", left)
+	}
+	if _, exists := second[0].ModelCooldowns["upstream-model"]; exists {
+		t.Fatalf("group cooldown crossed into another gateway group: %+v", second[0].ModelCooldowns)
+	}
+	var sharedCount int64
+	if err := db.Model(&GatewaySharedModelCooldown{}).Count(&sharedCount).Error; err != nil {
+		t.Fatalf("count shared cooldowns: %v", err)
+	}
+	if sharedCount != 0 {
+		t.Fatalf("group cooldown unexpectedly created shared rows: %d", sharedCount)
+	}
+
+	claims, err := routes.ClaimDueModelCooldownProbes(time.Now(), 2, time.Minute)
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("claim group probe: err=%v claims=%d", err, len(claims))
+	}
+	if claims[0].CooldownScope != GatewayModelCooldownScopeGroup || claims[0].RouteID != first[0].ID {
+		t.Fatalf("unexpected group probe claim: %+v", claims[0])
+	}
+	if updated, err := routes.MarkModelProbeSuccess(claims[0], time.Now(), 200); err != nil || !updated {
+		t.Fatalf("recover group probe: updated=%v err=%v", updated, err)
+	}
+	second, err = routes.ListByGroupID(9112)
+	if err != nil {
+		t.Fatalf("reload second route after recovery: %v", err)
+	}
+	if _, exists := second[0].ModelCooldowns["upstream-model"]; exists {
+		t.Fatalf("group recovery leaked a cooldown into another gateway group: %+v", second[0].ModelCooldowns)
+	}
+}
+
 func TestSharedModelCooldownDoesNotJoinDifferentCredentialOrProtocol(t *testing.T) {
 	groupID := int64(9)
 	base := GatewayRoute{

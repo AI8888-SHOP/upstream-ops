@@ -117,6 +117,30 @@ func TestAutoMigrateAddsVirtualCacheFlagWithSafeDefault(t *testing.T) {
 	}
 }
 
+func TestAutoMigrateAddsFirstTokenTimeoutCooldownWithSafeDefault(t *testing.T) {
+	db := openTestDB(t)
+	group := &GatewayGroup{Name: "legacy-first-token-cooldown", Status: GatewayGroupStatusActive}
+	if err := db.Create(group).Error; err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := db.Migrator().DropColumn(&GatewayGroup{}, "first_token_timeout_cooldown_enabled"); err != nil {
+		t.Fatalf("drop first-token cooldown column: %v", err)
+	}
+	if db.Migrator().HasColumn(&GatewayGroup{}, "first_token_timeout_cooldown_enabled") {
+		t.Fatal("first-token cooldown column was not removed from legacy schema")
+	}
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("auto migrate legacy schema: %v", err)
+	}
+	var restored GatewayGroup
+	if err := db.First(&restored, group.ID).Error; err != nil {
+		t.Fatalf("load migrated group: %v", err)
+	}
+	if !restored.FirstTokenTimeoutCooldownEnabled {
+		t.Fatal("legacy first_token_timeout_cooldown_enabled = false, want safe default true")
+	}
+}
+
 func TestMigrateDatabaseDoesNotRestoreSoftDeletedRows(t *testing.T) {
 	source := openTestDB(t)
 	if err := source.Exec("ALTER TABLE channels ADD COLUMN deleted_at datetime").Error; err != nil {
