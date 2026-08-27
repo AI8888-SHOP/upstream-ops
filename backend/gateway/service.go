@@ -85,8 +85,10 @@ type Service struct {
 	responseValidatorCache   map[uint]responseValidatorCacheEntry
 
 	// 源分组列表缓存（ListAPIKeyGroups 远程调用昂贵；列表接口不再实时拉，运行时/保存仍可复用缓存）
-	channelGroupsCacheMu sync.Mutex
-	channelGroupsCache   map[uint]channelGroupsCacheEntry // keyed by channel id
+	channelGroupsCacheMu    sync.Mutex
+	channelGroupsCache      map[uint]channelGroupsCacheEntry // keyed by channel id
+	channelGroupsFetches    map[uint]*channelGroupsFetchCall
+	channelGroupsCacheEpoch uint64
 
 	// routeAffinities keeps short-lived session-to-route bindings so a cooled
 	// route can receive one controlled recovery probe for its own conversation.
@@ -119,6 +121,13 @@ type channelGroupsCacheEntry struct {
 	groups []connector.APIKeyGroup
 }
 
+type channelGroupsFetchCall struct {
+	done   chan struct{}
+	epoch  uint64
+	groups []connector.APIKeyGroup
+	err    error
+}
+
 // NewService 构造网关服务并初始化 Admin / Runtime。
 func NewService(
 	groups *storage.GatewayGroups,
@@ -146,6 +155,7 @@ func NewService(
 		modelsCache:            map[uint]modelsCacheEntry{},
 		responseValidatorCache: map[uint]responseValidatorCacheEntry{},
 		channelGroupsCache:     map[uint]channelGroupsCacheEntry{},
+		channelGroupsFetches:   map[uint]*channelGroupsFetchCall{},
 		routeAffinities:        map[routeAffinityKey]routeAffinityEntry{},
 		cacheHealthPending:     map[cacheHealthSourceKey]time.Time{},
 		upstreamConcurrency:    newUpstreamConcurrencyRegistry(),

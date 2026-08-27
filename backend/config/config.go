@@ -54,18 +54,55 @@ type DatabaseConfig struct {
 	MaxIdleConns int    `mapstructure:"maxIdleConns" yaml:"maxIdleConns" json:"maxIdleConns"`
 }
 
+// DefaultDatabaseDriver is the only database backend supported by the server
+// in production. SQLite remains available to the standalone migration helper
+// and tests, but its single-writer locking makes it unsuitable for gateway
+// traffic and usage settlement.
+const (
+	DefaultDatabaseDriver       = string(storage.DBDriverPostgres)
+	DefaultDatabaseMaxOpenConns = 32
+	DefaultDatabaseMaxIdleConns = 8
+)
+
+// ValidateForServer rejects legacy file-backed databases before the server
+// starts accepting traffic. Failing early is safer than silently running a
+// busy gateway on SQLite and producing request stalls under concurrent writes.
+func (d DatabaseConfig) ValidateForServer() error {
+	driver := strings.ToLower(strings.TrimSpace(d.Driver))
+	if driver == "" {
+		driver = DefaultDatabaseDriver
+	}
+	if driver != string(storage.DBDriverPostgres) && driver != "postgresql" {
+		return fmt.Errorf("server requires PostgreSQL (DATABASE_DRIVER=postgres); %s is supported only by the migration helper and tests", driver)
+	}
+	if strings.TrimSpace(d.Host) == "" {
+		return errors.New("database.host is required for PostgreSQL")
+	}
+	if strings.TrimSpace(d.User) == "" {
+		return errors.New("database.user is required for PostgreSQL")
+	}
+	if strings.TrimSpace(d.Name) == "" {
+		return errors.New("database.name is required for PostgreSQL")
+	}
+	return nil
+}
+
 func (d DatabaseConfig) ToStorageConfig() storage.DBConfig {
+	driver := strings.ToLower(strings.TrimSpace(d.Driver))
+	if driver == "" {
+		driver = DefaultDatabaseDriver
+	}
 	port := d.Port
 	if port <= 0 {
-		if strings.EqualFold(strings.TrimSpace(d.Driver), string(storage.DBDriverPostgres)) ||
-			strings.EqualFold(strings.TrimSpace(d.Driver), "postgresql") {
+		if strings.EqualFold(driver, string(storage.DBDriverPostgres)) ||
+			strings.EqualFold(driver, "postgresql") {
 			port = 5432
 		} else {
 			port = 3306
 		}
 	}
 	return storage.DBConfig{
-		Driver:       storage.DBDriver(d.Driver),
+		Driver:       storage.DBDriver(driver),
 		Path:         d.Path,
 		Host:         d.Host,
 		Port:         port,
@@ -628,7 +665,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.mode", "debug")
 	v.SetDefault("server.baseURL", "http://localhost:8418")
 
-	v.SetDefault("database.driver", "sqlite")
+	v.SetDefault("database.driver", DefaultDatabaseDriver)
+	// Keep path only for the standalone SQLite migration helper. The server
+	// validates that its active driver is PostgreSQL before opening a database.
 	v.SetDefault("database.path", "./data/upstream-ops.db")
 	v.SetDefault("database.host", "localhost")
 	// Resolve the default by driver in ToStorageConfig: MySQL uses 3306,
@@ -637,8 +676,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.port", 0)
 	v.SetDefault("database.name", "upstreamops")
 	v.SetDefault("database.sslMode", "disable")
-	v.SetDefault("database.maxOpenConns", 20)
-	v.SetDefault("database.maxIdleConns", 5)
+	v.SetDefault("database.maxOpenConns", DefaultDatabaseMaxOpenConns)
+	v.SetDefault("database.maxIdleConns", DefaultDatabaseMaxIdleConns)
 
 	// CLAUDE.md 默认建议：余额 15 分钟，倍率 30 分钟。
 	v.SetDefault("scheduler.balanceCron", "37 */15 * * * *")

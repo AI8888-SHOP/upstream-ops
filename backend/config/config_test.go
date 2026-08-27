@@ -22,6 +22,9 @@ func TestLoadAppliesUpstreamDefaults(t *testing.T) {
 	if cfg.Scheduler.Retention.GatewayUsageLogsDays != 90 {
 		t.Fatalf("gateway usage retention = %d", cfg.Scheduler.Retention.GatewayUsageLogsDays)
 	}
+	if cfg.Database.Driver != DefaultDatabaseDriver {
+		t.Fatalf("database driver = %q, want %q", cfg.Database.Driver, DefaultDatabaseDriver)
+	}
 	if !cfg.Gateway.ModelCooldownProbeEnabled ||
 		cfg.Gateway.ModelCooldownProbeIntervalMinutes != DefaultGatewayModelCooldownProbeIntervalMinutes ||
 		cfg.Gateway.ModelCooldownProbeTimeoutSeconds != DefaultGatewayModelCooldownProbeTimeoutSeconds {
@@ -45,6 +48,10 @@ func TestLoadCacheHealthConfig(t *testing.T) {
 }
 
 func TestDatabaseConfigUsesDriverSpecificDefaultPort(t *testing.T) {
+	defaultDB := (DatabaseConfig{}).ToStorageConfig()
+	if defaultDB.Driver != storage.DBDriverPostgres || defaultDB.Port != 5432 {
+		t.Fatalf("empty database config = %+v, want PostgreSQL on 5432", defaultDB)
+	}
 	postgres := (DatabaseConfig{Driver: string(storage.DBDriverPostgres)}).ToStorageConfig()
 	if postgres.Port != 5432 {
 		t.Fatalf("postgres default port = %d, want 5432", postgres.Port)
@@ -52,6 +59,17 @@ func TestDatabaseConfigUsesDriverSpecificDefaultPort(t *testing.T) {
 	mysql := (DatabaseConfig{Driver: string(storage.DBDriverMySQL)}).ToStorageConfig()
 	if mysql.Port != 3306 {
 		t.Fatalf("mysql default port = %d, want 3306", mysql.Port)
+	}
+}
+
+func TestDatabaseConfigRejectsSQLiteForServer(t *testing.T) {
+	if err := (DatabaseConfig{Driver: string(storage.DBDriverSQLite)}).ValidateForServer(); err == nil {
+		t.Fatal("SQLite server configuration unexpectedly accepted")
+	}
+	if err := (DatabaseConfig{
+		Driver: string(storage.DBDriverPostgres), Host: "db", User: "upstreamops", Name: "upstreamops",
+	}).ValidateForServer(); err != nil {
+		t.Fatalf("valid PostgreSQL configuration rejected: %v", err)
 	}
 }
 

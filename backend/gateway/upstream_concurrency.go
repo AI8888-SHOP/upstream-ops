@@ -2,7 +2,10 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
+	"time"
 )
 
 const (
@@ -203,4 +206,50 @@ func (rt *Runtime) acquireUpstreamConcurrency(ctx context.Context, target *upstr
 		return func() {}, nil
 	}
 	return rt.Service.upstreamConcurrencyRegistry().acquire(ctx, key, limit)
+}
+
+// acquireUpstreamConcurrencyForAttempt bounds time spent waiting for a busy
+// upstream. The caller's start timestamp is intentionally taken before the
+// acquire, so a queued request cannot appear to have a fast first token after
+// it finally reaches the upstream. A configured first-token budget has
+// priority; otherwise the gateway forward timeout is the queue budget.
+func (rt *Runtime) acquireUpstreamConcurrencyForAttempt(
+	ctx context.Context,
+	target *upstreamTarget,
+	started time.Time,
+	firstTokenTimeout time.Duration,
+) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	budget := firstTokenTimeout
+	if budget <= 0 && rt != nil {
+		budget = rt.gatewayRuntime().ForwardTimeout()
+	}
+	if budget <= 0 {
+		return rt.acquireUpstreamConcurrency(ctx, target)
+	}
+	left := budget
+	if !started.IsZero() {
+		left = budget - time.Since(started)
+	}
+	if left <= 0 {
+		if firstTokenTimeout > 0 && ctx.Err() == nil {
+			return nil, fmt.Errorf("%w after %s", errFirstTokenTimeout, firstTokenTimeout)
+		}
+		return nil, context.DeadlineExceeded
+	}
+	queueCtx, cancel := context.WithTimeout(ctx, left)
+	defer cancel()
+	release, err := rt.acquireUpstreamConcurrency(queueCtx, target)
+	if err == nil {
+		return release, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if firstTokenTimeout > 0 && errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%w after %s", errFirstTokenTimeout, firstTokenTimeout)
+	}
+	return nil, err
 }

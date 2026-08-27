@@ -154,13 +154,22 @@ func (rt *Runtime) forwardStreamWithVirtualCache(
 	firstTokenTimeout time.Duration,
 	virtualCachePercent ...int,
 ) streamAttemptResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cachePercent := 0
 	if len(virtualCachePercent) > 0 {
 		cachePercent = virtualCachePercent[0]
 	}
-	release, err := rt.acquireUpstreamConcurrency(ctx, target)
+	start := time.Now()
+	release, err := rt.acquireUpstreamConcurrencyForAttempt(ctx, target, start, firstTokenTimeout)
 	if err != nil {
-		return streamAttemptResult{Err: err}
+		result := streamAttemptResult{Err: err}
+		if rt.isFirstTokenTimeout(err) {
+			ms := time.Since(start).Milliseconds()
+			result.FirstTokenMS = &ms
+		}
+		return result
 	}
 	// A missing Anthropic input count is repaired through a follow-up request.
 	// Release this stream's slot before that request so a provider concurrency
@@ -186,7 +195,16 @@ func (rt *Runtime) forwardStreamWithVirtualCache(
 		}
 	}
 	gwCfg := rt.gatewayRuntime()
-	upCtx, upCancel := context.WithTimeout(upBase, gwCfg.ForwardTimeout())
+	forwardTimeout := gwCfg.ForwardTimeout()
+	forwardLeft := forwardTimeout - time.Since(start)
+	if forwardLeft <= 0 {
+		if firstTokenTimeout > 0 {
+			ms := time.Since(start).Milliseconds()
+			return streamAttemptResult{FirstTokenMS: &ms, Err: fmt.Errorf("%w after %s", errFirstTokenTimeout, firstTokenTimeout)}
+		}
+		return streamAttemptResult{Err: context.DeadlineExceeded}
+	}
+	upCtx, upCancel := context.WithTimeout(upBase, forwardLeft)
 	defer upCancel()
 
 	// 可取消：仅首字超时 / 未 commit 的客户端断开时 abort
@@ -202,7 +220,6 @@ func (rt *Runtime) forwardStreamWithVirtualCache(
 		target.onUpstreamStart()
 	}
 	client := rt.httpClientForTarget(target.Channel, target.Provider)
-	start := time.Now()
 	resp, err := rt.doHTTPWithFirstTokenDeadline(reqCtx, abortReq, client, req, start, firstTokenTimeout)
 	if err != nil {
 		return streamAttemptResult{Err: err}

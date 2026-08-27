@@ -259,9 +259,11 @@ Saving writes the configuration file. Applying settings hot-reloads authenticati
 
 ## Quick Start
 
-### Docker Compose with SQLite
+### Docker Compose with PostgreSQL
 
-SQLite is the default deployment mode.
+PostgreSQL is the only production database mode. SQLite remains available to
+the migration helper and tests, but the server refuses to start with SQLite
+because its single-writer lock can stall gateway traffic.
 
 ```bash
 cp .env.example .env
@@ -271,6 +273,13 @@ Edit `.env` and set at least:
 
 ```env
 APP_SECRET=replace-with-a-random-string-at-least-32-bytes
+DATABASE_DRIVER=postgres
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
+DATABASE_USER=upstreamops
+DATABASE_PASSWORD=replace-with-database-password
+DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
 ```
 
 `APP_SECRET` is used to encrypt sensitive fields with AES-GCM, including upstream passwords, tokens, cookies, notification channel secrets, and captcha provider API keys. If you change it later, existing encrypted data cannot be decrypted.
@@ -306,13 +315,8 @@ curl -fsS http://localhost:8418/healthz
 
 `HTTP_PORT` changes only the host mapping. The container and health check keep the original default port `8418`.
 
-Default database file inside the container:
-
-```text
-/app/data/upstream-ops.db
-```
-
-The host file is `data/upstream-ops.db`. Runtime system settings are persisted to `data/config.yaml`.
+Runtime system settings are still persisted to `data/config.yaml`, while
+application data, usage logs, quota, and settlement are stored in PostgreSQL.
 
 ### Pin the Image Version
 
@@ -333,9 +337,11 @@ For production, pin a specific version:
 IMAGE_TAG=v0.0.33
 ```
 
-## MySQL Deployment
+## Legacy MySQL Deployments
 
-Use the MySQL compose file together with the base compose file:
+New server versions require PostgreSQL. The MySQL compose file is retained only
+for operators who need to inspect or migrate an older installation; it cannot
+start the current server because `DATABASE_DRIVER=mysql` is rejected.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d
@@ -354,7 +360,11 @@ MYSQL_PORT=33069
 
 ## High-load deployment and one-click upgrade
 
-When `gateway_usage_logs` grows beyond roughly 50,000 rows or the SQLite file is larger than about 128 MB, use PostgreSQL as the durable primary database. Redis is optional cache/lock infrastructure and is not used as the accounting source of truth.
+Legacy SQLite deployments must be migrated to PostgreSQL before serving
+production traffic. PostgreSQL's connection pool lets usage queries, cooldown
+updates, and gateway settlement proceed without SQLite's single-writer queue.
+Redis remains optional cache/lock infrastructure and is not used as the
+accounting source of truth.
 
 ### Upgrade an older Docker installation
 
@@ -473,25 +483,7 @@ LOG_LEVEL=info
 
 ### Database
 
-SQLite:
-
-```env
-DATABASE_DRIVER=sqlite
-DATABASE_PATH=/app/data/upstream-ops.db
-```
-
-MySQL:
-
-```env
-DATABASE_DRIVER=mysql
-DATABASE_HOST=mysql
-DATABASE_PORT=3306
-DATABASE_USER=upstreamops
-DATABASE_PASSWORD=change-me
-DATABASE_NAME=upstreamops
-```
-
-PostgreSQL:
+The server accepts PostgreSQL only:
 
 ```env
 DATABASE_DRIVER=postgres
@@ -501,13 +493,17 @@ DATABASE_USER=upstreamops
 DATABASE_PASSWORD=change-me
 DATABASE_NAME=upstreamops
 DATABASE_SSL_MODE=require
-DATABASE_MAX_OPEN_CONNS=20
-DATABASE_MAX_IDLE_CONNS=5
+DATABASE_MAX_OPEN_CONNS=32
+DATABASE_MAX_IDLE_CONNS=8
 ```
 
 PostgreSQL is the durable primary store for configuration, usage, quota, and
 settlement. Redis can be added later for short-lived cache or locks, but must
 not replace these records.
+
+The MySQL driver remains in the storage and migration code for legacy data
+handling, but the server rejects `DATABASE_DRIVER=mysql`. Migrate legacy
+deployments to PostgreSQL before upgrading.
 
 ### Security and Login
 

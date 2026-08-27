@@ -77,8 +77,8 @@ function Write-PostgresOverride([string]$Path, [string]$OverrideImage, [bool]$In
       DATABASE_PASSWORD: "${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}"
       DATABASE_NAME: "${DATABASE_NAME:-upstreamops}"
       DATABASE_SSL_MODE: "${DATABASE_SSL_MODE:-disable}"
-      DATABASE_MAX_OPEN_CONNS: "${DATABASE_MAX_OPEN_CONNS:-20}"
-      DATABASE_MAX_IDLE_CONNS: "${DATABASE_MAX_IDLE_CONNS:-5}"
+      DATABASE_MAX_OPEN_CONNS: "${DATABASE_MAX_OPEN_CONNS:-32}"
+      DATABASE_MAX_IDLE_CONNS: "${DATABASE_MAX_IDLE_CONNS:-8}"
 '@ -split "`r?`n"
     if (-not [string]::IsNullOrWhiteSpace($MigrationNetwork)) {
         $lines += @'

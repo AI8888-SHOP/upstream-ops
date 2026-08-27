@@ -272,9 +272,9 @@ UpstreamOps 主要解决这些痛点：
 
 ## 快速启动
 
-### Docker Compose（SQLite）
+### Docker Compose（PostgreSQL）
 
-默认使用 SQLite 单文件数据库，推荐直接用 Docker Compose：
+生产环境统一使用 PostgreSQL。SQLite 的单写入锁会让使用记录、冷却状态和网关请求互相排队，服务端不会启动在 SQLite 上；SQLite 仅保留给迁移工具和测试。
 
 ```bash
 cp .env.example .env
@@ -284,6 +284,13 @@ cp .env.example .env
 
 ```env
 APP_SECRET=请替换为 32 字节以上随机字符串
+DATABASE_DRIVER=postgres
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
+DATABASE_USER=upstreamops
+DATABASE_PASSWORD=请替换为数据库密码
+DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
 ```
 
 `APP_SECRET` 用于 AES-GCM 加密敏感字段，包括上游密码、Token、Cookie、通知渠道密钥、验证码平台 API Key 等。修改后既有加密数据将无法解密，请务必妥善保存。
@@ -319,13 +326,7 @@ curl -fsS http://localhost:8418/healthz
 
 `HTTP_PORT` 只修改宿主机映射，容器内端口和健康检查仍使用原版默认的 `8418`。
 
-默认数据文件在容器内：
-
-```text
-/app/data/upstream-ops.db
-```
-
-宿主机对应文件是项目根目录下的 `data/upstream-ops.db`。系统设置配置文件会持久化到 `data/config.yaml`。
+配置文件仍会持久化到宿主机 `data/config.yaml`；业务数据、使用记录和结算全部存储在 PostgreSQL。
 
 ### 固定镜像版本
 
@@ -348,7 +349,7 @@ IMAGE_TAG=v0.0.33
 
 ## MySQL 部署
 
-如果不想使用 SQLite，可以叠加 MySQL 配置：
+MySQL 配置仅用于兼容旧部署；生产新部署请使用 PostgreSQL：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d
@@ -367,7 +368,7 @@ MYSQL_PORT=33069
 
 ## 高负载部署与旧版一键升级
 
-当 `gateway_usage_logs` 持续增长（例如超过 5 万条或数据库文件超过约 128 MB）时，SQLite 的单写入连接会让统计查询和结算互相排队。程序启动时会在日志中提示升级；推荐使用 PostgreSQL 保存主数据，Redis 只作为可选的短期缓存，不承载费用、配额或结算真相。
+旧 SQLite 部署必须先迁移到 PostgreSQL。迁移完成后，统计查询、结算和网关转发可以使用 PostgreSQL 连接池并行执行；Redis 仍只作为可选的短期缓存，不承载费用、配额或结算真相。
 
 ### 普通旧版本一键升级（Docker）
 
@@ -455,23 +456,22 @@ LOG_LEVEL=info
 
 ### 数据库配置
 
-SQLite：
+服务端仅接受 PostgreSQL：
 
 ```env
-DATABASE_DRIVER=sqlite
-DATABASE_PATH=/app/data/upstream-ops.db
-```
-
-MySQL：
-
-```env
-DATABASE_DRIVER=mysql
-DATABASE_HOST=mysql
-DATABASE_PORT=3306
+DATABASE_DRIVER=postgres
+DATABASE_HOST=postgres.example.internal
+DATABASE_PORT=5432
 DATABASE_USER=upstreamops
 DATABASE_PASSWORD=change-me
 DATABASE_NAME=upstreamops
+DATABASE_SSL_MODE=require
+DATABASE_MAX_OPEN_CONNS=32
+DATABASE_MAX_IDLE_CONNS=8
 ```
+
+MySQL 驱动仍保留在存储和迁移代码中用于旧数据处理，但服务端会拒绝
+`DATABASE_DRIVER=mysql`；旧部署升级前请先迁移到 PostgreSQL。
 
 ### 安全与登录
 

@@ -42,6 +42,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
 		os.Exit(1)
 	}
+	if err := cfg.Database.ValidateForServer(); err != nil {
+		fmt.Fprintf(os.Stderr, "database configuration invalid: %v\n", err)
+		fmt.Fprintln(os.Stderr, "migrate legacy SQLite data with upstream-ops-migrate, then set DATABASE_DRIVER=postgres")
+		os.Exit(1)
+	}
 	resolvedConfigPath := config.ResolvePath(*configPath, usedConfigPath)
 
 	log := logger.New(cfg.Log.Level, cfg.Log.Format)
@@ -97,14 +102,6 @@ func main() {
 		log.Error("auto migrate failed", "err", err)
 		os.Exit(1)
 	}
-	if assessment := storage.AssessUpgrade(cfg.Database.ToStorageConfig(), db); assessment.Recommended {
-		log.Warn("SQLite upgrade recommended for current traffic",
-			"usage_rows", assessment.UsageRows,
-			"database_bytes", assessment.DatabaseBytes,
-			"guide", assessment.Recommendation,
-		)
-	}
-
 	channels := storage.NewChannels(db)
 	authSessions := storage.NewAuthSessions(db)
 	captchas := storage.NewCaptchas(db)

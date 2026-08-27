@@ -107,7 +107,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			routes: routes, validator: validator, requestID: reqID, affinity: affinity,
 			firstToken: firstTokenTimeout, hedgeActive: hedgeActive,
 			hedgeEligibilityKnown: true, virtualCacheEligible: virtualCacheEligible,
-			prepareCache: &upstreamRequestPrepareCache{},
+			prepareCache: &upstreamRequestPrepareCache{}, targetCache: &upstreamTargetRequestCache{},
 		})
 		return
 	}
@@ -151,6 +151,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	attemptNo := 0
 	routesTried := 0
 	prepareCache := &upstreamRequestPrepareCache{}
+	targetCache := &upstreamTargetRequestCache{}
 	finishRecoveryProbe := func(routeID uint) {
 		if !affinity.Recovery || affinity.RecoveryRouteID != routeID {
 			return
@@ -222,7 +223,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				attemptKind = attemptKindFailover
 			}
 
-			target, resolveErr := rt.resolveUpstreamTarget(&route)
+			target, resolveErr := targetCache.resolve(rt, &route)
 			if resolveErr != nil {
 				lastErr = resolveErr
 				errInfo := usageErrorInfo{
@@ -687,9 +688,18 @@ func (rt *Runtime) forwardOnce(
 	if target == nil {
 		return 0, nil, nil, nil, errors.New("upstream target is nil")
 	}
-	release, err := rt.acquireUpstreamConcurrency(ctx, target)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	start := time.Now()
+	release, err := rt.acquireUpstreamConcurrencyForAttempt(ctx, target, start, firstTokenTimeout)
 	if err != nil {
-		return 0, nil, nil, nil, err
+		var ft *int64
+		if rt.isFirstTokenTimeout(err) {
+			ms := time.Since(start).Milliseconds()
+			ft = &ms
+		}
+		return 0, nil, nil, ft, err
 	}
 	defer release()
 
@@ -706,7 +716,6 @@ func (rt *Runtime) forwardOnce(
 		target.onUpstreamStart()
 	}
 	client := rt.httpClientForTarget(target.Channel, target.Provider)
-	start := time.Now()
 	resp, err := rt.doHTTPWithFirstTokenDeadline(reqCtx, abortReq, client, req, start, firstTokenTimeout)
 	if err != nil {
 		return 0, nil, nil, nil, err

@@ -45,6 +45,7 @@ type coordinatedForwardRequest struct {
 	virtualCacheReason string
 	affinity           routeAffinityContext
 	prepareCache       *upstreamRequestPrepareCache
+	targetCache        *upstreamTargetRequestCache
 }
 
 type coordinatedRoutePlan struct {
@@ -256,6 +257,9 @@ func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, vali
 func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	if req.prepareCache == nil {
 		req.prepareCache = &upstreamRequestPrepareCache{}
+	}
+	if req.targetCache == nil {
+		req.targetCache = &upstreamTargetRequestCache{}
 	}
 	groupsByChannel := rt.loadGroupsByChannel(req.c.Request.Context(), req.routes)
 	candidates := rt.sortRoutesWithAffinity(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil, &req.affinity, req.requestedModel)
@@ -613,7 +617,7 @@ func validateCoordinatedAttempt(attempt *coordinatedForwardAttempt, excludedRout
 }
 
 func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, attempt *coordinatedForwardAttempt) error {
-	target, err := rt.resolveUpstreamTarget(&attempt.Route)
+	target, err := req.targetCache.resolve(rt, &attempt.Route)
 	if err != nil {
 		return err
 	}
