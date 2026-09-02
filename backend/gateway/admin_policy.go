@@ -3,11 +3,66 @@ package gateway
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/bejix/upstream-ops/backend/config"
 )
+
+// normalizeCacheHealthOverride validates one group-level cache-health value.
+// A nil pointer means "inherit global"; zero is retained for controls where it
+// explicitly disables protection.
+func normalizeCacheHealthOverride(name string, value int) (int, error) {
+	max := 0
+	switch name {
+	case "window":
+		max = 7 * 24 * 60
+	case "blacklist":
+		max = 30 * 24 * 60
+	case "minimum":
+		max = config.MaxGatewayCacheHitRateMinimumRequests
+	default:
+		return 0, fmt.Errorf("unknown cache health override %q", name)
+	}
+	if value < 0 || value > max {
+		return 0, fmt.Errorf("cache health %s must be between 0 and %d", name, max)
+	}
+	if name == "minimum" && value < config.MinGatewayCacheHitRateMinimumRequests {
+		value = config.MinGatewayCacheHitRateMinimumRequests
+	}
+	return value, nil
+}
+
+func normalizeCacheHealthThreshold(value float64) (float64, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
+		return 0, errors.New("cache health threshold must be between 0 and 100")
+	}
+	return value, nil
+}
+
+func cacheHealthIntOverride(name string, value *int) (*int, error) {
+	if value == nil {
+		return nil, nil
+	}
+	normalized, err := normalizeCacheHealthOverride(name, *value)
+	if err != nil {
+		return nil, err
+	}
+	return &normalized, nil
+}
+
+func cacheHealthThresholdOverride(value *float64) (*float64, error) {
+	if value == nil {
+		return nil, nil
+	}
+	normalized, err := normalizeCacheHealthThreshold(*value)
+	if err != nil {
+		return nil, err
+	}
+	return &normalized, nil
+}
 
 func (svc *Service) clampGroupRetryPolicy(retryCount, failoverMax, cooldownSec int) (int, int, int) {
 	if retryCount < 0 {

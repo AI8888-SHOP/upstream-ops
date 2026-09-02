@@ -1,7 +1,52 @@
 // 管理面与鉴权相关输入输出 DTO。
 package gateway
 
-import "github.com/bejix/upstream-ops/backend/storage"
+import (
+	"bytes"
+	"encoding/json"
+
+	"github.com/bejix/upstream-ops/backend/storage"
+)
+
+// optionalInt and optionalFloat64 distinguish an omitted update field from an
+// explicit JSON null. Null clears a group override and restores inheritance.
+type optionalInt struct {
+	Value *int
+	Set   bool
+}
+
+func (o *optionalInt) UnmarshalJSON(data []byte) error {
+	o.Set = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		o.Value = nil
+		return nil
+	}
+	var value int
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	o.Value = &value
+	return nil
+}
+
+type optionalFloat64 struct {
+	Value *float64
+	Set   bool
+}
+
+func (o *optionalFloat64) UnmarshalJSON(data []byte) error {
+	o.Set = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		o.Value = nil
+		return nil
+	}
+	var value float64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	o.Value = &value
+	return nil
+}
 
 // AuthResult 鉴权结果：命中的网关密钥及其所属分组。
 type AuthResult struct {
@@ -35,6 +80,10 @@ type CreateGroupInput struct {
 	HedgeMaxAttempts                      *int     `json:"hedge_max_attempts"`
 	HedgeVirtualCacheEnabled              *bool    `json:"hedge_virtual_cache_enabled"`
 	VirtualCachePercent                   *int     `json:"virtual_cache_percent"`
+	CacheHitRateWindowMinutes             *int     `json:"cache_hit_rate_window_minutes"`
+	CacheHitRateThresholdPercent          *float64 `json:"cache_hit_rate_threshold_percent"`
+	CacheHitRateBlacklistMinutes          *int     `json:"cache_hit_rate_blacklist_minutes"`
+	CacheHitRateMinimumRequests           *int     `json:"cache_hit_rate_minimum_requests"`
 	ResponseValidationEnabled             *bool    `json:"response_validation_enabled"`
 	ResponseValidationVirtualCacheEnabled *bool    `json:"response_validation_virtual_cache_enabled"`
 	ResponseValidationStreamMode          *string  `json:"response_validation_stream_mode"`
@@ -46,36 +95,40 @@ type CreateGroupInput struct {
 
 // UpdateGroupInput 更新网关分组（指针字段：nil 表示不改）。
 type UpdateGroupInput struct {
-	Name                                  *string  `json:"name"`
-	Description                           *string  `json:"description"`
-	Status                                *string  `json:"status"`
-	RateSortDirection                     *string  `json:"rate_sort_direction"`
-	RateResortEnabled                     *bool    `json:"rate_resort_enabled"`
-	MaxBillingRateMultiplier              *float64 `json:"max_billing_rate_multiplier"`
-	LoadBalanceRouteCount                 *int     `json:"load_balance_route_count"`
-	ModelMappingJSON                      *string  `json:"model_mapping"`
-	ModelsJSON                            *string  `json:"models_json"`
-	ModelsMode                            *string  `json:"models_mode"`
-	RetryEnabled                          *bool    `json:"retry_enabled"`
-	RetryCount                            *int     `json:"retry_count"`
-	ResponseValidationRetryCount          *int     `json:"response_validation_retry_count"`
-	FailoverEnabled                       *bool    `json:"failover_enabled"`
-	FailoverMax                           *int     `json:"failover_max"`
-	FailoverOn4xx                         *bool    `json:"failover_on_4xx"`
-	CooldownSeconds                       *int     `json:"cooldown_seconds"`
-	FirstTokenTimeoutSec                  *int     `json:"first_token_timeout_sec"`
-	FirstTokenTimeoutCooldownEnabled      *bool    `json:"first_token_timeout_cooldown_enabled"`
-	HedgeEnabled                          *bool    `json:"hedge_enabled"`
-	HedgeDelaySeconds                     *float64 `json:"hedge_delay_seconds"`
-	HedgeMaxParallel                      *int     `json:"hedge_max_parallel"`
-	HedgeMaxAttempts                      *int     `json:"hedge_max_attempts"`
-	HedgeVirtualCacheEnabled              *bool    `json:"hedge_virtual_cache_enabled"`
-	VirtualCachePercent                   *int     `json:"virtual_cache_percent"`
-	ResponseValidationEnabled             *bool    `json:"response_validation_enabled"`
-	ResponseValidationVirtualCacheEnabled *bool    `json:"response_validation_virtual_cache_enabled"`
-	ResponseValidationStreamMode          *string  `json:"response_validation_stream_mode"`
-	ResponseValidationPrefixBytes         *int     `json:"response_validation_prefix_bytes"`
-	ResponseValidationPrefixTimeoutMS     *int     `json:"response_validation_prefix_timeout_ms"`
+	Name                                  *string         `json:"name"`
+	Description                           *string         `json:"description"`
+	Status                                *string         `json:"status"`
+	RateSortDirection                     *string         `json:"rate_sort_direction"`
+	RateResortEnabled                     *bool           `json:"rate_resort_enabled"`
+	MaxBillingRateMultiplier              *float64        `json:"max_billing_rate_multiplier"`
+	LoadBalanceRouteCount                 *int            `json:"load_balance_route_count"`
+	ModelMappingJSON                      *string         `json:"model_mapping"`
+	ModelsJSON                            *string         `json:"models_json"`
+	ModelsMode                            *string         `json:"models_mode"`
+	RetryEnabled                          *bool           `json:"retry_enabled"`
+	RetryCount                            *int            `json:"retry_count"`
+	ResponseValidationRetryCount          *int            `json:"response_validation_retry_count"`
+	FailoverEnabled                       *bool           `json:"failover_enabled"`
+	FailoverMax                           *int            `json:"failover_max"`
+	FailoverOn4xx                         *bool           `json:"failover_on_4xx"`
+	CooldownSeconds                       *int            `json:"cooldown_seconds"`
+	FirstTokenTimeoutSec                  *int            `json:"first_token_timeout_sec"`
+	FirstTokenTimeoutCooldownEnabled      *bool           `json:"first_token_timeout_cooldown_enabled"`
+	HedgeEnabled                          *bool           `json:"hedge_enabled"`
+	HedgeDelaySeconds                     *float64        `json:"hedge_delay_seconds"`
+	HedgeMaxParallel                      *int            `json:"hedge_max_parallel"`
+	HedgeMaxAttempts                      *int            `json:"hedge_max_attempts"`
+	HedgeVirtualCacheEnabled              *bool           `json:"hedge_virtual_cache_enabled"`
+	VirtualCachePercent                   *int            `json:"virtual_cache_percent"`
+	CacheHitRateWindowMinutes             optionalInt     `json:"cache_hit_rate_window_minutes"`
+	CacheHitRateThresholdPercent          optionalFloat64 `json:"cache_hit_rate_threshold_percent"`
+	CacheHitRateBlacklistMinutes          optionalInt     `json:"cache_hit_rate_blacklist_minutes"`
+	CacheHitRateMinimumRequests           optionalInt     `json:"cache_hit_rate_minimum_requests"`
+	ResponseValidationEnabled             *bool           `json:"response_validation_enabled"`
+	ResponseValidationVirtualCacheEnabled *bool           `json:"response_validation_virtual_cache_enabled"`
+	ResponseValidationStreamMode          *string         `json:"response_validation_stream_mode"`
+	ResponseValidationPrefixBytes         *int            `json:"response_validation_prefix_bytes"`
+	ResponseValidationPrefixTimeoutMS     *int            `json:"response_validation_prefix_timeout_ms"`
 	// UserAgent 空串=清除组级 UA。
 	UserAgent *string `json:"user_agent"`
 }

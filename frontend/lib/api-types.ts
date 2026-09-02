@@ -684,6 +684,11 @@ export interface GatewayGroup {
   hedge_max_attempts?: number
   hedge_virtual_cache_enabled?: boolean
   virtual_cache_percent?: number
+  /** Null/undefined inherits the corresponding global gateway setting. */
+  cache_hit_rate_window_minutes?: number | null
+  cache_hit_rate_threshold_percent?: number | null
+  cache_hit_rate_blacklist_minutes?: number | null
+  cache_hit_rate_minimum_requests?: number | null
   /** 是否启用响应内容正则校验 */
   response_validation_enabled?: boolean
   /** 正则预提交拒绝并切换其它渠道后，将 winner 输入按虚拟缓存读取计费 */

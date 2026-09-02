@@ -876,6 +876,22 @@ export function GatewayPage() {
       hedge_max_attempts: String(g.hedge_max_attempts ?? 4),
       hedge_virtual_cache_enabled: !!g.hedge_virtual_cache_enabled,
       virtual_cache_percent: String(g.virtual_cache_percent ?? 100),
+      cache_hit_rate_window_minutes:
+        g.cache_hit_rate_window_minutes == null
+          ? ""
+          : String(g.cache_hit_rate_window_minutes),
+      cache_hit_rate_threshold_percent:
+        g.cache_hit_rate_threshold_percent == null
+          ? ""
+          : String(g.cache_hit_rate_threshold_percent),
+      cache_hit_rate_blacklist_minutes:
+        g.cache_hit_rate_blacklist_minutes == null
+          ? ""
+          : String(g.cache_hit_rate_blacklist_minutes),
+      cache_hit_rate_minimum_requests:
+        g.cache_hit_rate_minimum_requests == null
+          ? ""
+          : String(g.cache_hit_rate_minimum_requests),
       response_validation_enabled: !!g.response_validation_enabled,
       response_validation_virtual_cache_enabled:
         !!g.response_validation_virtual_cache_enabled,
@@ -943,6 +959,53 @@ export function GatewayPage() {
       0,
       Math.min(100, Math.floor(Number(groupForm.virtual_cache_percent) || 0)),
     )
+    const cacheWindowText = groupForm.cache_hit_rate_window_minutes.trim()
+    const cacheThresholdText = groupForm.cache_hit_rate_threshold_percent.trim()
+    const cacheBlacklistText = groupForm.cache_hit_rate_blacklist_minutes.trim()
+    const cacheMinimumText = groupForm.cache_hit_rate_minimum_requests.trim()
+    const cacheHitRateWindowMinutes = cacheWindowText === "" ? null : Number(cacheWindowText)
+    const cacheHitRateThresholdPercent =
+      cacheThresholdText === "" ? null : Number(cacheThresholdText)
+    const cacheHitRateBlacklistMinutes =
+      cacheBlacklistText === "" ? null : Number(cacheBlacklistText)
+    const cacheHitRateMinimumRequests =
+      cacheMinimumText === "" ? null : Number(cacheMinimumText)
+    if (
+      cacheHitRateWindowMinutes != null &&
+      (!Number.isInteger(cacheHitRateWindowMinutes) ||
+        cacheHitRateWindowMinutes < 0 ||
+        cacheHitRateWindowMinutes > 10080)
+    ) {
+      toast.error("缓存统计窗口必须是 0 到 10080 的整数")
+      return
+    }
+    if (
+      cacheHitRateThresholdPercent != null &&
+      (!Number.isFinite(cacheHitRateThresholdPercent) ||
+        cacheHitRateThresholdPercent < 0 ||
+        cacheHitRateThresholdPercent > 100)
+    ) {
+      toast.error("缓存命中率限制必须在 0% 到 100% 之间")
+      return
+    }
+    if (
+      cacheHitRateBlacklistMinutes != null &&
+      (!Number.isInteger(cacheHitRateBlacklistMinutes) ||
+        cacheHitRateBlacklistMinutes < 0 ||
+        cacheHitRateBlacklistMinutes > 43200)
+    ) {
+      toast.error("缓存拉黑时长必须是 0 到 43200 的整数")
+      return
+    }
+    if (
+      cacheHitRateMinimumRequests != null &&
+      (!Number.isInteger(cacheHitRateMinimumRequests) ||
+        cacheHitRateMinimumRequests < 10 ||
+        cacheHitRateMinimumRequests > 100000)
+    ) {
+      toast.error("最少成功请求数必须是 10 到 100000 的整数")
+      return
+    }
     const policy = {
       rate_resort_enabled: groupForm.rate_resort_enabled,
       max_billing_rate_multiplier: maxBillingRateMultiplier,
@@ -963,6 +1026,10 @@ export function GatewayPage() {
       hedge_max_attempts: hedgeMaxAttempts,
       hedge_virtual_cache_enabled: groupForm.hedge_virtual_cache_enabled,
       virtual_cache_percent: virtualCachePercent,
+      cache_hit_rate_window_minutes: cacheHitRateWindowMinutes,
+      cache_hit_rate_threshold_percent: cacheHitRateThresholdPercent,
+      cache_hit_rate_blacklist_minutes: cacheHitRateBlacklistMinutes,
+      cache_hit_rate_minimum_requests: cacheHitRateMinimumRequests,
       response_validation_enabled: groupForm.response_validation_enabled,
       response_validation_virtual_cache_enabled:
         groupForm.response_validation_virtual_cache_enabled,

@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	githubRepoURL              = "https://github.com/bejix/upstream-ops"
-	defaultGitHubLatestRelease = "https://api.github.com/repos/bejix/upstream-ops/releases/latest"
+	githubRepoURL              = "https://github.com/AI8888-SHOP/upstream-ops"
+	defaultGitHubLatestRelease = "https://api.github.com/repos/AI8888-SHOP/upstream-ops/releases/latest"
 )
 
 var (

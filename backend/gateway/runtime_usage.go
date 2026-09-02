@@ -195,9 +195,9 @@ func (rt *Runtime) recordUsage(
 	// keep it off the request critical path so usage accounting never waits on
 	// aggregate SQL.
 	if providerID > 0 {
-		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceProvider, providerID, group.ID, route.ID)
+		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceProvider, providerID, group, route.ID)
 	} else if channelID > 0 {
-		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceMonitor, channelID, group.ID, route.ID)
+		rt.scheduleCacheHealthEvaluation(storage.GatewayRouteSourceMonitor, channelID, group, route.ID)
 	}
 	if settleNow {
 		if _, err := rt.Usage.FinalizeRequest(storage.GatewayFinalizeRequestInput{

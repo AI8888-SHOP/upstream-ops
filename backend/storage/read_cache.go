@@ -183,7 +183,7 @@ func newStorageReadCaches() *storageReadCaches {
 	return &storageReadCaches{
 		channels:         newTTLReadCache[uint, Channel](storageReadCacheTTL, cloneChannel),
 		gatewayProviders: newTTLReadCache[uint, GatewayProvider](storageReadCacheTTL, func(item GatewayProvider) GatewayProvider { return item }),
-		gatewayGroups:    newTTLReadCache[uint, GatewayGroup](storageReadCacheTTL, func(item GatewayGroup) GatewayGroup { return item }),
+		gatewayGroups:    newTTLReadCache[uint, GatewayGroup](storageReadCacheTTL, cloneGatewayGroup),
 		gatewayKeys:      newTTLReadCache[string, GatewayKey](storageReadCacheTTL, cloneGatewayKey),
 		gatewayRoutes:    newTTLReadCache[uint, []GatewayRoute](storageReadCacheTTL, cloneGatewayRoutes),
 		routeGroups:      make(map[uint]uint),
@@ -289,6 +289,14 @@ func cloneChannel(item Channel) Channel {
 
 func cloneGatewayKey(item GatewayKey) GatewayKey {
 	item.LastUsedAt = clonePointer(item.LastUsedAt)
+	return item
+}
+
+func cloneGatewayGroup(item GatewayGroup) GatewayGroup {
+	item.CacheHitRateWindowMinutes = clonePointer(item.CacheHitRateWindowMinutes)
+	item.CacheHitRateThresholdPercent = clonePointer(item.CacheHitRateThresholdPercent)
+	item.CacheHitRateBlacklistMinutes = clonePointer(item.CacheHitRateBlacklistMinutes)
+	item.CacheHitRateMinimumRequests = clonePointer(item.CacheHitRateMinimumRequests)
 	return item
 }
 

@@ -1,12 +1,138 @@
 package gateway
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/bejix/upstream-ops/backend/config"
 	"github.com/bejix/upstream-ops/backend/storage"
 )
+
+func intPointer(value int) *int { return &value }
+
+func floatPointer(value float64) *float64 { return &value }
+
+func TestCacheHealthPolicyUsesGroupOverridesAndGlobalFallback(t *testing.T) {
+	global := config.GatewayConfig{
+		CacheHitRateWindowMinutes:    60,
+		CacheHitRateThresholdPercent: 50,
+		CacheHitRateBlacklistMinutes: 15,
+		CacheHitRateMinimumRequests:  20,
+	}
+	group := &storage.GatewayGroup{
+		CacheHitRateThresholdPercent: floatPointer(75),
+		CacheHitRateMinimumRequests:  intPointer(30),
+	}
+	policy := resolveCacheHealthPolicy(global, group)
+	if policy.WindowMinutes != 60 || policy.ThresholdPercent != 75 ||
+		policy.BlacklistMinutes != 15 || policy.MinimumRequests != 30 {
+		t.Fatalf("resolved policy = %+v", policy)
+	}
+
+	group.CacheHitRateWindowMinutes = intPointer(0)
+	if cacheHealthProtectionEnabled(resolveCacheHealthPolicy(global, group)) {
+		t.Fatal("explicit group window 0 did not disable cache health protection")
+	}
+}
+
+func TestUpdateGroupCacheHealthOverridesCanBeClearedToGlobal(t *testing.T) {
+	db := openGatewayTestDB(t)
+	groups := storage.NewGatewayGroups(db)
+	svc := NewService(
+		groups,
+		storage.NewGatewayKeys(db),
+		storage.NewGatewayRoutes(db),
+		storage.NewGatewayUsageLogs(db),
+		nil, nil, nil, nil, nil,
+	)
+	svc.UpdateGatewayConfig(config.GatewayConfig{
+		CacheHitRateWindowMinutes:    60,
+		CacheHitRateThresholdPercent: 50,
+		CacheHitRateBlacklistMinutes: 15,
+		CacheHitRateMinimumRequests:  20,
+	})
+	group, err := svc.CreateGroup(CreateGroupInput{
+		Name:                         "cache-health-overrides",
+		CacheHitRateWindowMinutes:    intPointer(30),
+		CacheHitRateThresholdPercent: floatPointer(80),
+		CacheHitRateBlacklistMinutes: intPointer(10),
+		CacheHitRateMinimumRequests:  intPointer(40),
+	})
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if group.CacheHitRateWindowMinutes == nil || *group.CacheHitRateWindowMinutes != 30 {
+		t.Fatalf("created overrides = %+v", group)
+	}
+
+	var update UpdateGroupInput
+	if err := json.Unmarshal([]byte(`{
+		"cache_hit_rate_window_minutes":null,
+		"cache_hit_rate_threshold_percent":null,
+		"cache_hit_rate_blacklist_minutes":null,
+		"cache_hit_rate_minimum_requests":null
+	}`), &update); err != nil {
+		t.Fatalf("decode update: %v", err)
+	}
+	updated, err := svc.UpdateGroup(group.ID, update)
+	if err != nil {
+		t.Fatalf("clear overrides: %v", err)
+	}
+	if updated.CacheHitRateWindowMinutes != nil || updated.CacheHitRateThresholdPercent != nil ||
+		updated.CacheHitRateBlacklistMinutes != nil || updated.CacheHitRateMinimumRequests != nil {
+		t.Fatalf("overrides were not cleared: %+v", updated)
+	}
+	policy := resolveCacheHealthPolicy(svc.gatewayRuntime(), updated)
+	if policy.WindowMinutes != 60 || policy.ThresholdPercent != 50 ||
+		policy.BlacklistMinutes != 15 || policy.MinimumRequests != 20 {
+		t.Fatalf("cleared policy did not inherit global settings: %+v", policy)
+	}
+}
+
+func TestGroupCacheHealthWorksWhenGlobalProtectionIsDisabled(t *testing.T) {
+	db := openGatewayTestDB(t)
+	groups := storage.NewGatewayGroups(db)
+	routes := storage.NewGatewayRoutes(db)
+	usage := storage.NewGatewayUsageLogs(db)
+	group := &storage.GatewayGroup{
+		Name:                         "group-only-cache-health",
+		Status:                       storage.GatewayGroupStatusActive,
+		CacheHitRateWindowMinutes:    intPointer(30),
+		CacheHitRateThresholdPercent: floatPointer(50),
+		CacheHitRateBlacklistMinutes: intPointer(10),
+		CacheHitRateMinimumRequests:  intPointer(10),
+	}
+	if err := groups.Create(group); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	svc := NewService(groups, storage.NewGatewayKeys(db), routes, usage, nil, nil, nil, nil, nil)
+	svc.UpdateGatewayConfig(config.GatewayConfig{})
+	if !svc.CacheHealthEnabled() {
+		t.Fatal("group-only cache health protection was not reported as enabled")
+	}
+	providerID := uint(77)
+	for i := 0; i < 10; i++ {
+		if err := usage.Create(&storage.GatewayUsageLog{
+			GatewayGroupID:    group.ID,
+			RouteID:           99,
+			GatewayProviderID: providerID,
+			RequestID:         "group-only-" + string(rune('a'+i)),
+			Success:           true,
+			InputTokens:       100,
+			CreatedAt:         time.Now(),
+		}); err != nil {
+			t.Fatalf("create usage: %v", err)
+		}
+	}
+	if err := svc.EvaluateCacheHealthForRoute(storage.GatewayRouteSourceProvider, providerID, group.ID, 99, time.Now()); err != nil {
+		t.Fatalf("evaluate group-only policy: %v", err)
+	}
+	stats, err := svc.CacheHealthStatsForRoute(storage.GatewayRouteSourceProvider, providerID, group.ID, 99)
+	if err != nil || len(stats) != 1 || stats[0].BlacklistedUntil == nil {
+		t.Fatalf("group-only policy did not blacklist: stats=%+v err=%v", stats, err)
+	}
+}
 
 func TestEvaluateCacheHealthBlacklistsProviderRoutesAndExpires(t *testing.T) {
 	db := openGatewayTestDB(t)

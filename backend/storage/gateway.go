@@ -480,6 +480,22 @@ func (r *GatewayUsageLogs) ClearCacheHealthBlacklists() error {
 	}).Error
 }
 
+// ClearCacheHealthStateForGroup releases automatic restrictions for one group
+// while retaining the rolling counters shown in the admin UI.
+func (r *GatewayUsageLogs) ClearCacheHealthStateForGroup(groupID uint) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Model(&GatewayChannelCacheHealth{}).
+		Where("gateway_group_id = ?", groupID).
+		Updates(map[string]any{
+			"blacklisted_until":  nil,
+			"blacklist_reason":   "",
+			"manual_clear_until": nil,
+			"updated_at":         time.Now(),
+		}).Error
+}
+
 // ClearCacheHealthBlacklistsBelowMinimum releases stale restrictions that
 // were created under an older, smaller warm-up threshold. Without this
 // cleanup, a blocked source may receive no traffic and therefore never be
@@ -490,6 +506,22 @@ func (r *GatewayUsageLogs) ClearCacheHealthBlacklistsBelowMinimum(minimum int64)
 	}
 	result := r.db.Model(&GatewayChannelCacheHealth{}).
 		Where("request_count < ? AND blacklisted_until IS NOT NULL", minimum).
+		Updates(map[string]any{
+			"blacklisted_until": nil,
+			"blacklist_reason":  "",
+			"updated_at":        time.Now(),
+		})
+	return result.RowsAffected, result.Error
+}
+
+// ClearCacheHealthBlacklistsBelowMinimumForGroup applies the warm-up release
+// to exactly one gateway group, including the legacy group_id=0 scope.
+func (r *GatewayUsageLogs) ClearCacheHealthBlacklistsBelowMinimumForGroup(groupID uint, minimum int64) (int64, error) {
+	if r == nil || r.db == nil || minimum <= 0 {
+		return 0, nil
+	}
+	result := r.db.Model(&GatewayChannelCacheHealth{}).
+		Where("gateway_group_id = ? AND request_count < ? AND blacklisted_until IS NOT NULL", groupID, minimum).
 		Updates(map[string]any{
 			"blacklisted_until": nil,
 			"blacklist_reason":  "",
@@ -1799,6 +1831,15 @@ func (r *GatewayRoutes) InvalidateAllCacheHealth() {
 		return
 	}
 	r.readCaches.gatewayRoutes.clear()
+}
+
+// InvalidateCacheHealthForGroup drops one group's cached route snapshot after
+// its effective cache-health policy changes.
+func (r *GatewayRoutes) InvalidateCacheHealthForGroup(groupID uint) {
+	if r == nil || r.readCaches == nil {
+		return
+	}
+	r.readCaches.gatewayRoutes.invalidate(groupID)
 }
 
 // SaveForGroup 全量保存某组下的路由列表。

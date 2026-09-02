@@ -32,7 +32,7 @@ func TestIsVersionNewer(t *testing.T) {
 func TestVersionEndpointReportsUpdate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	withGitHubReleaseServer(t, http.StatusOK, `{"tag_name":"v999.0.0","html_url":"https://github.com/bejix/upstream-ops/releases/tag/v999.0.0"}`)
+	withGitHubReleaseServer(t, http.StatusOK, `{"tag_name":"v999.0.0","html_url":"https://github.com/AI8888-SHOP/upstream-ops/releases/tag/v999.0.0"}`)
 	resp := requestVersion(t)
 
 	if !resp.UpdateAvailable {
@@ -49,7 +49,7 @@ func TestVersionEndpointReportsUpdate(t *testing.T) {
 func TestVersionEndpointReportsNoUpdate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	withGitHubReleaseServer(t, http.StatusOK, `{"tag_name":"`+global.VERSION+`","html_url":"https://github.com/bejix/upstream-ops/releases/tag/v`+global.VERSION+`"}`)
+	withGitHubReleaseServer(t, http.StatusOK, `{"tag_name":"`+global.VERSION+`","html_url":"https://github.com/AI8888-SHOP/upstream-ops/releases/tag/v`+global.VERSION+`"}`)
 	resp := requestVersion(t)
 
 	if resp.UpdateAvailable {

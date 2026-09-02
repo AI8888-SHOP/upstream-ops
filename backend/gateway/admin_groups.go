@@ -119,6 +119,22 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		}
 		virtualCachePercent = *in.VirtualCachePercent
 	}
+	cacheWindow, err := cacheHealthIntOverride("window", in.CacheHitRateWindowMinutes)
+	if err != nil {
+		return nil, err
+	}
+	cacheThreshold, err := cacheHealthThresholdOverride(in.CacheHitRateThresholdPercent)
+	if err != nil {
+		return nil, err
+	}
+	cacheBlacklist, err := cacheHealthIntOverride("blacklist", in.CacheHitRateBlacklistMinutes)
+	if err != nil {
+		return nil, err
+	}
+	cacheMinimum, err := cacheHealthIntOverride("minimum", in.CacheHitRateMinimumRequests)
+	if err != nil {
+		return nil, err
+	}
 	pos, err := a.Groups.NextPosition()
 	if err != nil {
 		return nil, err
@@ -149,6 +165,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		HedgeMaxAttempts:                      hedgeAttempts,
 		HedgeVirtualCacheEnabled:              hedgeVirtualCache,
 		VirtualCachePercent:                   virtualCachePercent,
+		CacheHitRateWindowMinutes:             cacheWindow,
+		CacheHitRateThresholdPercent:          cacheThreshold,
+		CacheHitRateBlacklistMinutes:          cacheBlacklist,
+		CacheHitRateMinimumRequests:           cacheMinimum,
 		ResponseValidationEnabled:             validationEnabled,
 		ResponseValidationVirtualCacheEnabled: validationVirtualCache,
 		ResponseValidationRetryCount:          validationRetryCount,
@@ -241,6 +261,7 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	if err != nil {
 		return nil, err
 	}
+	previousCachePolicy := resolveCacheHealthPolicy(a.gatewayRuntime(), item)
 	if in.Name != nil {
 		name := strings.TrimSpace(*in.Name)
 		if name == "" {
@@ -338,6 +359,31 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 		}
 		item.VirtualCachePercent = *in.VirtualCachePercent
 	}
+	if in.CacheHitRateWindowMinutes.Set {
+		item.CacheHitRateWindowMinutes, err = cacheHealthIntOverride("window", in.CacheHitRateWindowMinutes.Value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if in.CacheHitRateThresholdPercent.Set {
+		item.CacheHitRateThresholdPercent, err = cacheHealthThresholdOverride(in.CacheHitRateThresholdPercent.Value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if in.CacheHitRateBlacklistMinutes.Set {
+		item.CacheHitRateBlacklistMinutes, err = cacheHealthIntOverride("blacklist", in.CacheHitRateBlacklistMinutes.Value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if in.CacheHitRateMinimumRequests.Set {
+		item.CacheHitRateMinimumRequests, err = cacheHealthIntOverride("minimum", in.CacheHitRateMinimumRequests.Value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	cachePolicyChanged := previousCachePolicy != resolveCacheHealthPolicy(a.gatewayRuntime(), item)
 	hd, hp, ha := item.HedgeDelaySeconds, item.HedgeMaxParallel, item.HedgeMaxAttempts
 	if in.HedgeDelaySeconds != nil {
 		hd = *in.HedgeDelaySeconds
@@ -385,6 +431,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 		if err := a.applyRateLimitForGroup(id); err != nil && a.Log != nil {
 			a.Log.Warn("apply gateway group multiplier limit", "group_id", id, "err", err)
 		}
+	}
+	if cachePolicyChanged {
+		a.resetCacheHealthForGroup(id)
 	}
 	a.invalidateModelsCache(id)
 	a.InvalidateResponseValidator(id)

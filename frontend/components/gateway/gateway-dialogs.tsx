@@ -951,6 +951,85 @@ export function GroupFormDialog({
           </div>
 
           <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
+            <div>
+              <div className="text-sm font-medium">缓存命中率限制</div>
+              <p className="text-[11px] leading-5 text-muted-foreground">
+                每项留空时使用系统设置中的全局值。窗口、最低命中率或拉黑时长设为 0 时，该组不会触发缓存命中率拉黑。
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label>统计窗口（分钟）</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={10080}
+                  step={1}
+                  value={groupForm.cache_hit_rate_window_minutes}
+                  onChange={(e) =>
+                    setGroupForm({
+                      ...groupForm,
+                      cache_hit_rate_window_minutes: e.target.value,
+                    })
+                  }
+                  placeholder="继承全局"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>最低命中率（%）</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.01}
+                  value={groupForm.cache_hit_rate_threshold_percent}
+                  onChange={(e) =>
+                    setGroupForm({
+                      ...groupForm,
+                      cache_hit_rate_threshold_percent: e.target.value,
+                    })
+                  }
+                  placeholder="继承全局"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>拉黑时长（分钟）</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={43200}
+                  step={1}
+                  value={groupForm.cache_hit_rate_blacklist_minutes}
+                  onChange={(e) =>
+                    setGroupForm({
+                      ...groupForm,
+                      cache_hit_rate_blacklist_minutes: e.target.value,
+                    })
+                  }
+                  placeholder="继承全局"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>最少成功请求数</Label>
+                <Input
+                  type="number"
+                  min={10}
+                  max={100000}
+                  step={1}
+                  value={groupForm.cache_hit_rate_minimum_requests}
+                  onChange={(e) =>
+                    setGroupForm({
+                      ...groupForm,
+                      cache_hit_rate_minimum_requests: e.target.value,
+                    })
+                  }
+                  placeholder="继承全局"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
             <div className="text-sm font-medium">重试与顺延</div>
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex-1">

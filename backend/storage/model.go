@@ -588,6 +588,13 @@ type GatewayGroup struct {
 	// as a virtual cache read for this gateway group. Existing groups retain the
 	// historical 100% behavior.
 	VirtualCachePercent int `gorm:"not null;default:100" json:"virtual_cache_percent"`
+	// Cache health overrides are nullable: nil inherits the corresponding global
+	// gateway setting. Zero disables protection for the window, threshold, and
+	// blacklist controls; minimum requests remains bounded by the global minimum.
+	CacheHitRateWindowMinutes    *int     `gorm:"default:null" json:"cache_hit_rate_window_minutes,omitempty"`
+	CacheHitRateThresholdPercent *float64 `gorm:"default:null" json:"cache_hit_rate_threshold_percent,omitempty"`
+	CacheHitRateBlacklistMinutes *int     `gorm:"default:null" json:"cache_hit_rate_blacklist_minutes,omitempty"`
+	CacheHitRateMinimumRequests  *int     `gorm:"default:null" json:"cache_hit_rate_minimum_requests,omitempty"`
 	// 响应校验按组启用；流式响应只在提交客户端前检查 prefix。
 	ResponseValidationEnabled             bool `gorm:"not null;default:false" json:"response_validation_enabled"`
 	ResponseValidationVirtualCacheEnabled bool `gorm:"not null;default:false" json:"response_validation_virtual_cache_enabled"`

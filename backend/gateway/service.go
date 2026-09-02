@@ -75,6 +75,9 @@ type Service struct {
 	proxyConfig config.ProxyConfig
 	upstream    config.UpstreamConfig
 	gatewayCfg  config.GatewayConfig
+	// gatewayConfigInitialized separates the initial config load from a live
+	// settings change, so startup does not discard valid persisted cooldowns.
+	gatewayConfigInitialized bool
 
 	modelsCacheMu sync.Mutex
 	modelsCache   map[uint]modelsCacheEntry // keyed by group id
@@ -241,7 +244,10 @@ func (s *Service) UpdateUpstreamConfig(cfg config.UpstreamConfig) {
 
 func (s *Service) UpdateGatewayConfig(cfg config.GatewayConfig) {
 	s.mu.Lock()
+	previous := s.gatewayCfg.WithDefaults()
+	initialized := s.gatewayConfigInitialized
 	s.gatewayCfg = cfg.WithDefaults()
+	s.gatewayConfigInitialized = true
 	updated := s.gatewayCfg
 	s.mu.Unlock()
 	if s.Routes != nil {
@@ -249,19 +255,12 @@ func (s *Service) UpdateGatewayConfig(cfg config.GatewayConfig) {
 			s.Log.Warn("synchronize gateway model probe scheduling failed", "err", err)
 		}
 	}
-	// Turning the feature off must immediately release source snapshots; this
-	// does not touch manual provider/route enable flags.
 	if s.Usage == nil {
 		return
 	}
-	if !cacheHealthProtectionEnabled(updated) {
-		_ = s.Usage.ClearCacheHealthBlacklists()
-		if s.Routes != nil {
-			s.Routes.InvalidateAllCacheHealth()
-		}
+	if !initialized {
+		s.reconcileInitialCacheHealthPolicies(updated)
 		return
 	}
-	if cleared, err := s.Usage.ClearCacheHealthBlacklistsBelowMinimum(int64(updated.CacheHitRateMinimumRequests)); err == nil && cleared > 0 && s.Routes != nil {
-		s.Routes.InvalidateAllCacheHealth()
-	}
+	s.resetChangedCacheHealthPolicies(previous, updated)
 }
