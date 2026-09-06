@@ -7,16 +7,18 @@ import (
 	"github.com/bejix/upstream-ops/backend/storage"
 )
 
-// filterRoutesForRequestedModel removes direct providers that cannot serve the
-// final upstream model after group and route mappings. The filtered slice is
-// shared by ordinary failover and coordinated hedge planning.
+// filterRoutesForRequestedModel removes direct providers that are unavailable
+// or cannot serve the final upstream model after group and route mappings. The
+// filtered slice is shared by ordinary failover and coordinated hedge
+// planning. Provider enabled state is checked here, before route sorting, so a
+// disabled direct provider cannot consume a scheduler attempt.
 func (rt *Runtime) filterRoutesForRequestedModel(
 	routes []storage.GatewayRoute,
 	requestedModel string,
 	groupMapping map[string]string,
 ) ([]storage.GatewayRoute, error) {
 	requestedModel = strings.TrimSpace(requestedModel)
-	if requestedModel == "" || len(routes) == 0 {
+	if len(routes) == 0 {
 		return routes, nil
 	}
 	filtered := make([]storage.GatewayRoute, 0, len(routes))
@@ -42,6 +44,15 @@ func (rt *Runtime) filterRoutesForRequestedModel(
 			providerCache[route.GatewayProviderID] = provider
 		}
 		if provider == nil {
+			continue
+		}
+		if !provider.Enabled {
+			continue
+		}
+		// Model-less requests still need the provider enabled check, but have no
+		// model policy to evaluate.
+		if requestedModel == "" {
+			filtered = append(filtered, route)
 			continue
 		}
 		upstreamModel, _ := ResolveModel(

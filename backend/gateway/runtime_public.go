@@ -79,6 +79,10 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 			rt.writeGatewayError(c, protocolOpenAI, http.StatusInternalServerError, "api_error", err.Error())
 			return
 		}
+		if routes, err = rt.filterRoutesForRequestedModel(routes, "", nil); err != nil {
+			rt.writeGatewayError(c, protocolOpenAI, http.StatusInternalServerError, "api_error", err.Error())
+			return
+		}
 		groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 		candidates := SortRoutes(routes, groupsByChannel, group.RateSortDirection, time.Now(), nil)
 		groupMapping := ParseModelMapping(group.ModelMappingJSON)
@@ -98,19 +102,19 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 					models, err = FilterProviderModels(target.Provider, models)
 				}
 			} else {
-			ch := target.Channel
-			if ch == nil {
-				label := ""
-				if target.Provider != nil {
-					label = target.Provider.Name
+				ch := target.Channel
+				if ch == nil {
+					label := ""
+					if target.Provider != nil {
+						label = target.Provider.Name
+					}
+					ch = &storage.Channel{
+						Name:    label,
+						SiteURL: target.BaseURL,
+					}
 				}
-				ch = &storage.Channel{
-					Name:    label,
-					SiteURL: target.BaseURL,
-				}
-			}
-			// 拉模型：组+路由 UA，空则默认 UA（与模型测试一致；转发仍透传客户端）
-			models, err = rt.fetchUpstreamModels(c.Request.Context(), ch, target.APIKey, rt.resolveAdminUserAgent(group, &route))
+				// 拉模型：组+路由 UA，空则默认 UA（与模型测试一致；转发仍透传客户端）
+				models, err = rt.fetchUpstreamModels(c.Request.Context(), ch, target.APIKey, rt.resolveAdminUserAgent(group, &route))
 			}
 			if err != nil {
 				continue

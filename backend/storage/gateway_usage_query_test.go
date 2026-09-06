@@ -143,7 +143,7 @@ func TestGatewayUsageSourceFiltersTimelineAndGroupOverview(t *testing.T) {
 		{
 			GatewayGroupID: 7, ChannelID: 11, SourceGroupID: &groupID,
 			SourceGroupName: "premium", RequestID: "source-monitor",
-			Winner: true, Success: true, InputTokens: 100, OutputTokens: 20,
+			Winner: true, Success: true, InputTokens: 50, CacheReadTokens: 50, OutputTokens: 20,
 			ActualCost: 0.12, AccountRateMultiplier: 1.25, CreatedAt: now.Add(-30 * time.Minute),
 		},
 		{
@@ -211,7 +211,7 @@ func TestGatewayUsageSourceFiltersTimelineAndGroupOverview(t *testing.T) {
 		t.Fatalf("active sources = %+v", overview.ActiveSourceGroups)
 	}
 	active := overview.ActiveSourceGroups[0]
-	if active.RequestCount != 2 || active.Tokens != 150 || active.AccountRateMultiplier != 1.5 {
+	if active.RequestCount != 2 || active.UsageCount != 2 || active.Tokens != 150 || active.CacheHitRate != 40 || active.AccountRateMultiplier != 1.5 {
 		t.Fatalf("active source = %+v", active)
 	}
 }

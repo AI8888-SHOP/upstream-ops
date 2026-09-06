@@ -1880,12 +1880,13 @@ export function GatewayPage() {
                           <div className="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">暂无有效激活的上游分组</div>
                         ) : (
                           <div className="overflow-x-auto rounded-md border border-border/70">
-                            <table className="w-full min-w-[620px] text-xs">
+                            <table className="w-full min-w-[760px] text-xs">
                               <thead className="bg-muted/30 text-left text-muted-foreground">
                                 <tr>
                                   <th className="px-3 py-2 font-medium">渠道</th>
                                   <th className="px-3 py-2 font-medium">源分组</th>
-                                  <th className="px-3 py-2 font-medium">请求</th>
+                                  <th className="px-3 py-2 font-medium">使用次数</th>
+                                  <th className="px-3 py-2 font-medium">缓存命中率</th>
                                   <th className="px-3 py-2 font-medium">Token</th>
                                   <th className="px-3 py-2 font-medium">渠道分组倍率</th>
                                   <th className="px-3 py-2 font-medium">最近使用</th>
@@ -1896,7 +1897,8 @@ export function GatewayPage() {
                                   <tr key={`${item.source_kind}:${item.source_id}:${item.source_group_id ?? item.source_group_name}`} className="border-t border-border/60">
                                     <td className="px-3 py-2 font-medium">{item.channel_name || `${item.source_kind} #${item.source_id}`}</td>
                                     <td className="px-3 py-2">{item.source_group_name || "直连渠道"}</td>
-                                    <td className="px-3 py-2 tabular-nums">{item.request_count.toLocaleString()}</td>
+                                    <td className="px-3 py-2 tabular-nums">{(item.usage_count ?? item.request_count ?? 0).toLocaleString()}</td>
+                                    <td className="px-3 py-2 tabular-nums">{(item.cache_hit_rate ?? 0).toFixed(2)}%</td>
                                     <td className="px-3 py-2 tabular-nums">{item.tokens.toLocaleString()}</td>
                                     <td className="px-3 py-2 tabular-nums">{(item.account_rate_multiplier || 1).toFixed(4)}x</td>
                                     <td className="px-3 py-2 text-muted-foreground">{item.last_used_at ? new Date(item.last_used_at).toLocaleString() : "暂无"}</td>

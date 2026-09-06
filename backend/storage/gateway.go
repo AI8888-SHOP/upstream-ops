@@ -3584,13 +3584,20 @@ type GatewayUsageSourceOptions struct {
 // GatewayGroupActiveSource is one currently schedulable source group in a
 // gateway group, enriched with recent usage counters.
 type GatewayGroupActiveSource struct {
-	SourceKind            string     `json:"source_kind"`
-	SourceID              uint       `json:"source_id"`
-	SourceGroupID         *int64     `json:"source_group_id,omitempty"`
-	SourceGroupName       string     `json:"source_group_name,omitempty"`
-	ChannelName           string     `json:"channel_name,omitempty"`
-	RequestCount          int64      `json:"request_count"`
-	Tokens                int64      `json:"tokens"`
+	SourceKind      string `json:"source_kind"`
+	SourceID        uint   `json:"source_id"`
+	SourceGroupID   *int64 `json:"source_group_id,omitempty"`
+	SourceGroupName string `json:"source_group_name,omitempty"`
+	ChannelName     string `json:"channel_name,omitempty"`
+	// UsageCount is the number of distinct gateway requests in the overview
+	// window. RequestCount is retained as the compatibility alias used by older
+	// clients.
+	UsageCount   int64 `json:"usage_count"`
+	RequestCount int64 `json:"request_count"`
+	Tokens       int64 `json:"tokens"`
+	// CacheHitRate uses only real upstream cache buckets; virtual-cache credits
+	// are intentionally excluded, matching cache-health scheduling metrics.
+	CacheHitRate          float64    `json:"cache_hit_rate"`
 	LastUsedAt            *time.Time `json:"last_used_at,omitempty"`
 	AccountRateMultiplier float64    `json:"account_rate_multiplier"`
 	Active                bool       `json:"active"`
@@ -4485,9 +4492,12 @@ func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*
 		return nil, fmt.Errorf("gateway group id is required")
 	}
 	type sourceAggregate struct {
-		RequestCount int64
-		Tokens       int64
-		Last         *time.Time
+		RequestCount       int64
+		Tokens             int64
+		CacheHealthInput   int64
+		CacheHealthRead    int64
+		CacheHealthCreated int64
+		Last               *time.Time
 	}
 	aggs := map[string]sourceAggregate{}
 	keyFor := func(kind string, sourceID uint, groupID *int64, groupName string) string {
@@ -4500,11 +4510,38 @@ func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*
 	}
 	active := map[string]GatewayGroupActiveSource{}
 	now := time.Now()
+	providerEnabled := map[uint]bool{}
+	providerIDs := make([]uint, 0)
+	providerSeen := map[uint]struct{}{}
+	for _, route := range routes {
+		if route.NormalizeSourceKind() != GatewayRouteSourceProvider || route.GatewayProviderID == 0 {
+			continue
+		}
+		if _, ok := providerSeen[route.GatewayProviderID]; ok {
+			continue
+		}
+		providerSeen[route.GatewayProviderID] = struct{}{}
+		providerIDs = append(providerIDs, route.GatewayProviderID)
+	}
+	if len(providerIDs) > 0 {
+		var enabledProviderIDs []uint
+		if err := r.db.Model(&GatewayProvider{}).
+			Where("id IN ? AND enabled = ?", providerIDs, true).
+			Pluck("id", &enabledProviderIDs).Error; err != nil {
+			return nil, err
+		}
+		for _, providerID := range enabledProviderIDs {
+			providerEnabled[providerID] = true
+		}
+	}
 	for _, route := range routes {
 		kind := route.NormalizeSourceKind()
 		sourceID := route.SourceChannelID
 		if kind == GatewayRouteSourceProvider {
 			sourceID = route.GatewayProviderID
+			if !providerEnabled[sourceID] {
+				continue
+			}
 		}
 		if sourceID == 0 || !route.Enabled || route.RateLimitAutoDisabled {
 			continue
@@ -4523,19 +4560,22 @@ func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*
 	}
 	from := now.Add(-24 * time.Hour)
 	type overviewRow struct {
-		ChannelID    uint   `gorm:"column:channel_id"`
-		ProviderID   uint   `gorm:"column:gateway_provider_id"`
-		GroupID      *int64 `gorm:"column:source_group_id"`
-		GroupName    string `gorm:"column:source_group_name"`
-		RequestCount int64  `gorm:"column:request_count"`
-		Tokens       int64  `gorm:"column:tokens"`
-		LastUsedUnix int64  `gorm:"column:last_used_unix"`
+		ChannelID          uint   `gorm:"column:channel_id"`
+		ProviderID         uint   `gorm:"column:gateway_provider_id"`
+		GroupID            *int64 `gorm:"column:source_group_id"`
+		GroupName          string `gorm:"column:source_group_name"`
+		RequestCount       int64  `gorm:"column:request_count"`
+		Tokens             int64  `gorm:"column:tokens"`
+		CacheHealthInput   int64  `gorm:"column:cache_health_input"`
+		CacheHealthRead    int64  `gorm:"column:cache_health_read"`
+		CacheHealthCreated int64  `gorm:"column:cache_health_created"`
+		LastUsedUnix       int64  `gorm:"column:last_used_unix"`
 	}
 	var rows []overviewRow
 	lastUsedExpr := usageCreatedAtUnixExpression(r.db)
 	legacyGroupNameExpr := "CASE WHEN source_group_id IS NOT NULL AND source_group_id > 0 THEN '' ELSE source_group_name END"
 	if err := r.applyFilters(r.db.Model(&GatewayUsageLog{}), GatewayUsageQuery{GatewayGroupID: groupID, From: &from}).
-		Select(fmt.Sprintf("channel_id, gateway_provider_id, source_group_id, %s as source_group_name, COUNT(DISTINCT request_id) as request_count, COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) as tokens, MAX(%s) as last_used_unix", legacyGroupNameExpr, lastUsedExpr)).
+		Select(fmt.Sprintf("channel_id, gateway_provider_id, source_group_id, %s as source_group_name, COUNT(DISTINCT request_id) as request_count, COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) as tokens, COALESCE(SUM(CASE WHEN success THEN input_tokens ELSE 0 END),0) as cache_health_input, COALESCE(SUM(CASE WHEN success THEN cache_read_tokens ELSE 0 END),0) as cache_health_read, COALESCE(SUM(CASE WHEN success THEN cache_creation_tokens ELSE 0 END),0) as cache_health_created, MAX(%s) as last_used_unix", legacyGroupNameExpr, lastUsedExpr)).
 		Group("channel_id, gateway_provider_id, source_group_id, " + legacyGroupNameExpr).Find(&rows).Error; err != nil {
 		return nil, err
 	}
@@ -4554,13 +4594,22 @@ func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*
 			t := time.Unix(row.LastUsedUnix, 0).UTC()
 			last = &t
 		}
-		aggs[key] = sourceAggregate{RequestCount: row.RequestCount, Tokens: row.Tokens, Last: last}
+		aggs[key] = sourceAggregate{
+			RequestCount:       row.RequestCount,
+			Tokens:             row.Tokens,
+			CacheHealthInput:   row.CacheHealthInput,
+			CacheHealthRead:    row.CacheHealthRead,
+			CacheHealthCreated: row.CacheHealthCreated,
+			Last:               last,
+		}
 	}
 	items := make([]GatewayGroupActiveSource, 0, len(active))
 	for key, item := range active {
 		if agg, ok := aggs[key]; ok {
+			item.UsageCount = agg.RequestCount
 			item.RequestCount = agg.RequestCount
 			item.Tokens = agg.Tokens
+			item.CacheHitRate = cacheHitRatePercent(agg.CacheHealthInput, agg.CacheHealthRead, agg.CacheHealthCreated)
 			item.LastUsedAt = agg.Last
 		}
 		items = append(items, item)

@@ -1178,8 +1178,10 @@ export interface GatewayGroupActiveSource {
   source_group_id?: number | null
   source_group_name?: string
   channel_name?: string
+  usage_count: number
   request_count: number
   tokens: number
+  cache_hit_rate: number
   last_used_at?: string | null
   account_rate_multiplier: number
   active: boolean
