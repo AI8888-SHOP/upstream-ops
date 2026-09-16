@@ -187,6 +187,7 @@ func TestRequestTimingRecognizesToolAndMultimodalOutput(t *testing.T) {
 		`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"search","arguments":""}}]}}]}`,
 		`{"choices":[{"delta":{"content":[{"type":"text","text":"hello"}]}}]}`,
 		`{"choices":[{"delta":{"audio":{"data":"YQ=="}}}]}`,
+		`{"choices":[{"delta":{"content":"hello"}}],"usage":{"completion_tokens":1}}`,
 	} {
 		if !streamEventHasVisibleOutput(protocolOpenAI, "", []byte(payload)) {
 			t.Fatalf("visible output missed: %s", payload)

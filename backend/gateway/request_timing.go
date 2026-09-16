@@ -258,7 +258,11 @@ func chatChoicesHaveVisibleOutput(choices []byte) bool {
 			} `json:"function_call"`
 		} `json:"delta"`
 	}
-	if json.Unmarshal(choices, &values) != nil {
+	// partialJSONRootMember returns the suffix starting at the value, which
+	// also contains the outer closing brace and any following root fields.
+	// Decode one array from that suffix instead of requiring it to be the
+	// entire JSON document.
+	if json.NewDecoder(bytes.NewReader(choices)).Decode(&values) != nil {
 		return false
 	}
 	for _, value := range values {
