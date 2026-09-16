@@ -50,6 +50,13 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	}
 	retryCount, failoverMax, cooldown = a.clampGroupRetryPolicy(retryCount, failoverMax, cooldown)
 	ftTimeout := 0
+	requestFTTimeout, requestMaxAttempts := 0, 0
+	if in.RequestFirstTokenTimeoutSec != nil {
+		requestFTTimeout = clampRequestFirstTokenTimeout(*in.RequestFirstTokenTimeoutSec)
+	}
+	if in.RequestMaxAttempts != nil {
+		requestMaxAttempts = clampRequestMaxAttempts(*in.RequestMaxAttempts)
+	}
 	if in.FirstTokenTimeoutSec != nil {
 		ftTimeout = a.clampFirstTokenTimeoutSec(*in.FirstTokenTimeoutSec)
 	}
@@ -158,6 +165,8 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		FailoverOn4xx:                         failoverOn4xx,
 		CooldownSeconds:                       cooldown,
 		FirstTokenTimeoutSec:                  ftTimeout,
+		RequestFirstTokenTimeoutSec:           requestFTTimeout,
+		RequestMaxAttempts:                    requestMaxAttempts,
 		FirstTokenTimeoutCooldownEnabled:      firstTokenTimeoutCooldownEnabled,
 		HedgeEnabled:                          hedgeEnabled,
 		HedgeDelaySeconds:                     hedgeDelay,
@@ -176,6 +185,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		ResponseValidationPrefixBytes:         prefixBytes,
 		ResponseValidationPrefixTimeoutMS:     prefixTimeoutMS,
 		UserAgent:                             strings.TrimSpace(in.UserAgent),
+	}
+	item.GatewaySchedulerPolicy = storage.GatewaySchedulerPolicy{SchedulingMode: "cost", SchedulingPremiumPercent: 20, SchedulingWindowMinutes: 5, SchedulingMinSamples: 10, SchedulingTargetTTFTSec: 10}
+	if err := applySchedulingPolicy(&item.GatewaySchedulerPolicy, in.SchedulingPolicyInput); err != nil {
+		return nil, err
 	}
 	if err := a.Groups.Create(item); err != nil {
 		return nil, err
@@ -262,6 +275,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 		return nil, err
 	}
 	previousCachePolicy := resolveCacheHealthPolicy(a.gatewayRuntime(), item)
+	if err := applySchedulingPolicy(&item.GatewaySchedulerPolicy, in.SchedulingPolicyInput); err != nil {
+		return nil, err
+	}
 	if in.Name != nil {
 		name := strings.TrimSpace(*in.Name)
 		if name == "" {
@@ -343,6 +359,12 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	item.ResponseValidationRetryCount = clampResponseValidationRetryCount(validationRetryCount)
 	if in.FirstTokenTimeoutSec != nil {
 		item.FirstTokenTimeoutSec = a.clampFirstTokenTimeoutSec(*in.FirstTokenTimeoutSec)
+	}
+	if in.RequestFirstTokenTimeoutSec != nil {
+		item.RequestFirstTokenTimeoutSec = clampRequestFirstTokenTimeout(*in.RequestFirstTokenTimeoutSec)
+	}
+	if in.RequestMaxAttempts != nil {
+		item.RequestMaxAttempts = clampRequestMaxAttempts(*in.RequestMaxAttempts)
 	}
 	if in.FirstTokenTimeoutCooldownEnabled != nil {
 		item.FirstTokenTimeoutCooldownEnabled = *in.FirstTokenTimeoutCooldownEnabled

@@ -14,6 +14,8 @@ import (
 
 // ScoredRoute 排序后的候选路由。
 type ScoredRoute struct {
+	Decision      *schedulingDecision
+	StatisticsKey schedulerStatsKey
 	Route         storage.GatewayRoute
 	EffectiveRate float64
 	BillingRate   float64

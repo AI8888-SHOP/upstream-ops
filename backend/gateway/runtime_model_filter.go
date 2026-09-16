@@ -49,6 +49,8 @@ func (rt *Runtime) filterRoutesForRequestedModel(
 		if !provider.Enabled {
 			continue
 		}
+		route.SchedulerCredential = fmt.Sprintf("%x", schedulerCredential(provider.APIKeyCipher, provider.BaseURL))
+		route.SchedulerConcurrencyLimit = provider.ConcurrencyLimit
 		// Model-less requests still need the provider enabled check, but have no
 		// model policy to evaluate.
 		if requestedModel == "" {

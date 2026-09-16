@@ -68,8 +68,8 @@ func TestSameRouteRetryabilitySkipsDeterministicErrors(t *testing.T) {
 		info   usageErrorInfo
 		want   bool
 	}{
-		{name: "temporary 429", status: http.StatusTooManyRequests, want: true},
-		{name: "temporary 503", status: http.StatusServiceUnavailable, want: true},
+		{name: "temporary 429 switches source", status: http.StatusTooManyRequests, want: false},
+		{name: "temporary 503 switches source", status: http.StatusServiceUnavailable, want: false},
 		{name: "media capability", status: http.StatusForbidden, info: usageErrorInfo{Summary: "HTTP 403: Image generation is not enabled for this group"}, want: false},
 		{name: "balance", status: http.StatusForbidden, info: usageErrorInfo{UpstreamBody: `{"error":"Insufficient account balance"}`}, want: false},
 		{name: "model missing", status: http.StatusNotFound, info: usageErrorInfo{Summary: "model_not_found: no available channel for model gpt-test"}, want: false},

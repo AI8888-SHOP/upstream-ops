@@ -860,6 +860,11 @@ export function GatewayPage() {
       rate_resort_enabled: !!g.rate_resort_enabled,
       max_billing_rate_multiplier: String(g.max_billing_rate_multiplier ?? 0),
       load_balance_route_count: String(g.load_balance_route_count ?? 1),
+      scheduling_mode: g.scheduling_mode ?? "cost",
+      scheduling_premium_percent: String(g.scheduling_premium_percent ?? 20),
+      scheduling_window_minutes: String(g.scheduling_window_minutes ?? 5),
+      scheduling_min_samples: String(g.scheduling_min_samples ?? 10),
+      scheduling_target_ttft_sec: String(g.scheduling_target_ttft_sec ?? 10),
       retry_enabled: g.retry_enabled !== false,
       retry_count: String(g.retry_count ?? 0),
       response_validation_retry_count: String(g.response_validation_retry_count ?? -1),
@@ -868,6 +873,8 @@ export function GatewayPage() {
       failover_on_4xx: !!g.failover_on_4xx,
       cooldown_seconds: String(g.cooldown_seconds ?? 30),
       first_token_timeout_sec: String(g.first_token_timeout_sec ?? 0),
+      request_first_token_timeout_sec: String(g.request_first_token_timeout_sec ?? 0),
+      request_max_attempts: String(g.request_max_attempts ?? 0),
       first_token_timeout_cooldown_enabled:
         g.first_token_timeout_cooldown_enabled !== false,
       hedge_enabled: !!g.hedge_enabled,
@@ -1006,7 +1013,25 @@ export function GatewayPage() {
       toast.error("最少成功请求数必须是 10 到 100000 的整数")
       return
     }
+    const schedulingFields = [
+      { value: groupForm.scheduling_premium_percent, min: 0, max: 1000, integer: false, label: "允许溢价" },
+      { value: groupForm.scheduling_window_minutes, min: 1, max: 60, integer: true, label: "调度统计窗口" },
+      { value: groupForm.scheduling_min_samples, min: 1, max: 1000, integer: true, label: "调度最少样本数" },
+      { value: groupForm.scheduling_target_ttft_sec, min: 1, max: 300, integer: true, label: "首字目标" },
+    ]
+    for (const field of schedulingFields) {
+      const value = Number(field.value)
+      if (!field.value.trim() || !Number.isFinite(value) || value < field.min || value > field.max || (field.integer && !Number.isInteger(value))) {
+        toast.error(`${field.label}必须在 ${field.min} 到 ${field.max} 之间${field.integer ? "，且为整数" : ""}`)
+        return
+      }
+    }
     const policy = {
+      scheduling_mode: groupForm.scheduling_mode,
+      scheduling_premium_percent: Number(groupForm.scheduling_premium_percent),
+      scheduling_window_minutes: Number(groupForm.scheduling_window_minutes),
+      scheduling_min_samples: Number(groupForm.scheduling_min_samples),
+      scheduling_target_ttft_sec: Number(groupForm.scheduling_target_ttft_sec),
       rate_resort_enabled: groupForm.rate_resort_enabled,
       max_billing_rate_multiplier: maxBillingRateMultiplier,
       load_balance_route_count: loadBalanceRouteCount,
@@ -1018,6 +1043,8 @@ export function GatewayPage() {
       failover_on_4xx: groupForm.failover_on_4xx,
       cooldown_seconds: cooldownSeconds,
       first_token_timeout_sec: firstTokenTimeout,
+      request_first_token_timeout_sec: Math.max(0, Math.min(1800, Math.floor(Number(groupForm.request_first_token_timeout_sec) || 0))),
+      request_max_attempts: Math.max(0, Math.min(64, Math.floor(Number(groupForm.request_max_attempts) || 0))),
       first_token_timeout_cooldown_enabled:
         groupForm.first_token_timeout_cooldown_enabled,
       hedge_enabled: groupForm.hedge_enabled,

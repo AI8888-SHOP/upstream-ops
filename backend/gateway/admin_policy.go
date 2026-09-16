@@ -153,7 +153,15 @@ func (svc *Service) effectiveFirstTokenTimeout(
 	return configured
 }
 
-// errFirstTokenTimeout 首字超时，按传输类错误走重试/顺延。
+func clampRequestFirstTokenTimeout(sec int) int {
+	return maxInt(0, minInt(1800, sec))
+}
+
+func clampRequestMaxAttempts(count int) int {
+	return maxInt(0, minInt(64, count))
+}
+
+// errFirstTokenTimeout 首字超时，跳过同路由重试并按策略顺延。
 var errFirstTokenTimeout = errors.New("first token timeout")
 
 func (svc *Service) isFirstTokenTimeout(err error) bool {

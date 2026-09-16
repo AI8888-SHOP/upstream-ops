@@ -153,7 +153,16 @@ func (rt *Runtime) forwardStreamWithVirtualCache(
 	converted bool,
 	firstTokenTimeout time.Duration,
 	virtualCachePercent ...int,
-) streamAttemptResult {
+) (returned streamAttemptResult) {
+	defer func() {
+		if c != nil && c.Request != nil && errors.Is(context.Cause(c.Request.Context()), errRequestFirstTokenBudget) {
+			returned.Err = errRequestFirstTokenBudget
+			returned.ClientDisconnected = false
+			if returned.Committed {
+				returned.StreamErr = errRequestFirstTokenBudget
+			}
+		}
+	}()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -210,6 +219,14 @@ func (rt *Runtime) forwardStreamWithVirtualCache(
 	// 可取消：仅首字超时 / 未 commit 的客户端断开时 abort
 	reqCtx, abortReq := context.WithCancel(upCtx)
 	defer abortReq()
+	// Billing drain may outlive a client disconnect, but a request that has
+	// exhausted its pre-output budget must release its upstream connection.
+	stopBudgetCancel := context.AfterFunc(clientCtx, func() {
+		if errors.Is(context.Cause(clientCtx), errRequestFirstTokenBudget) {
+			abortReq()
+		}
+	})
+	defer stopBudgetCancel()
 
 	req, err := rt.buildUpstreamHTTPRequest(reqCtx, target, path, method, inHeader, body, upstreamKind, true)
 	if err != nil {
@@ -557,7 +574,7 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		// Once downstream output is visible this body cannot participate in a
 		// retry. Avoid copying the rest of a successful stream solely for an
 		// error field that the deferred return path will never use.
-		if data == "" || streamStarted || maxStreamResponseCapture <= 0 || responseBuf.Len() >= maxStreamResponseCapture {
+		if data == "" || result.Committed || maxStreamResponseCapture <= 0 || responseBuf.Len() >= maxStreamResponseCapture {
 			return
 		}
 		appendSSEDataCapture(&responseBuf, data, maxStreamResponseCapture)
@@ -566,7 +583,7 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		// Scanner errors and cancellations can arrive before the blank line that
 		// terminates an SSE event. Capture those already-read data lines without
 		// converting or exposing the incomplete event downstream.
-		if !streamStarted && len(pendingLines) > 0 {
+		if !result.Committed && len(pendingLines) > 0 {
 			_, data := rt.parseSSEEventLines(pendingLines)
 			appendResponseCapture(data)
 		}
@@ -961,8 +978,21 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 			return
 		}
 		errorEventSent = true
+		if errors.Is(context.Cause(clientCtx), errRequestFirstTokenBudget) {
+			errType, msg = "request_timeout", errRequestFirstTokenBudget.Error()
+		}
 		_ = rt.writeStreamTerminalError(c, clientKind, errType, msg)
 	}
+	defer func() {
+		if errors.Is(context.Cause(clientCtx), errRequestFirstTokenBudget) {
+			result.ClientDisconnected = false
+			result.Err = errRequestFirstTokenBudget
+			if result.Committed {
+				result.StreamErr = errRequestFirstTokenBudget
+				sendTerminalError("request_timeout", errRequestFirstTokenBudget.Error())
+			}
+		}
+	}()
 
 	closeConverters := func() error {
 		if convertersClosed {

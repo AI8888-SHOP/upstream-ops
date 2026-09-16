@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/bejix/upstream-ops/backend/channel"
 	"github.com/bejix/upstream-ops/backend/connector"
 	"github.com/bejix/upstream-ops/backend/crypto"
 	"github.com/bejix/upstream-ops/backend/gateway"
+	"github.com/bejix/upstream-ops/backend/global"
 	"github.com/bejix/upstream-ops/backend/notify"
 	"github.com/bejix/upstream-ops/backend/runtimeconfig"
 	"github.com/bejix/upstream-ops/backend/storage"
@@ -52,27 +54,27 @@ type channelService interface {
 
 // Deps 把所有 handler 需要的依赖打包传入。
 type Deps struct {
-	DB            *gorm.DB
-	Cipher        *crypto.Cipher
-	Runtime       *runtimeconfig.Manager
-	Channels      *storage.Channels
-	Sessions      *storage.AuthSessions
-	Captchas      *storage.Captchas
-	Notifies      *storage.Notifications
-	Announcements *storage.UpstreamAnnouncements
-	Rates         *storage.Rates
-	MonLogs       *storage.MonitorLogs
-	ChannelSvc    channelService
-	Monitor       monitorService
-	Dispatcher    *notify.Dispatcher
-	UpstreamSync  *syncer.Service
-	Gateway       *gateway.Service
-	GatewayGroups *storage.GatewayGroups
-	GatewayKeys   *storage.GatewayKeys
-	GatewayUsage  *storage.GatewayUsageLogs
+	DB                   *gorm.DB
+	Cipher               *crypto.Cipher
+	Runtime              *runtimeconfig.Manager
+	Channels             *storage.Channels
+	Sessions             *storage.AuthSessions
+	Captchas             *storage.Captchas
+	Notifies             *storage.Notifications
+	Announcements        *storage.UpstreamAnnouncements
+	Rates                *storage.Rates
+	MonLogs              *storage.MonitorLogs
+	ChannelSvc           channelService
+	Monitor              monitorService
+	Dispatcher           *notify.Dispatcher
+	UpstreamSync         *syncer.Service
+	Gateway              *gateway.Service
+	GatewayGroups        *storage.GatewayGroups
+	GatewayKeys          *storage.GatewayKeys
+	GatewayUsage         *storage.GatewayUsageLogs
 	GatewayResponseRules *storage.GatewayResponseRules
-	ModelPrices   *storage.ModelPriceOverrides
-	Log           *slog.Logger
+	ModelPrices          *storage.ModelPriceOverrides
+	Log                  *slog.Logger
 
 	// Frontend 可选：传入嵌入的前端 dist 文件系统。nil 表示不挂载（本地开发用 vite dev server）。
 	Frontend fs.FS
@@ -86,11 +88,13 @@ func Register(r *gin.Engine, d *Deps) {
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "down", "err": err.Error()})
 			return
 		}
-		if err := sqlDB.Ping(); err != nil {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer cancel()
+		if err := sqlDB.PingContext(ctx); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db_down", "err": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "version": global.VERSION})
 	})
 
 	// 公开网关：/v1/*（不走管理端鉴权）。管理页 SPA 使用 /gateway，勿占用。
@@ -108,6 +112,7 @@ func Register(r *gin.Engine, d *Deps) {
 	}
 	{
 		registerVersion(api, d)
+		registerUpdates(api, d)
 		registerAuth(api, d)
 		registerChannels(api, d)
 		registerCaptchas(api, d)

@@ -33,10 +33,10 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { CaptchaFormDialog } from "@/components/monitor/captcha-form-dialog";
 import { NotificationFormDialog } from "@/components/monitor/notification-form-dialog";
 import { UpstreamSyncSettings } from "@/components/settings/upstream-sync-settings";
+import { ApplicationUpdater } from "@/components/settings/application-updater";
 import { apiFetch } from "@/lib/api";
 import { useTriggerRefresh } from "@/lib/refresh-context";
 import type {
-  AppVersion,
   ApplyConfigResult,
   CaptchaConfig,
   NotificationChannel,
@@ -49,7 +49,6 @@ import {
   useCaptchaConfigs,
   useNotificationLogs,
   useNotificationChannels,
-  useAppVersion,
   useSystemConfig,
 } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -157,7 +156,6 @@ export default function SettingsPage() {
   const notifications = useNotificationChannels();
   const captchas = useCaptchaConfigs();
   const notificationLogs = useNotificationLogs(1, 10);
-  const appVersion = useAppVersion();
   const refresh = useTriggerRefresh();
   const { confirm, dialog: confirmDialog } = useConfirm();
   const [form, setForm] = useState<SystemConfig | null>(null);
@@ -165,7 +163,6 @@ export default function SettingsPage() {
   const [applying, setApplying] = useState(false);
   const [configSavedPendingApply, setConfigSavedPendingApply] = useState(false);
   const [testingProxy, setTestingProxy] = useState(false);
-  const [checkingVersion, setCheckingVersion] = useState(false);
   const [editingNotification, setEditingNotification] =
     useState<NotificationChannel | null>(null);
   const [notificationOpen, setNotificationOpen] = useState(false);
@@ -178,7 +175,6 @@ export default function SettingsPage() {
   );
   const [busyCaptchaID, setBusyCaptchaID] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState("system");
-  const [versionInfo, setVersionInfo] = useState<AppVersion | null>(null);
 
   useEffect(() => {
     if (query.data?.config) {
@@ -209,11 +205,6 @@ export default function SettingsPage() {
     }
   }, [query.data]);
 
-  useEffect(() => {
-    if (appVersion.data) {
-      setVersionInfo(appVersion.data);
-    }
-  }, [appVersion.data]);
 
   if (query.loading && !form) {
     return (
@@ -373,25 +364,6 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleCheckVersion() {
-    setCheckingVersion(true);
-    try {
-      const result = await apiFetch<AppVersion>("/version?force=1");
-      setVersionInfo(result);
-      appVersion.setData(result);
-      if (result.update_error) {
-        toast.error(result.update_error);
-      } else if (result.update_available && result.latest_version) {
-        toast.warning(`发现新版本 ${result.latest_version}`);
-      } else {
-        toast.success("当前已是最新版本");
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "检测更新失败");
-    } finally {
-      setCheckingVersion(false);
-    }
-  }
 
   return (
     <section className="space-y-4">
@@ -438,41 +410,7 @@ export default function SettingsPage() {
                 title="应用信息"
                 description="控制页面标题和通知标题前缀。"
               >
-                <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
-                  <Badge variant="outline" className="border-border bg-background">
-                    当前版本 {versionInfo?.version || "加载中"}
-                  </Badge>
-                  {versionInfo?.latest_version ? (
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        "border-transparent",
-                        versionInfo.update_available
-                          ? "bg-amber-50 text-amber-700"
-                          : "bg-emerald-50 text-emerald-700",
-                      )}
-                    >
-                      {versionInfo.update_available
-                        ? `可更新 ${versionInfo.latest_version}`
-                        : "已是最新"}
-                    </Badge>
-                  ) : null}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 border-border bg-background px-2 text-xs"
-                    onClick={handleCheckVersion}
-                    disabled={checkingVersion}
-                  >
-                    <RefreshCw
-                      className={cn(
-                        "size-3.5",
-                        checkingVersion ? "animate-spin" : "",
-                      )}
-                    />
-                    {checkingVersion ? "检测中..." : "检测更新"}
-                  </Button>
-                </div>
+                <ApplicationUpdater />
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field
                     label="应用标题"

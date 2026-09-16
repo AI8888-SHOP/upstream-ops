@@ -897,7 +897,58 @@ export function GroupFormDialog({
           </div>
 
           <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
-            <Label>负载均衡渠道数</Label>
+            <Label>选路策略</Label>
+            <Select
+              value={groupForm.scheduling_mode}
+              onValueChange={(value) => {
+                if (value === "cost" || value === "balanced" || value === "latency") {
+                  setGroupForm({ ...groupForm, scheduling_mode: value })
+                }
+              }}
+            >
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="cost">倍率优先（原有策略）</SelectItem>
+                <SelectItem value="balanced">均衡：首字达标后优先低倍率</SelectItem>
+                <SelectItem value="latency">首字优先：倍率范围内优选速度</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              动态策略适用于流式文本请求，结合近期有效首字、失败率和当前负载。表现接近时保留会话渠道。
+              图片、实时和非流式请求沿用原策略。
+            </p>
+            {groupForm.scheduling_mode !== "cost" && (
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <div className="space-y-1">
+                  <Label>允许溢价（%）</Label>
+                  <Input type="number" min={0} max={1000} step="0.1" value={groupForm.scheduling_premium_percent}
+                    onChange={(e) => setGroupForm({ ...groupForm, scheduling_premium_percent: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label>统计窗口（分钟）</Label>
+                  <Input type="number" min={1} max={60} step={1} value={groupForm.scheduling_window_minutes}
+                    onChange={(e) => setGroupForm({ ...groupForm, scheduling_window_minutes: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label>最少样本数</Label>
+                  <Input type="number" min={1} max={1000} step={1} value={groupForm.scheduling_min_samples}
+                    onChange={(e) => setGroupForm({ ...groupForm, scheduling_min_samples: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label>首字目标（秒）</Label>
+                  <Input type="number" min={1} max={300} step={1} value={groupForm.scheduling_target_ttft_sec}
+                    onChange={(e) => setGroupForm({ ...groupForm, scheduling_target_ttft_sec: e.target.value })} />
+                </div>
+                <p className="col-span-2 text-[11px] leading-5 text-muted-foreground">
+                  例如最低倍率 0.05、允许溢价 20%，则主请求、重试及并发备选都不超过 0.06，且受最大计费倍率约束。
+                  样本不足时参考最近 60 分钟；约 5% 的首选机会用于范围内的低样本渠道。重启后重新积累统计。
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-3">
+            <Label>原有策略负载均衡渠道数</Label>
             <Input
               type="number"
               min={1}
@@ -913,7 +964,7 @@ export function GroupFormDialog({
             />
             <p className="text-[11px] leading-5 text-muted-foreground">
               普通请求会在当前优先级最高的 X 个不同渠道之间分流；同一会话仍优先沿用原渠道。设为
-              1 可保持原有调度方式。此项不是并发兜底，每个请求仍只选择一个首选渠道。
+              1 可保持原有调度方式。动态策略使用倍率范围内全部候选，此项仅影响使用原有策略的请求。
             </p>
           </div>
 
@@ -1180,9 +1231,9 @@ export function GroupFormDialog({
                   不算）超过该秒数则主动断开，并按上方策略顺延下一条。
                 </p>
                 <p>
-                  与用量里的「首字」耗时同一时钟。仅在「失败后还能换到其它渠道」时生效；
+                  这里是单次尝试的超时，仅在「失败后还能换到其它渠道」时生效；
                   <strong className="text-foreground/80">本请求最后一条可试渠道不会套用首字超时</strong>
-                  ，会老实等到上游正常响应或转发总超时。
+                  ，但仍受下方「请求首字总预算」约束。超时后直接换源，不重试同一路由。
                 </p>
                 <p className="rounded-md border border-amber-200/80 bg-amber-50/80 px-2 py-1.5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
                   注意：中间渠道超时断开后仍会顺延，上游可能已对中断请求计费，
@@ -1206,6 +1257,24 @@ export function GroupFormDialog({
                   }
                 />
               </div>
+            </div>
+            <div className="space-y-2 border-t border-border/60 pt-3">
+              <Label>请求首字总预算（秒）</Label>
+              <Input type="number" min={0} max={1800} step={1}
+                value={groupForm.request_first_token_timeout_sec}
+                onChange={(e) => setGroupForm({ ...groupForm, request_first_token_timeout_sec: e.target.value })} />
+              <p className="text-[11px] leading-5 text-muted-foreground">
+                0 继承全局转发超时。流式请求从进入网关开始计时，准备、排队、重试和响应校验共享同一预算，最后一个候选也受限制。
+                首个有效内容写出后停止计时，不限制后续正常生成；预算耗尽不触发渠道冷却。
+              </p>
+              <Label>每个请求最多尝试次数</Label>
+              <Input type="number" min={0} max={64} step={1}
+                value={groupForm.request_max_attempts}
+                onChange={(e) => setGroupForm({ ...groupForm, request_max_attempts: e.target.value })} />
+              <p className="text-[11px] leading-5 text-muted-foreground">
+                0 沿用原有重试、顺延和并发兜底次数。填写后限制总尝试数，包含首次请求、同路由重试及换源；已发出的并发请求可继续竞争结果。
+                限流、过载优先换源，不进行同路由重复重试。
+              </p>
             </div>
             <div className="space-y-3 border-t border-border/60 pt-3">
               <div className="flex items-center justify-between gap-2">

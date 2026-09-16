@@ -537,6 +537,7 @@ func (GatewayProvider) TableName() string { return "gateway_providers" }
 
 // GatewayGroup 是网关配置单元：路由、模型映射、模型列表归属组；组内可有多把密钥。
 type GatewayGroup struct {
+	GatewaySchedulerPolicy `gorm:"embedded"`
 	ID          uint   `gorm:"primaryKey" json:"id"`
 	Name        string `gorm:"size:128;not null;uniqueIndex" json:"name"`
 	Description string `gorm:"size:512;not null;default:''" json:"description,omitempty"`
@@ -572,6 +573,11 @@ type GatewayGroup struct {
 	// 首字/首字节超时（秒）：0=关闭；>0 时等待首字节超过该时间则主动断开并走重试/顺延。
 	// 可能造成上游已计费但客户端未收完，从而重复请求增加费用。
 	FirstTokenTimeoutSec int `gorm:"not null;default:0" json:"first_token_timeout_sec"`
+	// Request budget spans preparation, queuing, retries and validation. Zero
+	// inherits the global forward timeout; disarmed after visible stream output.
+	RequestFirstTokenTimeoutSec int `gorm:"not null;default:0" json:"request_first_token_timeout_sec"`
+	// Zero keeps the existing route/hedge attempt limits.
+	RequestMaxAttempts int `gorm:"not null;default:0" json:"request_max_attempts"`
 	// 首字超时触发后是否将当前路由/模型暂时冷却。首字超时冷却始终只在
 	// 当前网关组内生效；普通模型错误仍按共享上游凭据的策略处理。
 	FirstTokenTimeoutCooldownEnabled bool `gorm:"not null;default:true" json:"first_token_timeout_cooldown_enabled"`
@@ -636,6 +642,9 @@ func (GatewayKey) TableName() string { return "gateway_keys" }
 
 // GatewayRoute 是网关组绑定的一条上游路由（监控渠道或直连 Provider）。
 type GatewayRoute struct {
+	// Request-local provider identity; populated by the availability filter.
+	SchedulerCredential string `gorm:"-" json:"-"`
+	SchedulerConcurrencyLimit int `gorm:"-" json:"-"`
 	ID             uint `gorm:"primaryKey" json:"id"`
 	GatewayGroupID uint `gorm:"not null;index;uniqueIndex:idx_gateway_route_group_pos" json:"gateway_group_id"`
 	Position       int  `gorm:"not null;default:0;uniqueIndex:idx_gateway_route_group_pos" json:"position"`
@@ -851,6 +860,7 @@ func (GatewayResponseRule) TableName() string { return "gateway_response_rules" 
 // GatewayUsageLog 记录每一次网关转发请求的用量与费用参考。
 // Source* 字段为请求当时的路由快照：路由保存会换 id 时，历史记录仍可展示上游密钥/源分组。
 type GatewayUsageLog struct {
+	SchedulingDecision string `gorm:"type:text;not null;default:''" json:"scheduling_decision,omitempty"`
 	ID                uint `gorm:"primaryKey" json:"id"`
 	GatewayGroupID    uint `gorm:"not null;index;default:0" json:"gateway_group_id"`
 	GatewayKeyID      uint `gorm:"not null;index" json:"gateway_key_id"`
@@ -936,6 +946,8 @@ type GatewayUsageLog struct {
 	UpstreamErrorHeaders string    `gorm:"type:text" json:"upstream_error_headers,omitempty"`
 	DurationMS           int64     `gorm:"not null;default:0" json:"duration_ms"`
 	FirstTokenMS         *int64    `json:"first_token_ms,omitempty"`
+	RequestFirstTokenMS  *int64    `json:"request_first_token_ms,omitempty"`
+	RequestDurationMS    *int64    `json:"request_duration_ms,omitempty"`
 	IPAddress            string    `gorm:"size:64" json:"ip_address,omitempty"`
 	UserAgent            string    `gorm:"size:512" json:"user_agent,omitempty"`
 	CreatedAt            time.Time `gorm:"not null;index" json:"created_at"`

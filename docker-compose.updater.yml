@@ -1,0 +1,32 @@
+# Append this file to the deployment's existing COMPOSE_FILE list once.
+# UPDATER_PROJECT_DIR must be the absolute HOST path of that deployment.
+services:
+  app:
+    environment:
+      UPDATER_SOCKET: /app/data/.updater/control.sock
+
+  updater:
+    image: ${IMAGE_REPOSITORY:-ghcr.io/ai8888-shop/upstream-ops}:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/upstream-ops", "-update-agent"]
+    labels:
+      io.upstream-ops.update-agent: "true"
+    environment:
+      TZ: Asia/Shanghai
+      UPDATER_MODE: docker
+      UPDATER_STATE_DIR: /app/data/.updater
+      UPDATER_PROJECT_DIR: ${UPDATER_PROJECT_DIR:?Set UPDATER_PROJECT_DIR to the absolute host deployment directory}
+      UPDATER_COMPOSE_FILES: ${UPDATER_COMPOSE_FILES:-}
+      UPDATER_SERVICE: ${UPDATER_SERVICE:-app}
+      UPDATER_HEALTH_TIMEOUT_SECONDS: ${UPDATER_HEALTH_TIMEOUT_SECONDS:-180}
+      HTTPS_PROXY: ${UPDATER_HTTPS_PROXY:-}
+      HTTP_PROXY: ${UPDATER_HTTP_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1
+    volumes:
+      - ./data:/app/data
+      # Compose must resolve bind mounts to the same absolute paths that
+      # the host Docker daemon sees, rather than an invented /deployment.
+      - ${UPDATER_PROJECT_DIR}:${UPDATER_PROJECT_DIR}
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      disable: true

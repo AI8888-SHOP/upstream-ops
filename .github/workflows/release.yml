@@ -124,14 +124,19 @@ jobs:
           mkdir -p "$kit/scripts" "$kit/docs"
           cp scripts/upgrade.sh scripts/upgrade.ps1 \
             scripts/upgrade-to-postgres.sh scripts/upgrade-to-postgres.ps1 \
+            scripts/upstream-ops-updater.service \
             "$kit/scripts/"
           chmod +x "$kit/scripts/"*.sh
-          cp docker-compose.yml docker-compose.postgres.yml docker-compose.mysql.yml .env.example \
+          cp docker-compose.yml docker-compose.postgres.yml docker-compose.mysql.yml docker-compose.updater.yml .env.example \
             README.md README.zh.md "$kit/"
           cp docs/UPGRADE.md "$kit/UPGRADE.md"
           cp docs/UPGRADE.md "$kit/docs/UPGRADE.md"
+          cp docs/AUTO_UPDATE.md "$kit/docs/AUTO_UPDATE.md"
           tar -C "$(dirname "$kit")" -czf "release-assets/${kit}.tar.gz" "$(basename "$kit")"
           (cd "$kit" && zip -9 -r "../release-assets/${kit}.zip" .)
+      - name: Publish download checksums
+        working-directory: release-assets
+        run: sha256sum upstream-ops-* > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}

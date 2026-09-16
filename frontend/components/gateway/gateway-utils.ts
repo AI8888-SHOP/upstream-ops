@@ -28,6 +28,11 @@ export type GroupFormState = {
   rate_resort_enabled: boolean
   max_billing_rate_multiplier: string
   load_balance_route_count: string
+  scheduling_mode: "cost" | "balanced" | "latency"
+  scheduling_premium_percent: string
+  scheduling_window_minutes: string
+  scheduling_min_samples: string
+  scheduling_target_ttft_sec: string
   retry_enabled: boolean
   retry_count: string
   response_validation_retry_count: string
@@ -37,6 +42,8 @@ export type GroupFormState = {
   failover_on_4xx: boolean
   cooldown_seconds: string
   first_token_timeout_sec: string
+  request_first_token_timeout_sec: string
+  request_max_attempts: string
   first_token_timeout_cooldown_enabled: boolean
   hedge_enabled: boolean
   hedge_delay_seconds: string
@@ -608,6 +615,11 @@ export const emptyGroupForm = (): GroupFormState => ({
   rate_resort_enabled: false,
   max_billing_rate_multiplier: "0",
   load_balance_route_count: "1",
+  scheduling_mode: "cost",
+  scheduling_premium_percent: "20",
+  scheduling_window_minutes: "5",
+  scheduling_min_samples: "10",
+  scheduling_target_ttft_sec: "10",
   retry_enabled: true,
   retry_count: "0",
   response_validation_retry_count: "-1",
@@ -616,6 +628,8 @@ export const emptyGroupForm = (): GroupFormState => ({
   failover_on_4xx: false,
   cooldown_seconds: "30",
   first_token_timeout_sec: "0",
+  request_first_token_timeout_sec: "0",
+  request_max_attempts: "0",
   first_token_timeout_cooldown_enabled: true,
   hedge_enabled: false,
   hedge_delay_seconds: "10",

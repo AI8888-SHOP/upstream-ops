@@ -1,0 +1,17 @@
+[Unit]
+Description=UpstreamOps independent update and recovery agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Keep this executable separate from UPDATER_BINARY so an application
+# rollback cannot remove the agent's own startup entrypoint.
+ExecStart=/usr/local/lib/upstream-ops/updater -update-agent
+EnvironmentFile=/etc/upstream-ops-updater.env
+Restart=always
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

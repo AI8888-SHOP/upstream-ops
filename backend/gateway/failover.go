@@ -2,7 +2,9 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -30,10 +32,15 @@ func (svc *Service) isFailoverStatus(code int, failoverOn4xx bool) bool {
 // isSameRouteRetryableUpstreamFailure distinguishes transient failures from
 // responses that cannot succeed by sending the same request to the same route
 // again. The caller may still fail over to another route when its policy allows
-// it. Keeping this list narrow preserves configured retries for ordinary 4xx
-// responses and all transport/5xx/429 failures.
+// it. Saturation and deterministic failures switch sources; other transient
+// transport/HTTP failures retain the configured same-route retry policy.
 func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
-	if status == 0 || status == http.StatusTooManyRequests || status >= 500 {
+	// Retrying a saturated source immediately amplifies its queue. Fail over
+	// instead; other transient transport/HTTP failures retain their retry policy.
+	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
+		return false
+	}
+	if status == 0 || status >= 500 {
 		return true
 	}
 	if status < 400 || status >= 500 {
@@ -64,6 +71,60 @@ func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
 		}
 	}
 	return true
+}
+
+// Only protocol error envelopes count here. A content rule matching prose
+// about rate limits must never poison shared upstream health.
+func hasStructuredUpstreamError(body []byte) bool {
+	check := func(payload []byte) bool {
+		var envelope struct {
+			Error    json.RawMessage `json:"error"`
+			Response struct {
+				Error json.RawMessage `json:"error"`
+			} `json:"response"`
+		}
+		if json.Unmarshal(payload, &envelope) != nil {
+			return false
+		}
+		for _, value := range []json.RawMessage{envelope.Error, envelope.Response.Error} {
+			value = bytes.TrimSpace(value)
+			var failure struct {
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(value, &failure) != nil {
+				continue
+			}
+			code := strings.ToLower(failure.Type + " " + failure.Code)
+			// Caller errors must not cool a model for unrelated requests.
+			if strings.Contains(code, "invalid_request") || strings.Contains(code, "context_length") || strings.Contains(code, "content_filter") {
+				continue
+			}
+			for _, marker := range []string{"overloaded", "rate_limit", "server_error", "internal_error", "internal_server_error", "service_unavailable", "model_not_found", "authentication_error", "permission_error"} {
+				if strings.Contains(code, marker) {
+					return true
+				}
+			}
+			message := strings.ToLower(failure.Message)
+			for _, marker := range []string{"currently overloaded", "rate limit", "too many requests", "at capacity", "service unavailable", "internal server error"} {
+				if strings.Contains(message, marker) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if check(body) {
+		return true
+	}
+	for _, frame := range bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
+		_, data := (*Runtime)(nil).parseSSEEventLines(strings.Split(string(frame), "\n"))
+		if check([]byte(data)) {
+			return true
+		}
+	}
+	return false
 }
 
 // isClientDisconnectAfterCommit 流已向客户端提交后，仅因客户端中途断开/取消结束。

@@ -51,7 +51,6 @@ export function MonitorHeader() {
   const version = appVersion.data?.version?.trim()
   const latestVersion = appVersion.data?.latest_version?.trim()
   const updateAvailable = Boolean(appVersion.data?.update_available && latestVersion)
-  const updateURL = appVersion.data?.release_url?.trim() || appVersion.data?.repo_url?.trim()
 
   useEffect(() => setMounted(true), [])
 
@@ -129,14 +128,13 @@ export function MonitorHeader() {
                   {checkingVersion ? "检测中..." : `v${version}`}
                 </button>
                 {updateAvailable ? (
-                  <a
-                    href={updateURL || "https://github.com/AI8888-SHOP/upstream-ops"}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    type="button"
+                    onClick={() => navigate("/settings#application-update")}
                     className="ml-1.5 font-medium text-emerald-600 underline-offset-2 hover:text-emerald-700 hover:underline sm:ml-2"
                   >
-                    有新版本 {latestVersion}
-                  </a>
+                    升级到 {latestVersion}
+                  </button>
                 ) : null}
               </p>
             ) : null}

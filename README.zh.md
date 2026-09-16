@@ -372,6 +372,8 @@ MYSQL_PORT=33069
 
 ### 普通旧版本一键升级（Docker）
 
+后台现已提供“检查更新 → 一键升级”、失败自动恢复，以及最近三个旧发版回退。首次需配置独立更新服务，支持 Docker Compose 和 Linux systemd 原生部署，详见 [网页自动升级与回退](docs/AUTO_UPDATE.md)。旧版本首次安装仍可使用下面的脚本。
+
 普通升级默认使用 `ghcr.io/ai8888-shop/upstream-ops`。如果使用 fork 或私有镜像，可在运行目录的 `.env` 中设置 `IMAGE_REPOSITORY` 覆盖。升级成功后会在第一个 Compose 文件旁生成 `docker-compose.upstream-ops-image.yml`，并把它持久化到 `COMPOSE_FILE`，后续直接执行 `docker compose up` 也不会回退到旧的固定镜像。
 
 如果只升级镜像、保留现有数据库，请在包含 `docker-compose.yml`、`.env` 和 `data/` 的目录执行：

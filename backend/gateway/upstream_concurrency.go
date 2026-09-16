@@ -50,6 +50,18 @@ func newUpstreamConcurrencyRegistry() *upstreamConcurrencyRegistry {
 	}
 }
 
+func (r *upstreamConcurrencyRegistry) snapshot(key upstreamConcurrencyKey) (active, limit, queued int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if entry := r.entries[key]; entry != nil {
+		return entry.active, entry.limit, len(entry.waiters)
+	}
+	return
+}
+
 func normalizeUpstreamConcurrencyLimit(limit int) int {
 	if limit < 0 {
 		return 0
@@ -208,6 +220,8 @@ func (rt *Runtime) acquireUpstreamConcurrency(ctx context.Context, target *upstr
 	return rt.Service.upstreamConcurrencyRegistry().acquire(ctx, key, limit)
 }
 
+var errUpstreamQueueTimeout = errors.New("upstream concurrency queue timeout")
+
 // acquireUpstreamConcurrencyForAttempt bounds time spent waiting for a busy
 // upstream. The caller's start timestamp is intentionally taken before the
 // acquire, so a queued request cannot appear to have a fast first token after
@@ -234,10 +248,7 @@ func (rt *Runtime) acquireUpstreamConcurrencyForAttempt(
 		left = budget - time.Since(started)
 	}
 	if left <= 0 {
-		if firstTokenTimeout > 0 && ctx.Err() == nil {
-			return nil, fmt.Errorf("%w after %s", errFirstTokenTimeout, firstTokenTimeout)
-		}
-		return nil, context.DeadlineExceeded
+		return nil, fmt.Errorf("%w after %s", errUpstreamQueueTimeout, budget)
 	}
 	queueCtx, cancel := context.WithTimeout(ctx, left)
 	defer cancel()
@@ -248,8 +259,8 @@ func (rt *Runtime) acquireUpstreamConcurrencyForAttempt(
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if firstTokenTimeout > 0 && errors.Is(err, context.DeadlineExceeded) {
-		return nil, fmt.Errorf("%w after %s", errFirstTokenTimeout, firstTokenTimeout)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%w after %s", errUpstreamQueueTimeout, budget)
 	}
 	return nil, err
 }

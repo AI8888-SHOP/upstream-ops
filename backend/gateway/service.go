@@ -62,6 +62,8 @@ type Service struct {
 	Runtime *Runtime
 
 	upstreamConcurrencyMu sync.Mutex
+	schedulerStatsMu      sync.Mutex
+	schedulerStats        *schedulerStatistics
 	upstreamConcurrency   *upstreamConcurrencyRegistry
 	// httpTransports is keyed by the effective proxy URL. A blank key is the
 	// direct/environment-proxy transport. Clients remain cheap per-request,

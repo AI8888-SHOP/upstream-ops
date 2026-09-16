@@ -142,8 +142,8 @@ func TestCoordinatedAttemptSuppressesDeterministicSameRouteRetries(t *testing.T)
 	attempt.Status = http.StatusServiceUnavailable
 	attempt.Err = errors.New("upstream status 503")
 	attempt.ErrInfo = usageErrorInfo{Summary: "HTTP 503: temporarily overloaded"}
-	if coordinatedAttemptSuppressesSameRouteRetries(attempt) {
-		t.Fatal("temporary 503 must retain configured same-route retries")
+	if !coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+		t.Fatal("temporary 503 must switch source without amplifying overload")
 	}
 }
 

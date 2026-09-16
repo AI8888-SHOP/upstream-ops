@@ -175,11 +175,13 @@ type coordinatedForwardAttempt struct {
 	streamReady     bool
 	gateCommitErr   error
 	upstreamStarted atomic.Bool
+	healthRecorded  bool // coordinator-owned; independent of deferred usage audit
 }
 
 func (a *coordinatedForwardAttempt) markUpstreamStarted() {
 	if a != nil {
 		a.upstreamStarted.Store(true)
+		a.UsageMeta.SchedulerObservation.markUpstreamStarted()
 	}
 }
 
@@ -255,6 +257,10 @@ func (rt *Runtime) shouldUseCoordinatedForward(group *storage.GatewayGroup, vali
 }
 
 func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
+	if requestTiming(req.c.Request.Context()) == nil {
+		finish := beginForwardRequest(req.c, time.Now(), req.group, req.kind, req.stream, rt.gatewayRuntime().ForwardTimeout())
+		defer finish()
+	}
 	if req.prepareCache == nil {
 		req.prepareCache = &upstreamRequestPrepareCache{}
 	}
@@ -263,7 +269,8 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	}
 	groupsByChannel := rt.loadGroupsByChannel(req.c.Request.Context(), req.routes)
 	candidates := rt.sortRoutesWithAffinity(req.routes, groupsByChannel, req.group.RateSortDirection, time.Now(), nil, &req.affinity, req.requestedModel)
-	candidates = rt.orderLoadBalancedCandidates(candidates, req.group, &req.affinity)
+	adaptive := newAdaptiveRequest(req.group, req.requestedModel, req.reasoningEffort, req.path, req.requestID, req.thinkingEnabled, len(req.body), req.stream && req.virtualCacheEligible)
+	candidates = rt.orderAdaptiveCandidates(candidates, adaptive, &req.affinity, true, time.Now())
 	if req.affinity.Recovery && req.hedgeActive {
 		// A cooled route must complete its single recovery probe before any
 		// concurrent hedge is launched; fallback resumes after that probe fails.
@@ -344,6 +351,15 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 				return attempt, attempt.Err
 			}
 		}
+		if err := claimRequestAttempt(ctx, req.group.RequestMaxAttempts); err != nil {
+			attempt.Skipped = true
+			// A hedge already in flight may still succeed. Exhausting the launch
+			// budget must not cancel it when an unstarted plan slot is skipped.
+			if errors.Is(err, errRequestAttemptLimit) {
+				return attempt, err
+			}
+			return attempt, stopHedgeAttempts(err)
+		}
 		if err := rt.prepareCoordinatedAttempt(&req, attempt); err != nil {
 			attempt.Err = err
 			attempt.ErrInfo = usageErrorInfo{
@@ -399,14 +415,28 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		if !accepted && attempt != nil {
 			validation, _, _, _ := attempt.validationSnapshot()
 			if validation.IsRejected() && !validation.PostCommit {
-				planScheduler.prioritizeRetry(attempt)
+				if !coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+					planScheduler.prioritizeRetry(attempt)
+				}
 			}
 		}
 		return accepted, err
 	}
 	hooks := hedgeHooks[*coordinatedForwardAttempt]{
+		OnComplete: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
+			if !result.Accepted && result.Outcome != hedgeOutcomeCanceled && result.Outcome != hedgeOutcomeLost {
+				if attempt := result.Value; attempt != nil {
+					_, status, attemptErr, _, errInfo := attempt.retryFailureSnapshot()
+					if !errors.Is(attemptErr, context.Canceled) && !errors.Is(attemptErr, errUpstreamQueueTimeout) && !errors.Is(attemptErr, errRequestFirstTokenBudget) {
+						attempt.UsageMeta.SchedulerObservation.finish(req.c.Request.Context(), false, errInfo.Type, "", status)
+					}
+				}
+				rt.publishCoordinatedFailure(&req, result.Value, planScheduler.snapshot(), result.Info.Number)
+			}
+		},
 		OnWinner: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
 			if result.Value != nil {
+				requestTiming(req.c.Request.Context()).setFirstObserver(result.Value.UsageMeta.SchedulerObservation.first)
 				req.virtualCacheReason = rt.virtualCacheReasonForWinner(&req, result.Value, &states)
 				gate, _, _, _ := result.Value.streamControlSnapshot()
 				if gate != nil {
@@ -656,7 +686,9 @@ func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, att
 	}
 	attempt.UpstreamURL = target.BaseURL + attempt.UpstreamPath
 	attempt.UsageMeta = usageRecordMeta{
-		InboundEndpoint: req.path, UpstreamEndpoint: attempt.UpstreamPath,
+		SchedulingDecision:   attempt.Plan.Candidate.Decision,
+		SchedulerObservation: rt.newSchedulerObservation(attempt.Plan.Candidate, attempt.StartedAt, target),
+		InboundEndpoint:      req.path, UpstreamEndpoint: attempt.UpstreamPath,
 		InboundProtocol: string(req.kind), UpstreamProtocol: string(attempt.UpstreamKind),
 		ProtocolConverted: attempt.Converted, ServiceTier: req.serviceTier,
 		ReasoningEffort: reasoningEffort, UpstreamURL: attempt.UpstreamURL,
@@ -884,11 +916,67 @@ func coordinatedAttemptSuppressesSameRouteRetries(attempt *coordinatedForwardAtt
 		return false
 	}
 	validation, status, attemptErr, terminal, errInfo := attempt.retryFailureSnapshot()
+	if errors.Is(attemptErr, errFirstTokenTimeout) || errors.Is(attemptErr, errUpstreamQueueTimeout) {
+		return true
+	}
 	if validation.IsRejected() {
-		return false
+		return coordinatedRejectedUpstreamFailure(attempt)
 	}
 	failed := attemptErr != nil || terminal || status < 200 || status >= 300
 	return failed && !isSameRouteRetryableUpstreamFailure(status, errInfo)
+}
+
+func coordinatedRejectedUpstreamFailure(attempt *coordinatedForwardAttempt) bool {
+	attempt.streamMu.Lock()
+	defer attempt.streamMu.Unlock()
+	return attempt.Validation.IsRejected() && !attempt.Validation.PostCommit &&
+		(attempt.Status == http.StatusTooManyRequests || attempt.Status >= 500 ||
+			hasStructuredUpstreamError(attempt.UpstreamBody))
+}
+
+// Publish as soon as an attempt fails, before another winner's potentially
+// long stream. OnComplete is serialized by the coordinator, including hedges.
+func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, attempt *coordinatedForwardAttempt, plan []coordinatedRoutePlan, number int) {
+	if attempt == nil || attempt.Skipped || attempt.healthRecorded {
+		return
+	}
+	validation, status, attemptErr, terminal, errInfo := attempt.retryFailureSnapshot()
+	if req.c.Request.Context().Err() != nil || (errors.Is(attemptErr, context.Canceled) && !validation.IsRejected()) ||
+		errors.Is(attemptErr, errUpstreamQueueTimeout) || errors.Is(attemptErr, errRequestFirstTokenBudget) {
+		return
+	}
+	if validation.IsRejected() {
+		if !coordinatedRejectedUpstreamFailure(attempt) {
+			return
+		}
+	} else if attemptErr == nil && !terminal && status >= 200 && status < 300 {
+		return
+	}
+	firstTokenTimedOut := rt.isFirstTokenTimeout(attemptErr)
+	suppress := coordinatedAttemptSuppressesSameRouteRetries(attempt)
+	if !req.group.RetryEnabled || req.group.CooldownSeconds <= 0 ||
+		(firstTokenTimedOut && !req.group.FirstTokenTimeoutCooldownEnabled) ||
+		(!suppress && coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
+		return
+	}
+	if strings.TrimSpace(errInfo.Summary) == "" || validation.IsRejected() {
+		attempt.streamMu.Lock()
+		errInfo = rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), attemptErr, status, attempt.Headers, attempt.UpstreamBody, attempt.UpstreamURL, req.c.Request.Method)
+		attempt.streamMu.Unlock()
+	}
+	now := time.Now()
+	until := now.Add(time.Duration(req.group.CooldownSeconds) * time.Second)
+	probe := rt.gatewayRuntime().ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(req.path, req.kind)
+	var err error
+	if firstTokenTimedOut {
+		err = rt.Routes.SetGroupModelTempUnschedulableWithProbeProtocol(attempt.Route.ID, attempt.UpstreamModel, until, errInfo.Summary, now, req.requestID, probe, string(req.kind))
+	} else {
+		err = rt.Routes.SetModelTempUnschedulableWithProbeProtocol(attempt.Route.ID, attempt.UpstreamModel, until, errInfo.Summary, now, req.requestID, probe, string(req.kind))
+	}
+	if err == nil {
+		attempt.healthRecorded = true
+		attempt.UsageMeta.CooldownUntil = &until
+	}
 }
 
 func (rt *Runtime) cleanupCoordinatedStreamLosers(result hedgeRunResult[*coordinatedForwardAttempt], states *sync.Map) {
@@ -1066,11 +1154,21 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			attemptKind = storage.GatewayAttemptKindRegexReject
 			attemptStatus = storage.GatewayAttemptStatusRejected
 			errInfo = validationErrorInfo(validation)
+			if coordinatedRejectedUpstreamFailure(attempt) {
+				errInfo = rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), nil, status, headers, upstreamBody, attempt.UpstreamURL, req.c.Request.Method)
+				if status < 400 {
+					errInfo.Type = "upstream_error"
+				}
+			}
 		} else if outcome == hedgeOutcomeRejected && errors.Is(rejection, errSkippedRejectedRoute) {
 			attemptStatus = storage.GatewayAttemptStatusCanceled
 			if strings.TrimSpace(errInfo.Summary) == "" {
 				errInfo = usageErrorInfo{Type: "canceled", Summary: "attempt canceled after response validation rejected its route"}
 			}
+		} else if req.c.Request != nil && errors.Is(context.Cause(req.c.Request.Context()), errRequestFirstTokenBudget) &&
+			(errors.Is(attemptErr, context.Canceled) || errors.Is(attemptErr, context.DeadlineExceeded) || errors.Is(attemptErr, errRequestFirstTokenBudget)) {
+			attemptStatus = storage.GatewayAttemptStatusError
+			errInfo = usageErrorInfo{Type: "request_timeout", Summary: errRequestFirstTokenBudget.Error()}
 		} else if outcome == hedgeOutcomeCanceled || outcome == hedgeOutcomeLost || errors.Is(attemptErr, context.Canceled) {
 			attemptStatus = storage.GatewayAttemptStatusCanceled
 			if strings.TrimSpace(errInfo.Summary) == "" {
@@ -1097,34 +1195,11 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		if isWinner && validation.IsRejected() && validation.PostCommit {
 			attemptStatus = storage.GatewayAttemptStatusAccepted
 		}
-		suppressSameRouteRetry := !validation.IsRejected() && !isSameRouteRetryableUpstreamFailure(status, errInfo)
-		firstTokenTimedOut := rt.isFirstTokenTimeout(attemptErr)
-		if attemptStatus == storage.GatewayAttemptStatusError && req.group.RetryEnabled &&
-			req.group.CooldownSeconds > 0 &&
-			(!firstTokenTimedOut || req.group.FirstTokenTimeoutCooldownEnabled) &&
-			(suppressSameRouteRetry || !coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
-			until := time.Now().Add(time.Duration(req.group.CooldownSeconds) * time.Second)
-			pauseReason := errInfo.Summary
-			if strings.TrimSpace(errInfo.Detail) != "" {
-				pauseReason = rt.truncateRunes(errInfo.Detail, 4000)
-			}
-			probeEnabled := rt.gatewayRuntime().ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(req.path, req.kind)
-			var cooldownErr error
-			if firstTokenTimedOut {
-				cooldownErr = rt.Routes.SetGroupModelTempUnschedulableWithProbeProtocol(
-					attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID,
-					probeEnabled, string(req.kind),
-				)
-			} else {
-				cooldownErr = rt.Routes.SetModelTempUnschedulableWithProbeProtocol(
-					attempt.Route.ID, attempt.UpstreamModel, until, pauseReason, time.Now(), req.requestID,
-					probeEnabled, string(req.kind),
-				)
-			}
-			if cooldownErr == nil && storage.NormalizeGatewayModel(attempt.UpstreamModel) != "" {
-				req.affinity.preservePreferredOnCooldown(attempt.Route.ID)
-			}
-			attempt.UsageMeta.CooldownUntil = &until
+		if attemptStatus == storage.GatewayAttemptStatusError || attemptStatus == storage.GatewayAttemptStatusRejected {
+			rt.publishCoordinatedFailure(req, attempt, plan, number)
+		}
+		if attempt.healthRecorded {
+			req.affinity.preservePreferredOnCooldown(attempt.Route.ID)
 		}
 		success := status >= 200 && status < 300 && attemptErr == nil &&
 			(!validation.IsRejected() || validation.PostCommit)
@@ -1164,6 +1239,7 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 		// succeeds. The finalizer is the only place that may mark a usage row as
 		// winner or charge the gateway key.
 		meta.Winner = false
+		meta.RequestWinner = isWinner
 		meta.DeferSettlement = true
 		meta.Validation = validation
 		usageID := rt.recordUsage(
@@ -1414,6 +1490,10 @@ func (rt *Runtime) finishCoordinatedStream(req *coordinatedForwardRequest, winne
 }
 
 func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, result hedgeRunResult[*coordinatedForwardAttempt], runErr error) {
+	if req.c.Request != nil && errors.Is(context.Cause(req.c.Request.Context()), errRequestFirstTokenBudget) {
+		rt.writeGatewayError(req.c, req.kind, http.StatusGatewayTimeout, "request_timeout", errRequestFirstTokenBudget.Error())
+		return
+	}
 	var (
 		found          bool
 		lastStatus     int

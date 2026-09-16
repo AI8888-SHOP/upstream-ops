@@ -4,6 +4,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -15,21 +16,24 @@ import (
 )
 
 type usageRecordMeta struct {
-	InboundEndpoint   string
-	UpstreamEndpoint  string
-	InboundProtocol   string
-	UpstreamProtocol  string
-	ProtocolConverted bool
-	ServiceTier       string
-	ReasoningEffort   string
-	UpstreamURL       string
-	Attempt           int
-	AttemptKind       string
-	AttemptStatus     string
-	Winner            bool
-	DeferSettlement   bool
-	Validation        validationResult
-	CooldownUntil     *time.Time
+	SchedulingDecision   *schedulingDecision
+	SchedulerObservation *schedulerObservation
+	InboundEndpoint      string
+	UpstreamEndpoint     string
+	InboundProtocol      string
+	UpstreamProtocol     string
+	ProtocolConverted    bool
+	ServiceTier          string
+	ReasoningEffort      string
+	UpstreamURL          string
+	Attempt              int
+	AttemptKind          string
+	AttemptStatus        string
+	Winner               bool
+	DeferSettlement      bool
+	Validation           validationResult
+	CooldownUntil        *time.Time
+	RequestWinner        bool // selected attempt; accounting winner is finalized later
 }
 
 // usageErrorInfo 失败请求的结构化错误信息（摘要 + 上游原文）。
@@ -69,6 +73,12 @@ func (svc *Service) buildUpstreamErrorInfoCfg(
 
 	if fwdErr != nil {
 		info.Type = "transport"
+		if errors.Is(fwdErr, errUpstreamQueueTimeout) {
+			info.Type = "queue_timeout"
+		}
+		if errors.Is(fwdErr, errRequestFirstTokenBudget) {
+			info.Type = "request_timeout"
+		}
 		info.Summary = fwdErr.Error()
 		var b strings.Builder
 		fmt.Fprintf(&b, "transport error\nmethod: %s\nurl: %s\nerror: %s\n", method, upstreamURL, fwdErr.Error())

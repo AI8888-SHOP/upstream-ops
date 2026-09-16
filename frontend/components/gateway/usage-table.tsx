@@ -555,6 +555,12 @@ function errorTypeLabel(t?: string) {
       return "传输"
     case "http":
       return "HTTP 错误"
+    case "queue_timeout":
+      return "并发排队超时"
+    case "request_timeout":
+      return "请求首字预算耗尽"
+    case "upstream_error":
+      return "上游服务错误"
     case "config":
       return "配置"
     case "internal":
@@ -1382,10 +1388,48 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
   )
 }
 
+function SchedulingDecision({ value }: { value?: string }) {
+  if (!value) return null
+  let decision: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
+    decision = parsed as Record<string, unknown>
+  } catch { return null }
+  const number = (key: string) => typeof decision[key] === "number" && Number.isFinite(decision[key]) ? decision[key] as number : 0
+  const reasons: Record<string, string> = {
+    target_cost: "首字达标，优先低倍率", latency: "综合首字、失败率及负载优选",
+    affinity: "保留表现接近的会话渠道", exploration: "范围内低样本探索",
+    cold_start: "样本不足，使用保守估计", recovery: "原会话渠道恢复探测",
+  }
+  const reason = typeof decision.reason === "string" ? reasons[decision.reason] : undefined
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" className="col-span-2 w-fit text-[10px] text-muted-foreground underline decoration-dotted underline-offset-2">
+          {decision.mode === "balanced" ? "均衡选路" : "首字优选"} · 调度依据
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="left" className="max-w-xs space-y-1 p-3 text-xs">
+        <p>{reason ?? "动态选路"}</p>
+        <p>倍率 {number("rate")} / 本次上限 {number("ceiling")}</p>
+        <p>近 {number("window_minutes")} 分钟：{number("samples")} 次完成，{number("first_samples")} 次有效首字</p>
+        <p>首字均值 {formatDurationMS(number("mean_ms"))} / P90 ≈ {formatDurationMS(number("p90_ms"))}</p>
+        <p>平滑失败率 {number("failure_percent").toFixed(1)}%，综合等待评分 {formatDurationMS(number("estimated_ms"))}</p>
+        <p>渠道并发 {number("active")} / {number("limit") || "不限"}，排队 {number("queued")}</p>
+        <p className="text-muted-foreground">选择当时的统计快照；P90 为区间估计，评分不是响应时间保证。</p>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 function LatencyCell({ u }: { u: GatewayUsageLog }) {
-  const dSev = durationSeverity(u.duration_ms ?? 0)
-  const hasFT = u.first_token_ms != null
-  const fSev = hasFT ? firstTokenSeverity(u.first_token_ms!) : dSev
+  const hasRequestTiming = u.request_duration_ms != null
+  const firstToken = hasRequestTiming ? u.request_first_token_ms : u.first_token_ms
+  const duration = u.request_duration_ms ?? u.duration_ms
+  const dSev = durationSeverity(duration ?? 0)
+  const hasFT = firstToken != null
+  const fSev = hasFT ? firstTokenSeverity(firstToken!) : dSev
   return (
     <div className="flex items-stretch gap-2">
       <span
@@ -1398,18 +1442,25 @@ function LatencyCell({ u }: { u: GatewayUsageLog }) {
         aria-hidden
       />
       <div className="grid grid-cols-[max-content_max-content] items-baseline gap-x-2 gap-y-0.5 text-xs">
-        <span className="text-muted-foreground">首字</span>
+        <span className="text-muted-foreground">{hasRequestTiming ? "请求首字" : "尝试首字"}</span>
         {hasFT ? (
           <span className={cn("font-medium tabular-nums", LATENCY_TEXT[fSev])}>
-            {formatDurationMS(u.first_token_ms)}
+            {formatDurationMS(firstToken)}
           </span>
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
-        <span className="text-muted-foreground">总耗时</span>
+        <span className="text-muted-foreground">{hasRequestTiming ? "请求耗时" : "尝试耗时"}</span>
         <span className={cn("font-medium tabular-nums", LATENCY_TEXT[dSev])}>
-          {formatDurationMS(u.duration_ms)}
+          {formatDurationMS(duration)}
         </span>
+        {hasRequestTiming && (
+          <>
+            <span className="text-muted-foreground">尝试首字</span>
+            <span className="tabular-nums">{formatDurationMS(u.first_token_ms)}</span>
+          </>
+        )}
+        <SchedulingDecision value={u.scheduling_decision} />
       </div>
     </div>
   )

@@ -29,6 +29,7 @@ func (rt *Runtime) recordUsage(
 	c *gin.Context,
 	meta usageRecordMeta,
 ) uint {
+	meta.SchedulerObservation.finish(c.Request.Context(), success, errInfo.Type, meta.AttemptStatus, status)
 	priceModel := upstreamModel
 	if priceModel == "" {
 		priceModel = requestedModel
@@ -109,16 +110,21 @@ func (rt *Runtime) recordUsage(
 		validationReason = validationErrorInfo(meta.Validation).Summary
 	}
 	estimatedExtraCost := float64(0)
+	var requestFirstTokenMS, requestDurationMS *int64
+	if state := requestTiming(c.Request.Context()); state != nil && stream && (meta.RequestWinner || winnerCost) {
+		requestFirstTokenMS, requestDurationMS = state.snapshot()
+	}
 	if !winnerCost {
 		estimatedExtraCost = cost.ActualCost
 	}
 	item := &storage.GatewayUsageLog{
-		GatewayGroupID:    group.ID,
-		GatewayKeyID:      key.ID,
-		RouteID:           route.ID,
-		ChannelID:         channelID,
-		GatewayProviderID: providerID,
-		ProviderName:      providerName,
+		SchedulingDecision: meta.SchedulingDecision.json(),
+		GatewayGroupID:     group.ID,
+		GatewayKeyID:       key.ID,
+		RouteID:            route.ID,
+		ChannelID:          channelID,
+		GatewayProviderID:  providerID,
+		ProviderName:       providerName,
 		// 路由快照：保存路由换 id 后历史记录仍可展示
 		SourceAPIKeyID:   sourceKeyID,
 		SourceAPIKeyName: sourceKeyName,
@@ -181,6 +187,8 @@ func (rt *Runtime) recordUsage(
 		UpstreamErrorHeaders:  errInfo.UpstreamHeaders,
 		DurationMS:            durationMS,
 		FirstTokenMS:          firstTokenMS,
+		RequestFirstTokenMS:   requestFirstTokenMS,
+		RequestDurationMS:     requestDurationMS,
 		IPAddress:             c.ClientIP(),
 		UserAgent:             c.Request.UserAgent(),
 		CreatedAt:             time.Now(),

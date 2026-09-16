@@ -56,6 +56,7 @@ type AuthResult struct {
 
 // CreateGroupInput 创建网关分组。
 type CreateGroupInput struct {
+	SchedulingPolicyInput
 	Name                                  string   `json:"name"`
 	Description                           string   `json:"description"`
 	RateSortDirection                     string   `json:"rate_sort_direction"`
@@ -73,6 +74,8 @@ type CreateGroupInput struct {
 	FailoverOn4xx                         *bool    `json:"failover_on_4xx"`
 	CooldownSeconds                       *int     `json:"cooldown_seconds"`
 	FirstTokenTimeoutSec                  *int     `json:"first_token_timeout_sec"`
+	RequestFirstTokenTimeoutSec           *int     `json:"request_first_token_timeout_sec"`
+	RequestMaxAttempts                    *int     `json:"request_max_attempts"`
 	FirstTokenTimeoutCooldownEnabled      *bool    `json:"first_token_timeout_cooldown_enabled"`
 	HedgeEnabled                          *bool    `json:"hedge_enabled"`
 	HedgeDelaySeconds                     *float64 `json:"hedge_delay_seconds"`
@@ -95,6 +98,7 @@ type CreateGroupInput struct {
 
 // UpdateGroupInput 更新网关分组（指针字段：nil 表示不改）。
 type UpdateGroupInput struct {
+	SchedulingPolicyInput
 	Name                                  *string         `json:"name"`
 	Description                           *string         `json:"description"`
 	Status                                *string         `json:"status"`
@@ -113,6 +117,8 @@ type UpdateGroupInput struct {
 	FailoverOn4xx                         *bool           `json:"failover_on_4xx"`
 	CooldownSeconds                       *int            `json:"cooldown_seconds"`
 	FirstTokenTimeoutSec                  *int            `json:"first_token_timeout_sec"`
+	RequestFirstTokenTimeoutSec           *int            `json:"request_first_token_timeout_sec"`
+	RequestMaxAttempts                    *int            `json:"request_max_attempts"`
 	FirstTokenTimeoutCooldownEnabled      *bool           `json:"first_token_timeout_cooldown_enabled"`
 	HedgeEnabled                          *bool           `json:"hedge_enabled"`
 	HedgeDelaySeconds                     *float64        `json:"hedge_delay_seconds"`

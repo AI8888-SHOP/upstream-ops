@@ -25,6 +25,7 @@ import (
 	"github.com/bejix/upstream-ops/backend/scheduler"
 	"github.com/bejix/upstream-ops/backend/storage"
 	"github.com/bejix/upstream-ops/backend/syncer"
+	"github.com/bejix/upstream-ops/backend/updater"
 	"github.com/bejix/upstream-ops/web"
 	"github.com/gin-gonic/gin"
 
@@ -35,7 +36,15 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "path to config.yaml (optional; env vars also supported)")
+	updateAgent := flag.Bool("update-agent", false, "run the independent local update agent instead of the application")
 	flag.Parse()
+	if *updateAgent {
+		if err := updater.RunAgent(); err != nil {
+			fmt.Fprintf(os.Stderr, "update agent failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, usedConfigPath, err := config.LoadWithPath(*configPath)
 	if err != nil {

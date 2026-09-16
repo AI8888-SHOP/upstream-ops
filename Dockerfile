@@ -3,7 +3,7 @@
 # 三阶段构建：
 #   1) frontend-builder — node + pnpm 跑 `vite build`，产物在 /web/dist
 #   2) go-builder       — 把 dist 拷到 web/dist，go build 通过 //go:embed 嵌入二进制
-#   3) runtime          — 极小 alpine 镜像只放一个静态二进制
+#   3) runtime          — alpine 运行应用、迁移工具和可选的独立更新进程
 #
 # 由于第二阶段需要 frontend 产物，构建 context 必须是 repo 根目录：
 #   docker build -t upstream-ops:dev .
@@ -55,7 +55,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 
 # ---------- Stage 3: 运行时 ----------
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata wget && \
+RUN apk add --no-cache ca-certificates tzdata wget docker-cli docker-cli-compose && \
     mkdir -p /app/data
 WORKDIR /app
 COPY --from=go-builder /out/upstream-ops /usr/local/bin/upstream-ops

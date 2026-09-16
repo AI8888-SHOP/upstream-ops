@@ -647,6 +647,11 @@ export interface GatewayGroup {
   max_billing_rate_multiplier?: number
   /** Number of highest-priority distinct channels used for normal request load balancing. */
   load_balance_route_count?: number
+  scheduling_mode?: "cost" | "balanced" | "latency"
+  scheduling_premium_percent?: number
+  scheduling_window_minutes?: number
+  scheduling_min_samples?: number
+  scheduling_target_ttft_sec?: number
   model_mapping?: string
   models_json?: string
   models_mode: GatewayModelsMode
@@ -672,6 +677,10 @@ export interface GatewayGroup {
    * 可能增加计费（上游已计费却换路由再请求）。
    */
   first_token_timeout_sec?: number
+  /** 整个流式请求的首字预算，0 继承全局转发超时。 */
+  request_first_token_timeout_sec?: number
+  /** 总尝试上限，0 沿用各重试/顺延配置。 */
+  request_max_attempts?: number
   /** 首字超时触发后是否冷却当前网关组内的路由/模型。 */
   first_token_timeout_cooldown_enabled?: boolean
   /** 超过延迟仍无有效响应时，并发启动其它路由（媒体与 Realtime 请求自动排除） */
@@ -1057,6 +1066,9 @@ export interface GatewayUsageLog {
   upstream_error_headers?: string
   duration_ms: number
   first_token_ms?: number | null
+  request_first_token_ms?: number | null
+  request_duration_ms?: number | null
+  scheduling_decision?: string
   ip_address?: string
   user_agent?: string
   created_at: string

@@ -124,6 +124,43 @@ func TestGatewayGroupFirstTokenTimeoutCooldownPolicy(t *testing.T) {
 	}
 }
 
+func TestGatewayGroupRequestBudgetsPersistAndCanBeReset(t *testing.T) {
+	db := openGatewayTestDB(t)
+	svc := NewService(storage.NewGatewayGroups(db), storage.NewGatewayKeys(db), storage.NewGatewayRoutes(db),
+		storage.NewGatewayUsageLogs(db), storage.NewModelPriceOverrides(db), storage.NewChannels(db), nil, nil, nil)
+	budget, attempts := 45, 3
+	group, err := svc.CreateGroup(CreateGroupInput{Name: "request-budgets", RequestFirstTokenTimeoutSec: &budget, RequestMaxAttempts: &attempts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := svc.Groups.FindByID(group.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.RequestFirstTokenTimeoutSec != 45 || stored.RequestMaxAttempts != 3 {
+		t.Fatalf("budgets not persisted: %+v", stored)
+	}
+	large := 9999
+	updated, err := svc.UpdateGroup(group.ID, UpdateGroupInput{RequestFirstTokenTimeoutSec: &large, RequestMaxAttempts: &large})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RequestFirstTokenTimeoutSec != 1800 || updated.RequestMaxAttempts != 64 {
+		t.Fatalf("budgets not bounded: %+v", updated)
+	}
+	zero := 0
+	if _, err := svc.UpdateGroup(group.ID, UpdateGroupInput{RequestFirstTokenTimeoutSec: &zero, RequestMaxAttempts: &zero}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = svc.Groups.FindByID(group.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.RequestFirstTokenTimeoutSec != 0 || stored.RequestMaxAttempts != 0 {
+		t.Fatalf("budgets not reset: %+v", stored)
+	}
+}
+
 func TestGatewayGroupVirtualCachePercentValidation(t *testing.T) {
 	db := openGatewayTestDB(t)
 	svc := NewService(

@@ -17,6 +17,7 @@ import (
 
 // HandleForward 主转发（含故障转移）。
 func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind) {
+	requestStarted := time.Now()
 	// 尽早生成/透传 request id，保证后续任意错误体都可带上
 	reqID := rt.ensureGatewayRequestID(c)
 
@@ -42,6 +43,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	requestedModel, stream := requestInfo.Model, requestInfo.Stream
 	serviceTier, reasoningEffort := requestInfo.ServiceTier, requestInfo.ReasoningEffort
 	thinkingEnabled := requestInfo.ThinkingEnabled
+	finishTiming := beginForwardRequest(c, requestStarted, group, kind, stream, rt.gatewayRuntime().ForwardTimeout())
+	defer finishTiming()
 	_ = rt.Keys.TouchLastUsed(key.ID, time.Now())
 
 	routes, err := rt.Routes.ListByGroupID(group.ID)
@@ -152,6 +155,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	routesTried := 0
 	prepareCache := &upstreamRequestPrepareCache{}
 	targetCache := &upstreamTargetRequestCache{}
+	adaptive := newAdaptiveRequest(group, requestedModel, reasoningEffort, path, reqID, thinkingEnabled, len(body), stream && virtualCacheEligible)
 	finishRecoveryProbe := func(routeID uint) {
 		if !affinity.Recovery || affinity.RecoveryRouteID != routeID {
 			return
@@ -162,9 +166,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 	for {
 		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity, requestedModel)
-		if routesTried == 0 {
-			candidates = rt.orderLoadBalancedCandidates(candidates, group, &affinity)
-		}
+		candidates = rt.orderAdaptiveCandidates(candidates, adaptive, &affinity, routesTried == 0, time.Now())
 		if len(candidates) == 0 {
 			break
 		}
@@ -197,6 +199,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		// 当前路由已进 exclude：失败后是否还有可顺延的其它路由。
 		// 没有下家时关闭首字超时，最后一枪老实等上游，而不是再掐 30s 直接 502。
 		remainingAfter := SortRoutesForModel(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, requestedModel)
+		remainingAfter = adaptive.filter(remainingAfter, &affinity)
 		attemptFTTimeout := rt.effectiveFirstTokenTimeout(
 			firstTokenTimeout,
 			retryEnabled, failoverEnabled,
@@ -213,7 +216,12 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			maxTriesOnRoute = 1
 		}
 		for tryOnRoute := 0; tryOnRoute < maxTriesOnRoute; tryOnRoute++ {
+			if err := claimRequestAttempt(c.Request.Context(), group.RequestMaxAttempts); err != nil {
+				lastErr = err
+				goto finishError
+			}
 			attemptNo++
+			attemptStarted := time.Now()
 			attemptKind := attemptKindPrimary
 			if tryOnRoute > 0 {
 				attemptKind = attemptKindRetry
@@ -296,16 +304,17 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 			upstreamFullURL := target.BaseURL + upstreamPath
 			usageMeta := usageRecordMeta{
-				InboundEndpoint:   path,
-				UpstreamEndpoint:  upstreamPath,
-				InboundProtocol:   string(kind),
-				UpstreamProtocol:  string(upstreamKind),
-				ProtocolConverted: converted,
-				ServiceTier:       serviceTier,
-				ReasoningEffort:   attemptReasoningEffort,
-				UpstreamURL:       upstreamFullURL,
-				Attempt:           attemptNo,
-				AttemptKind:       attemptKind,
+				SchedulingDecision: cand.Decision,
+				InboundEndpoint:    path,
+				UpstreamEndpoint:   upstreamPath,
+				InboundProtocol:    string(kind),
+				UpstreamProtocol:   string(upstreamKind),
+				ProtocolConverted:  converted,
+				ServiceTier:        serviceTier,
+				ReasoningEffort:    attemptReasoningEffort,
+				UpstreamURL:        upstreamFullURL,
+				Attempt:            attemptNo,
+				AttemptKind:        attemptKind,
 			}
 			providerVirtualCachePercent := 0
 			if target.Provider != nil && virtualCacheEligible {
@@ -313,6 +322,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			}
 
 			start := time.Now()
+			observation := rt.newSchedulerObservation(cand, attemptStarted, target)
+			usageMeta.SchedulerObservation = observation
+			target.onUpstreamStart = observation.markUpstreamStarted
+			requestTiming(c.Request.Context()).setFirstObserver(observation.first)
 			var (
 				status                            int
 				respHeaders                       http.Header
@@ -354,6 +367,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			// 客户端在 commit 后、终端帧交付前断开：记 success=true + error_type=client。
 			// 若已写出 [DONE]/message_stop 后客户端才关连接，forwardStream 会清掉 client 标记，记普通成功。
 			if stream && streamCommitted {
+				usageMeta.RequestWinner = true
 				onlyClientDisconnect := rt.isClientDisconnectAfterCommit(clientDisconnected, streamErr)
 				// 仅客户端断开仍算业务成功；真实 stream 错误才算失败。
 				success := streamErr == nil || onlyClientDisconnect
@@ -410,6 +424,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 						Summary:         streamErr.Error(),
 						Detail:          detail.String(),
 						UpstreamHeaders: headerJSON,
+					}
+					if errors.Is(streamErr, errRequestFirstTokenBudget) {
+						errInfo.Type = "request_timeout"
 					}
 				}
 				if success {
@@ -485,7 +502,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				}
 				// 客户端断开 / 请求 context 已取消：父 context 污染会导致后续重试/顺延全部变成
 				// "context canceled"，且误伤路由冷却。此类错误应立刻停止，不再重试/顺延/冷却。
-				clientCanceled := rt.isClientContextError(fwdErr, c) || clientDisconnected
+				requestTimedOut := errors.Is(context.Cause(c.Request.Context()), errRequestFirstTokenBudget)
+				clientCanceled := !requestTimedOut && (rt.isClientContextError(fwdErr, c) || clientDisconnected)
 				if clientCanceled {
 					rt.annotateClientContextError(&errInfo, c, upstreamFullURL, c.Request.Method, fwdErr)
 				}
@@ -500,14 +518,16 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				// Permanent capability/auth/balance errors do not benefit from
 				// repeating the same request on the same route. Keep failover to
 				// other routes available, but end this route's retry ladder now.
-				if tryOnRoute < maxTriesOnRoute-1 && !isSameRouteRetryableUpstreamFailure(status, errInfo) {
+				if tryOnRoute < maxTriesOnRoute-1 && (!isSameRouteRetryableUpstreamFailure(status, errInfo) ||
+					rt.isFirstTokenTimeout(fwdErr) || errors.Is(fwdErr, errUpstreamQueueTimeout)) {
 					maxTriesOnRoute = tryOnRoute + 1
 				}
 				lastTryOnRoute := tryOnRoute >= maxTriesOnRoute-1
 				var cooldownUntil *time.Time
 				firstTokenTimedOut := rt.isFirstTokenTimeout(fwdErr)
 				firstTokenCooldownEnabled := group.FirstTokenTimeoutCooldownEnabled
-				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && !clientCanceled &&
+				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && !clientCanceled && !requestTimedOut &&
+					!errors.Is(fwdErr, errUpstreamQueueTimeout) &&
 					(!firstTokenTimedOut || firstTokenCooldownEnabled) {
 					until := time.Now().Add(time.Duration(cooldownSec) * time.Second)
 					cooldownUntil = &until
@@ -551,7 +571,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					)
 				}
 				// 客户端已取消：立刻结束，避免用已取消 context 继续打上游
-				if clientCanceled {
+				if clientCanceled || requestTimedOut {
 					goto finishError
 				}
 				// 重试关闭，或还可同路由重试则 continue；否则跳出到顺延
@@ -610,6 +630,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			}
 			c.Status(status)
 			usageMeta.DeferSettlement = settlement.VirtualCacheReadEnabled
+			usageMeta.RequestWinner = true
 			written, writeErr := c.Writer.Write(clientBody)
 			if writeErr != nil || (len(clientBody) > 0 && written != len(clientBody)) {
 				if writeErr == nil {
@@ -655,6 +676,14 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 finishError:
 	rt.finalizeUsageFailure(reqID, key)
+	if errors.Is(context.Cause(c.Request.Context()), errRequestFirstTokenBudget) {
+		rt.writeGatewayError(c, kind, http.StatusGatewayTimeout, "request_timeout", errRequestFirstTokenBudget.Error())
+		return
+	}
+	if errors.Is(lastErr, errRequestAttemptLimit) {
+		rt.writeGatewayError(c, kind, http.StatusBadGateway, "attempt_limit", lastErr.Error())
+		return
+	}
 	if lastStatus > 0 && len(lastBody) > 0 {
 		out := rt.injectUpstreamOpsRequestID(lastBody, reqID)
 		rt.setGatewayRequestIDHeaders(c, reqID)
