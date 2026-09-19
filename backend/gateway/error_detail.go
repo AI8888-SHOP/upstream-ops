@@ -16,6 +16,7 @@ import (
 )
 
 type usageRecordMeta struct {
+	ResponseModel        responseModelAudit
 	SchedulingDecision   *schedulingDecision
 	SchedulerObservation *schedulerObservation
 	InboundEndpoint      string

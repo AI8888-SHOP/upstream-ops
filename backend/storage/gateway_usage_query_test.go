@@ -199,6 +199,16 @@ func TestGatewayUsageSourceFiltersTimelineAndGroupOverview(t *testing.T) {
 		t.Fatalf("timeline requests/tokens = %d/%d, want 3/200: %+v", requests, tokens, timeline)
 	}
 
+	// Older usage must not leak into the one-hour overview or its totals.
+	if err := logs.Create(&GatewayUsageLog{
+		GatewayGroupID: 7, ChannelID: 11, SourceGroupID: &groupID,
+		SourceGroupName: "premium-renamed", RequestID: "source-monitor-old",
+		Winner: true, Success: true, InputTokens: 10, CacheReadTokens: 990,
+		CreatedAt: now.Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatalf("create older usage: %v", err)
+	}
+
 	overview, err := logs.GroupOverview(7, []GatewayRoute{{
 		ID: 1, GatewayGroupID: 7, SourceKind: GatewayRouteSourceMonitor,
 		SourceChannelID: 11, SourceGroupID: &groupID, SourceGroupName: "premium-renamed",
@@ -213,5 +223,113 @@ func TestGatewayUsageSourceFiltersTimelineAndGroupOverview(t *testing.T) {
 	active := overview.ActiveSourceGroups[0]
 	if active.RequestCount != 2 || active.UsageCount != 2 || active.Tokens != 150 || active.CacheHitRate != 40 || active.AccountRateMultiplier != 1.5 {
 		t.Fatalf("active source = %+v", active)
+	}
+	if overview.Totals.TotalRequests != 3 || overview.Totals.TotalTokens != 200 {
+		t.Fatalf("one-hour overview totals = %+v", overview.Totals)
+	}
+	if active.LastUsedAt == nil || !active.LastUsedAt.Equal(now.Add(-5*time.Minute)) {
+		t.Fatalf("last used = %v, want latest in-window usage", active.LastUsedAt)
+	}
+}
+
+func TestGatewayUsageTimelineRealCacheRateAndShortWindows(t *testing.T) {
+	db := openTestDB(t)
+	logs := NewGatewayUsageLogs(db)
+	start := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	groupID, otherGroupID := int64(41), int64(42)
+	base := GatewayUsageLog{
+		GatewayGroupID: 7, GatewayKeyID: 9, ChannelID: 11, SourceGroupID: &groupID,
+		RequestedModel: "cache-model", Winner: true, Success: true,
+		CreatedAt: start.Add(20 * time.Second),
+	}
+	rows := make([]GatewayUsageLog, 0)
+	add := func(id string, modify func(*GatewayUsageLog)) {
+		row := base
+		row.RequestID = id
+		modify(&row)
+		rows = append(rows, row)
+	}
+	add("real-read", func(row *GatewayUsageLog) {
+		row.InputTokens, row.CacheReadTokens, row.VirtualCacheReadTokens = 50, 50, 50
+	})
+	// Successful non-winning attempts use the same real-cache definition as Stats.
+	add("real-creation", func(row *GatewayUsageLog) {
+		row.InputTokens, row.CacheCreationTokens = 100, 100
+		row.Winner = false
+	})
+	add("failed-with-tokens", func(row *GatewayUsageLog) {
+		row.InputTokens, row.CacheReadTokens = 9999, 9999
+		row.Winner, row.Success = false, false
+	})
+	add("virtual-only", func(row *GatewayUsageLog) {
+		row.CreatedAt = row.CreatedAt.Add(time.Minute)
+		row.InputTokens, row.VirtualCacheReadTokens = 100, 100
+	})
+	add("failed-only", func(row *GatewayUsageLog) {
+		row.CreatedAt = row.CreatedAt.Add(2 * time.Minute)
+		row.InputTokens, row.CacheReadTokens = 100, 100
+		row.Winner, row.Success = false, false
+	})
+	add("output-only", func(row *GatewayUsageLog) {
+		row.CreatedAt = row.CreatedAt.Add(3 * time.Minute)
+		row.OutputTokens = 20
+	})
+	add("fully-cached", func(row *GatewayUsageLog) {
+		row.CreatedAt = row.CreatedAt.Add(4 * time.Minute)
+		row.CacheReadTokens = 200
+	})
+	// Each row differs in just one filter, so leaks change both counts and rates.
+	base.CacheReadTokens = 1000
+	add("other-gateway", func(row *GatewayUsageLog) { row.GatewayGroupID++ })
+	add("other-key", func(row *GatewayUsageLog) { row.GatewayKeyID++ })
+	add("other-channel", func(row *GatewayUsageLog) { row.ChannelID++ })
+	add("other-source-group", func(row *GatewayUsageLog) { row.SourceGroupID = &otherGroupID })
+	add("other-model", func(row *GatewayUsageLog) { row.RequestedModel = "other-model" })
+	add("before-window", func(row *GatewayUsageLog) { row.CreatedAt = start.Add(-time.Minute) })
+	add("after-window", func(row *GatewayUsageLog) { row.CreatedAt = start.Add(2 * time.Hour) })
+	for i := range rows {
+		if err := logs.Create(&rows[i]); err != nil {
+			t.Fatalf("create usage %s: %v", rows[i].RequestID, err)
+		}
+	}
+
+	for _, window := range []time.Duration{5 * time.Minute, 10 * time.Minute, time.Hour} {
+		t.Run(window.String(), func(t *testing.T) {
+			to := start.Add(window)
+			points, err := logs.Timeline(GatewayUsageQuery{
+				GatewayGroupID: 7, GatewayKeyID: 9, ChannelID: 11, SourceGroupID: &groupID,
+				Model: "cache-model", From: &start, To: &to,
+			})
+			if err != nil {
+				t.Fatalf("timeline: %v", err)
+			}
+			want := []struct {
+				requests int64
+				rate     float64
+				hasRate  bool
+			}{
+				{3, 50.0 / 300.0 * 100, true},
+				{1, 0, true},
+				{1, 0, false},
+				{1, 0, false},
+				{1, 100, true},
+			}
+			if len(points) != len(want) {
+				t.Fatalf("minute buckets = %+v, want %d points", points, len(want))
+			}
+			for i, point := range points {
+				if !point.Bucket.Equal(start.Add(time.Duration(i)*time.Minute)) || point.Requests != want[i].requests {
+					t.Fatalf("bucket %d = %+v", i, point)
+				}
+				if (point.CacheHitRate != nil) != want[i].hasRate {
+					t.Fatalf("bucket %d cache rate = %v, want hasRate=%v", i, point.CacheHitRate, want[i].hasRate)
+				}
+				if point.CacheHitRate != nil {
+					if diff := *point.CacheHitRate - want[i].rate; diff < -0.0001 || diff > 0.0001 {
+						t.Fatalf("bucket %d cache rate = %f, want %f", i, *point.CacheHitRate, want[i].rate)
+					}
+				}
+			}
+		})
 	}
 }

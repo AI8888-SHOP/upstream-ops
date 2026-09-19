@@ -1012,6 +1012,10 @@ export interface GatewayUsageLog {
   cooldown_until?: string | null
   requested_model: string
   upstream_model?: string
+  /** 协议转换前，上游原始响应声明的模型；旧记录或上游未声明时为空。 */
+  upstream_response_model?: string
+  upstream_model_mismatch?: boolean | null
+  upstream_model_conflict?: boolean
   model_mapping_chain?: string
   inbound_endpoint?: string
   upstream_endpoint?: string
@@ -1085,6 +1089,7 @@ export type GatewayResponseValidationTarget =
   | "assistant_text"
   | "raw_body"
   | "error_message"
+  | "response_model"
 
 export interface GatewayResponseRule {
   id: number
@@ -1118,6 +1123,8 @@ export interface GatewayUsageTimelinePoint {
   cost: number
   success: number
   errors: number
+  /** 真实 Token 加权命中率（不含虚拟缓存）；无有效 Token 时为 null。 */
+  cache_hit_rate: number | null
 }
 
 export interface GatewayUsageSourceOption {

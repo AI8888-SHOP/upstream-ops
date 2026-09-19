@@ -294,7 +294,9 @@ func (rt *Runtime) forwardStreamBuffered(
 	headers http.Header,
 	status int,
 	virtualCachePercent ...int,
-) streamAttemptResult {
+) (returned streamAttemptResult) {
+	var modelAudit responseModelAudit
+	defer func() { returned.ResponseModel = modelAudit }()
 	cachePercent := 0
 	if len(virtualCachePercent) > 0 {
 		cachePercent = virtualCachePercent[0]
@@ -329,6 +331,12 @@ func (rt *Runtime) forwardStreamBuffered(
 	data = append(data, rest...)
 
 	tokens := rt.parseUsageByKind(data, true, upstream)
+	if err := modelAudit.ObserveBody(data, func(model string) error { return validateStreamResponseModel(c, model) }); err != nil {
+		var rejected *responseRejectedError
+		if errors.As(err, &rejected) {
+			return streamAttemptResult{Status: status, Headers: headers, FirstTokenMS: ft, Tokens: tokens, Err: err, ValidationRejection: rejected.Result}
+		}
+	}
 	clientBody := rt.convertUpstreamResponse(data, inbound, upstream, model, true, converted)
 	if len(clientBody) == 0 {
 		clientBody = data
@@ -841,6 +849,18 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		}
 		upstreamTerminal := event.upstreamTerminal
 		eventName, data := event.eventName, event.data
+		declared := result.ResponseModel.Observe([]byte(data), upstreamTerminal)
+		if err := validateStreamResponseModel(c, declared); err != nil {
+			// Preserve real usage on the rejected frame for upstream-cost audit.
+			rt.mergeStreamUsage(&tokens, data, upKind)
+			result.Tokens = tokens
+			appendResponseCapture(data)
+			var rejected *responseRejectedError
+			if errors.As(err, &rejected) {
+				result.ValidationRejection = rejected.Result
+			}
+			return upstreamTerminal, err
+		}
 		// Chat-compatible converters emit usage on message_delta, while the
 		// actual Anthropic terminal marker arrives in the following message_stop.
 		// Hold that one small usage event until the stream tail so a recovered

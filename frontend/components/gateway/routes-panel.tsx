@@ -59,6 +59,9 @@ type SortedRouteRow = {
   rate: number
 }
 
+const SOURCE_COLUMN_CLASS = "w-44 min-w-44 max-w-44"
+const SOURCE_SELECT_CLASS = "w-40 min-w-0 *:data-[slot=select-value]:min-w-0 *:data-[slot=select-value]:flex-1"
+
 const UA_MODE_OPTIONS: {
   value: GatewayUserAgentMode
   label: string
@@ -306,8 +309,8 @@ export function RoutesPanel({
         <TableHeader>
           <TableRow>
             <TableHead>类型</TableHead>
-            <TableHead>来源</TableHead>
-            <TableHead>源分组</TableHead>
+            <TableHead className={SOURCE_COLUMN_CLASS}>来源</TableHead>
+            <TableHead className={SOURCE_COLUMN_CLASS}>源分组</TableHead>
             <TableHead>上游协议</TableHead>
             <TableHead>User-Agent</TableHead>
             <TableHead>权重</TableHead>
@@ -325,6 +328,13 @@ export function RoutesPanel({
             const providerID = Number(r.gateway_provider_id) || 0
             const sgs = sourceGroupsByChannel[chId] ?? []
             const provider = providerOptions.find((p) => p.id === providerID)
+            const channel = channelList.find((ch) => ch.id === chId)
+            const selectedSourceGroup = sgs.find(
+              (g) => sourceGroupOptionValue(g) === sourceGroupSelectValue(r),
+            )
+            const sourceGroupLabel = selectedSourceGroup
+              ? `${selectedSourceGroup.model_name} · ${formatRatio(selectedSourceGroup.ratio)}`
+              : r.source_group_name?.trim() || (sourceGroupSelectValue(r) === "none" ? "不绑定分组" : "源分组")
             const modelCooldowns = routeModelCooldownEntries(r)
             const cacheHealthBlacklisted = isCacheHealthBlacklisted(r)
             const cacheHealthManualClear =
@@ -386,7 +396,7 @@ export function RoutesPanel({
                     </SelectContent>
                   </Select>
                 </TableCell>
-                <TableCell>
+                <TableCell className={SOURCE_COLUMN_CLASS}>
                   {kind === "provider" ? (
                     <Select
                       value={providerID ? String(providerID) : ""}
@@ -412,8 +422,10 @@ export function RoutesPanel({
                         })
                       }}
                     >
-                      <SelectTrigger className="min-w-36">
-                        <SelectValue placeholder="选择直连渠道" />
+                      <SelectTrigger className={SOURCE_SELECT_CLASS} title={provider?.name}>
+                        <SelectValue placeholder="选择直连渠道">
+                          <span className="truncate">{provider?.name}</span>
+                        </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
                         {providerOptions.map((p) => (
@@ -443,8 +455,10 @@ export function RoutesPanel({
                         })
                       }}
                     >
-                      <SelectTrigger className="min-w-32">
-                        <SelectValue placeholder="选择监控渠道" />
+                      <SelectTrigger className={SOURCE_SELECT_CLASS} title={channel?.name}>
+                        <SelectValue placeholder="选择监控渠道">
+                          <span className="truncate">{channel?.name}</span>
+                        </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
                         {channelList.map((ch) => (
@@ -456,7 +470,7 @@ export function RoutesPanel({
                     </Select>
                   )}
                 </TableCell>
-                <TableCell>
+                <TableCell className={SOURCE_COLUMN_CLASS}>
                   {kind === "provider" ? (
                     <span className="text-xs text-muted-foreground">—</span>
                   ) : (
@@ -493,23 +507,10 @@ export function RoutesPanel({
                       })
                     }}
                   >
-                    <SelectTrigger className="min-w-36">
-                      {(() => {
-                        const selected = sgs.find(
-                          (g) =>
-                            sourceGroupOptionValue(g) ===
-                            sourceGroupSelectValue(r),
-                        )
-                        if (selected) {
-                          return (
-                            <SelectValue>
-                              {selected.model_name} ·{" "}
-                              {formatRatio(selected.ratio)}
-                            </SelectValue>
-                          )
-                        }
-                        return <SelectValue placeholder="源分组" />
-                      })()}
+                    <SelectTrigger className={SOURCE_SELECT_CLASS} title={sourceGroupLabel}>
+                      <SelectValue placeholder="源分组">
+                        <span className="truncate">{sourceGroupLabel}</span>
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="none">不绑定分组</SelectItem>

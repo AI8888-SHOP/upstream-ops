@@ -1896,11 +1896,11 @@ export function GatewayPage() {
                     <Card className="border-border shadow-none">
                       <CardContent className="space-y-3 p-3 sm:p-4">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-sm font-medium">当前有效分组</div>
+                          <div className="text-sm font-medium">当前有效分组 <span className="text-xs font-normal text-muted-foreground">（近 1 小时）</span></div>
                           <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
                             <span>有效分组 {groupOverview.active_source_groups?.length ?? 0}</span>
-                            <span>近 24 小时请求 {groupOverview.totals?.total_requests ?? 0}</span>
-                            <span>近 24 小时 Token {(groupOverview.totals?.total_tokens ?? 0).toLocaleString()}</span>
+                            <span>近 1 小时请求 {groupOverview.totals?.total_requests ?? 0}</span>
+                            <span>近 1 小时 Token {(groupOverview.totals?.total_tokens ?? 0).toLocaleString()}</span>
                           </div>
                         </div>
                         {(groupOverview.active_source_groups?.length ?? 0) === 0 ? (

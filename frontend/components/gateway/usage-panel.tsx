@@ -337,6 +337,7 @@ function UsageTimelineChart({ points }: { points: GatewayUsageTimelinePoint[] })
             <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-sky-500" />请求</span>
             <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-500" />Token</span>
             <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-amber-500" />费用</span>
+            <span className="inline-flex items-center gap-1.5" title="按成功请求的真实 Token 加权计算，不含虚拟缓存；无有效 Token 时不绘制"><span className="size-2 rounded-full bg-violet-500" />真实缓存命中率</span>
           </div>
         </div>
         <div className="h-[250px] w-full">
@@ -350,10 +351,12 @@ function UsageTimelineChart({ points }: { points: GatewayUsageTimelinePoint[] })
                 <YAxis yAxisId="requests" tick={{ fontSize: 10 }} width={42} allowDecimals={false} />
                 <YAxis yAxisId="tokens" orientation="right" tick={{ fontSize: 10 }} width={48} tickFormatter={(v) => formatTokens(Number(v))} />
                 <YAxis yAxisId="cost" hide />
+                <YAxis yAxisId="cache" orientation="right" domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tick={{ fontSize: 10, fill: "#8b5cf6" }} width={42} tickFormatter={(v) => `${v}%`} />
                 <RechartsTooltip
                   formatter={(value: number, name: string) => {
                     if (name === "cost") return [`$${Number(value).toFixed(6)}`, "费用"]
                     if (name === "tokens") return [formatTokens(Number(value)), "Token"]
+                    if (name === "cache_hit_rate") return [`${Number(value).toFixed(2)}%`, "真实缓存命中率"]
                     return [Number(value).toLocaleString(), "请求"]
                   }}
                   labelFormatter={(label) => String(label)}
@@ -361,6 +364,7 @@ function UsageTimelineChart({ points }: { points: GatewayUsageTimelinePoint[] })
                 <Line yAxisId="requests" type="monotone" dataKey="requests" name="requests" stroke="#0ea5e9" strokeWidth={2} dot={data.length <= 24 ? { r: 2.5 } : false} activeDot={{ r: 4 }} />
                 <Line yAxisId="tokens" type="monotone" dataKey="tokens" name="tokens" stroke="#10b981" strokeWidth={2} dot={data.length <= 24 ? { r: 2.5 } : false} activeDot={{ r: 4 }} />
                 <Line yAxisId="cost" type="monotone" dataKey="cost" name="cost" stroke="#f59e0b" strokeWidth={2} dot={data.length <= 24 ? { r: 2.5 } : false} activeDot={{ r: 4 }} />
+                <Line yAxisId="cache" type="monotone" dataKey="cache_hit_rate" name="cache_hit_rate" stroke="#8b5cf6" strokeWidth={2} dot={data.length <= 24 ? { r: 2.5 } : false} activeDot={{ r: 4 }} connectNulls={false} />
               </LineChart>
             </ResponsiveContainer>
           )}
@@ -664,6 +668,7 @@ export function UsagePanel({
               <SelectItem value="success">仅成功</SelectItem>
               <SelectItem value="client">客户端断开</SelectItem>
               <SelectItem value="fail">仅失败</SelectItem>
+              <SelectItem value="model_mismatch">上游模型不一致 / 声明变化</SelectItem>
               <SelectItem value="multi">含重试 / 顺延</SelectItem>
               <SelectItem value="multi_success">
                 顺延后成功（如 2/2 · 顺延）
@@ -705,6 +710,8 @@ export function UsagePanel({
           </span>
           {(
             [
+              { id: "5m", label: "近 5 分钟" },
+              { id: "10m", label: "近 10 分钟" },
               { id: "1h", label: "近 1 小时" },
               { id: "today", label: "今天" },
               { id: "7d", label: "近 7 天" },
@@ -738,9 +745,10 @@ export function UsagePanel({
                 )
                 let from = new Date(now)
                 let toEnd = new Date(now)
-                if (p.id === "1h") {
-                  from = new Date(now.getTime() - 3600_000)
-                  // 近 1 小时仍以当前时刻为结束（秒取满当前秒）
+                if (p.id === "5m" || p.id === "10m" || p.id === "1h") {
+                  const minutes = p.id === "5m" ? 5 : p.id === "10m" ? 10 : 60
+                  from = new Date(now.getTime() - minutes * 60_000)
+                  // 滚动窗口以当前时刻为结束（含秒）。
                   toEnd = new Date(now)
                 } else if (p.id === "today") {
                   from = startOfDay(now)

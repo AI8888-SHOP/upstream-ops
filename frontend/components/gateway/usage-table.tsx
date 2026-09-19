@@ -549,6 +549,26 @@ function mappingSteps(u: GatewayUsageLog): string[] {
   return [u.requested_model || "—"]
 }
 
+function ResponseModelAudit({ u }: { u: GatewayUsageLog }) {
+  const response = u.upstream_response_model?.trim()
+  const mismatch = u.upstream_model_mismatch === true
+  const conflict = u.upstream_model_conflict === true
+  const status = !response ? "未获取" : conflict ? "声明变化" : mismatch ? "不一致" : u.upstream_model_mismatch === false ? "一致" : "未判定"
+  const detail = [
+    `请求模型：${u.requested_model || "—"}`,
+    `发往上游：${u.upstream_model || "—"}`,
+    `上游响应：${response || "未获取（旧记录或上游未声明）"}`,
+    `审计：${status}${conflict && mismatch ? "，最终声明与发往上游的模型不一致" : ""}`,
+    "比较发往上游与响应声明，不将本站映射判为替换。别名或日期版本也可能不同；声明一致不代表实际模型已验证。",
+  ].join("\n")
+  return (
+    <div className={cn("mt-1 text-[11px]", mismatch || conflict ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground")} title={detail}>
+      <span className="font-medium">上游响应：{response || "未获取"}</span>
+      {response ? <span className="ml-1 rounded border border-current/30 px-1">{status}</span> : null}
+    </div>
+  )
+}
+
 function errorTypeLabel(t?: string) {
   switch (t) {
     case "transport":
@@ -923,6 +943,7 @@ function ChainTimeline({
                 <span className="tabular-nums text-muted-foreground">
                   {formatDurationMS(r.duration_ms)}
                 </span>
+                <ResponseModelAudit u={r} />
                 {hasValidationDetail(r) ? (
                   <span
                     className={cn(
@@ -985,6 +1006,11 @@ function ErrorDetailPanel({ u }: { u: GatewayUsageLog }) {
     `type: ${u.error_type || "—"}`,
     `attempt_status: ${u.attempt_status || "—"}`,
     `winner: ${u.winner ? "true" : "false"}`,
+    `requested_model: ${u.requested_model || "—"}`,
+    `upstream_model: ${u.upstream_model || "—"}`,
+    `upstream_response_model: ${u.upstream_response_model || "未获取"}`,
+    `upstream_model_mismatch: ${u.upstream_model_mismatch ?? "unknown"}`,
+    `upstream_model_conflict: ${u.upstream_model_conflict ?? false}`,
     `validation_rule: ${u.validation_rule_name || u.validation_rule_id || "—"}`,
     `validation_reason: ${u.validation_reason || "—"}`,
     `validation_post_commit: ${u.validation_post_commit ? "true" : "false"}`,
@@ -1828,6 +1854,7 @@ export function GatewayUsageTable({
                           ) : (
                             <CellText text={steps[0]} className="font-medium" />
                           )}
+                          <ResponseModelAudit u={u} />
                         </TableCell>
                       )}
 

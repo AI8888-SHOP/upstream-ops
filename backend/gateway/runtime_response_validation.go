@@ -62,6 +62,9 @@ func validationErrorInfo(result validationResult) usageErrorInfo {
 	if strings.TrimSpace(result.RuleName) != "" {
 		reason = fmt.Sprintf("response matched rejection rule %q", result.RuleName)
 	}
+	if result.Target == "response_model" {
+		reason = fmt.Sprintf("upstream response model %q matched rejection rule %q", result.MatchedOn, result.RuleName)
+	}
 	return usageErrorInfo{
 		Type:    "validation",
 		Summary: reason,

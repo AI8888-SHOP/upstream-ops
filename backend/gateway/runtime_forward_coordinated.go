@@ -705,6 +705,14 @@ func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coor
 		attempt.ForwardBody, false, attempt.UpstreamKind, timeout,
 	)
 	attempt.DurationMS = time.Since(attempt.StartedAt).Milliseconds()
+	modelValidation := acceptedValidation()
+	_ = attempt.UsageMeta.ResponseModel.ObserveBody(attempt.UpstreamBody, func(model string) error {
+		modelValidation = req.validator.ValidateResponseModel(string(req.kind), req.requestedModel, model)
+		if modelValidation.IsRejected() {
+			return &responseRejectedError{Result: modelValidation}
+		}
+		return nil
+	})
 	if attempt.Status >= 400 {
 		attempt.ClientBody = rt.convertErrorBody(attempt.UpstreamBody, req.kind, attempt.UpstreamKind, attempt.Converted)
 	} else {
@@ -712,7 +720,10 @@ func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coor
 		attempt.Tokens = rt.parseUsageByKind(attempt.UpstreamBody, false, attempt.UpstreamKind)
 	}
 	if attempt.Err == nil && len(attempt.ClientBody) > 0 {
-		attempt.Validation = req.validator.Validate(attempt.ClientBody, attempt.Headers, string(req.kind), req.requestedModel)
+		attempt.Validation = modelValidation
+		if !attempt.Validation.IsRejected() {
+			attempt.Validation = req.validator.Validate(attempt.ClientBody, attempt.Headers, string(req.kind), req.requestedModel)
+		}
 		if attempt.Validation.IsRejected() {
 			attempt.ErrInfo = validationErrorInfo(attempt.Validation)
 			return attempt, nil
@@ -884,6 +895,7 @@ func (a *coordinatedForwardAttempt) applyStreamResult(result streamAttemptResult
 }
 
 func (a *coordinatedForwardAttempt) applyStreamResultLocked(result streamAttemptResult) {
+	a.UsageMeta.ResponseModel = result.ResponseModel
 	a.Status = result.Status
 	a.Headers = result.Headers
 	a.UpstreamBody = result.Body

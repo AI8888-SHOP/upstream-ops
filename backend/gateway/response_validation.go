@@ -148,7 +148,7 @@ func newResponseValidator(cfg responseValidationConfig, rules []responseRuleSpec
 			rule.Target = "assistant_text"
 		}
 		switch rule.Target {
-		case "assistant_text", "raw_body", "error_message":
+		case "assistant_text", "raw_body", "error_message", "response_model":
 		default:
 			return nil, fmt.Errorf("response rule %q has unsupported target %q", rule.Name, rule.Target)
 		}
@@ -322,6 +322,9 @@ func (v *responseValidator) matchCompiledWithPrefilters(rules []compiledResponse
 func matchCompiledResponseRule(rule compiledResponseRule, raw, assistant, errorMessage []byte, postCommit bool) validationResult {
 	var candidate []byte
 	switch rule.Target {
+	case "response_model":
+		// Checked against raw upstream metadata, never converted response text.
+		return acceptedValidation()
 	case "raw_body":
 		candidate = raw
 	case "error_message":
@@ -429,7 +432,7 @@ func (v *responseValidator) NewStreamValidator(protocolName, model string) *stre
 	}
 	if v != nil && v.StreamEnabled() {
 		for _, rule := range v.rules {
-			if !responseRuleApplies(rule, protocolName, model) {
+			if rule.Target == "response_model" || !responseRuleApplies(rule, protocolName, model) {
 				continue
 			}
 			s.rules = append(s.rules, rule)
@@ -456,7 +459,7 @@ func (v *responseValidator) NewStreamValidator(protocolName, model string) *stre
 			}
 		}
 	}
-	if !v.StreamEnabled() {
+	if !v.StreamEnabled() || len(s.rules) == 0 {
 		s.result = acceptedValidation()
 		s.prefixReady = true
 	}
@@ -464,7 +467,7 @@ func (v *responseValidator) NewStreamValidator(protocolName, model string) *stre
 }
 
 func (s *streamResponseValidator) Consume(chunk []byte) validationResult {
-	if s == nil || s.validator == nil || !s.validator.StreamEnabled() {
+	if s == nil || s.validator == nil || !s.validator.StreamEnabled() || len(s.rules) == 0 {
 		return acceptedValidation()
 	}
 	if len(chunk) == 0 {

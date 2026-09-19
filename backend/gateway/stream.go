@@ -102,6 +102,8 @@ func (s *streamFlushState) stop() {
 // DownstreamComplete=true 表示已成功向客户端写出流式终端帧（[DONE] / message_stop 等）；
 // 此后客户端关连接属于正常收尾，不应记 error_type=client。
 type streamAttemptResult struct {
+	ResponseModel responseModelAudit
+
 	Status             int
 	Headers            http.Header
 	Body               []byte

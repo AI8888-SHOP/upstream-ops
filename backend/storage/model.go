@@ -473,6 +473,7 @@ const (
 	GatewayResponseRuleTargetAssistantText = "assistant_text"
 	GatewayResponseRuleTargetRawBody       = "raw_body"
 	GatewayResponseRuleTargetErrorMessage  = "error_message"
+	GatewayResponseRuleTargetResponseModel = "response_model"
 
 	GatewayAttemptKindPrimary     = "primary"
 	GatewayAttemptKindRetry       = "retry"
@@ -860,6 +861,11 @@ func (GatewayResponseRule) TableName() string { return "gateway_response_rules" 
 // GatewayUsageLog 记录每一次网关转发请求的用量与费用参考。
 // Source* 字段为请求当时的路由快照：路由保存会换 id 时，历史记录仍可展示上游密钥/源分组。
 type GatewayUsageLog struct {
+	// Nullable additions preserve unknown audit state for historical records.
+	UpstreamResponseModel string `gorm:"size:256" json:"upstream_response_model,omitempty"`
+	UpstreamModelMismatch *bool  `json:"upstream_model_mismatch"`
+	UpstreamModelConflict bool   `json:"upstream_model_conflict"`
+
 	SchedulingDecision string `gorm:"type:text;not null;default:''" json:"scheduling_decision,omitempty"`
 	ID                uint `gorm:"primaryKey" json:"id"`
 	GatewayGroupID    uint `gorm:"not null;index;default:0" json:"gateway_group_id"`

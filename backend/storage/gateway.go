@@ -1329,9 +1329,9 @@ func normalizeGatewayResponseRule(item *GatewayResponseRule) error {
 		item.Target = GatewayResponseRuleTargetAssistantText
 	}
 	switch item.Target {
-	case GatewayResponseRuleTargetAssistantText, GatewayResponseRuleTargetRawBody, GatewayResponseRuleTargetErrorMessage:
+	case GatewayResponseRuleTargetAssistantText, GatewayResponseRuleTargetRawBody, GatewayResponseRuleTargetErrorMessage, GatewayResponseRuleTargetResponseModel:
 	default:
-		return fmt.Errorf("target must be assistant_text, raw_body, or error_message")
+		return fmt.Errorf("target must be assistant_text, raw_body, error_message, or response_model")
 	}
 	if item.Priority < 0 || item.Priority > 100000 {
 		return fmt.Errorf("priority must be between 0 and 100000")
@@ -3473,6 +3473,7 @@ type GatewayUsageQuery struct {
 	//   multi — 含重试/顺延（同 request_id 多条 或 attempt>1）
 	//   multi_success — 最终成功且链路含重试/顺延（如 2/2·顺延）
 	//   multi_fail — 含重试/顺延且最终失败
+	//   model_mismatch — 上游响应模型不一致或流内声明发生变化
 	ResultMode string
 	From       *time.Time
 	To         *time.Time
@@ -3554,6 +3555,9 @@ type GatewayUsageTimelinePoint struct {
 	Cost     float64   `json:"cost"`
 	Success  int64     `json:"success"`
 	Errors   int64     `json:"errors"`
+	// CacheHitRate uses successful attempts' real token buckets, excluding
+	// virtual cache. Null means no input/cache tokens were reported.
+	CacheHitRate *float64 `json:"cache_hit_rate"`
 }
 
 // GatewayUsageSourceOption identifies a monitored channel or direct provider
@@ -3654,6 +3658,8 @@ func (r *GatewayUsageLogs) applyFilters(db *gorm.DB, q GatewayUsageQuery) *gorm.
 	}
 	mode := strings.ToLower(strings.TrimSpace(q.ResultMode))
 	switch mode {
+	case "model_mismatch":
+		db = db.Where("upstream_model_mismatch = ? OR upstream_model_conflict = ?", true, true)
 	case "success":
 		// 纯成功：不含客户端断开（新逻辑 success=true + error_type=client）
 		db = db.Where(
@@ -4411,14 +4417,24 @@ func (r *GatewayUsageLogs) Timeline(q GatewayUsageQuery) ([]GatewayUsageTimeline
 	db := r.applyFilters(r.db.Model(&GatewayUsageLog{}), q)
 	expr := usageTimelineBucketExpression(r.db, bucketSeconds)
 	type row struct {
-		Bucket   int64
-		Requests int64
-		Tokens   int64
-		Cost     float64
-		Success  int64
+		Bucket             int64
+		Requests           int64
+		Tokens             int64
+		Cost               float64
+		Success            int64
+		CacheHealthInput   int64
+		CacheHealthRead    int64
+		CacheHealthCreated int64
 	}
 	var rows []row
-	selectSQL := fmt.Sprintf("%s as bucket, COUNT(DISTINCT request_id) as requests, COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) as tokens, COALESCE(SUM(actual_cost),0) as cost, COUNT(DISTINCT CASE WHEN winner THEN request_id END) as success", expr)
+	selectSQL := fmt.Sprintf(`%s as bucket,
+		COUNT(DISTINCT request_id) as requests,
+		COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) as tokens,
+		COALESCE(SUM(actual_cost),0) as cost,
+		COUNT(DISTINCT CASE WHEN winner THEN request_id END) as success,
+		COALESCE(SUM(CASE WHEN success THEN input_tokens ELSE 0 END),0) as cache_health_input,
+		COALESCE(SUM(CASE WHEN success THEN cache_read_tokens ELSE 0 END),0) as cache_health_read,
+		COALESCE(SUM(CASE WHEN success THEN cache_creation_tokens ELSE 0 END),0) as cache_health_created`, expr)
 	if err := db.Session(&gorm.Session{}).Select(selectSQL).Group("bucket").Order("bucket ASC").Limit(400).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
@@ -4431,10 +4447,15 @@ func (r *GatewayUsageLogs) Timeline(q GatewayUsageQuery) ([]GatewayUsageTimeline
 		if success > item.Requests {
 			success = item.Requests
 		}
+		var cacheHitRate *float64
+		if item.CacheHealthInput+item.CacheHealthRead+item.CacheHealthCreated > 0 {
+			rate := cacheHitRatePercent(item.CacheHealthInput, item.CacheHealthRead, item.CacheHealthCreated)
+			cacheHitRate = &rate
+		}
 		out = append(out, GatewayUsageTimelinePoint{
 			Bucket: time.Unix(item.Bucket, 0).UTC(), Requests: item.Requests,
 			Tokens: item.Tokens, Cost: item.Cost, Success: success,
-			Errors: item.Requests - success,
+			Errors: item.Requests - success, CacheHitRate: cacheHitRate,
 		})
 	}
 	return out, nil
@@ -4442,6 +4463,8 @@ func (r *GatewayUsageLogs) Timeline(q GatewayUsageQuery) ([]GatewayUsageTimeline
 
 func usageTimelineBucketSeconds(d time.Duration) int64 {
 	switch {
+	case d <= time.Hour:
+		return 60
 	case d <= 6*time.Hour:
 		return 5 * 60
 	case d <= 48*time.Hour:
@@ -4481,7 +4504,7 @@ func usageCreatedAtUnixExpression(db *gorm.DB) string {
 	}
 }
 
-// GroupOverview combines currently schedulable routes with the last 24 hours
+// GroupOverview combines currently schedulable routes with the last hour
 // of usage. Routes which have been removed or disabled are intentionally not
 // reported as active even if historical usage rows still exist.
 func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*GatewayGroupUsageOverview, error) {
@@ -4558,7 +4581,7 @@ func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*
 			active[key] = GatewayGroupActiveSource{SourceKind: kind, SourceID: sourceID, SourceGroupID: route.SourceGroupID, SourceGroupName: name, AccountRateMultiplier: route.BillingRateMultiplier, Active: true}
 		}
 	}
-	from := now.Add(-24 * time.Hour)
+	from := now.Add(-time.Hour)
 	type overviewRow struct {
 		ChannelID          uint   `gorm:"column:channel_id"`
 		ProviderID         uint   `gorm:"column:gateway_provider_id"`
@@ -4574,7 +4597,7 @@ func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*
 	var rows []overviewRow
 	lastUsedExpr := usageCreatedAtUnixExpression(r.db)
 	legacyGroupNameExpr := "CASE WHEN source_group_id IS NOT NULL AND source_group_id > 0 THEN '' ELSE source_group_name END"
-	if err := r.applyFilters(r.db.Model(&GatewayUsageLog{}), GatewayUsageQuery{GatewayGroupID: groupID, From: &from}).
+	if err := r.applyFilters(r.db.Model(&GatewayUsageLog{}), GatewayUsageQuery{GatewayGroupID: groupID, From: &from, To: &now}).
 		Select(fmt.Sprintf("channel_id, gateway_provider_id, source_group_id, %s as source_group_name, COUNT(DISTINCT request_id) as request_count, COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) as tokens, COALESCE(SUM(CASE WHEN success THEN input_tokens ELSE 0 END),0) as cache_health_input, COALESCE(SUM(CASE WHEN success THEN cache_read_tokens ELSE 0 END),0) as cache_health_read, COALESCE(SUM(CASE WHEN success THEN cache_creation_tokens ELSE 0 END),0) as cache_health_created, MAX(%s) as last_used_unix", legacyGroupNameExpr, lastUsedExpr)).
 		Group("channel_id, gateway_provider_id, source_group_id, " + legacyGroupNameExpr).Find(&rows).Error; err != nil {
 		return nil, err
@@ -4624,7 +4647,7 @@ func (r *GatewayUsageLogs) GroupOverview(groupID uint, routes []GatewayRoute) (*
 		}
 		return items[i].SourceGroupName < items[j].SourceGroupName
 	})
-	stats, err := r.Stats(GatewayUsageQuery{GatewayGroupID: groupID, From: &from, IncludeEndpoints: false})
+	stats, err := r.Stats(GatewayUsageQuery{GatewayGroupID: groupID, From: &from, To: &now, IncludeEndpoints: false})
 	if err != nil {
 		return nil, err
 	}

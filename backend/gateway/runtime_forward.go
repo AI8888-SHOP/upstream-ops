@@ -346,6 +346,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					kind, upstreamKind, upstreamModel, converted, attemptFTTimeout, providerVirtualCachePercent,
 				)
 				status = res.Status
+				usageMeta.ResponseModel = res.ResponseModel
 				respHeaders = res.Headers
 				respBody = res.Body
 				firstTokenMS = res.FirstTokenMS
@@ -360,6 +361,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				status, respHeaders, respBody, firstTokenMS, fwdErr = rt.forwardOnce(
 					c.Request.Context(), c, target, upstreamPath, c.Request.Method, c.Request.Header, fwdBody, false, upstreamKind, attemptFTTimeout,
 				)
+				_ = usageMeta.ResponseModel.ObserveBody(respBody, nil)
 			}
 			duration := time.Since(start).Milliseconds()
 

@@ -95,6 +95,7 @@ function listJSON(raw: string) {
 }
 
 function targetLabel(target: GatewayResponseValidationTarget) {
+  if (target === "response_model") return "上游响应模型"
   if (target === "raw_body") return "原始响应"
   if (target === "error_message") return "错误信息"
   return "助手文本"
@@ -301,6 +302,9 @@ export function ResponseRulesPanel({
               <p className="text-xs leading-5 text-muted-foreground">
                 按优先级检查响应。命中后拒绝当前 attempt，先按组内重试次数重试当前路由，再切换其它路由。
               </p>
+              <p className="text-xs leading-5 text-muted-foreground">
+                模型替换拦截：选择“上游响应模型”，填写请求模型过滤和异常响应模型正则。仅在向用户输出前丢弃重试；输出后命中只记审计。
+              </p>
             </div>
             <div className="flex flex-wrap gap-2">
               <Button size="icon-sm" variant="outline" onClick={() => void load()} disabled={loading || busy} title="刷新">
@@ -367,7 +371,7 @@ export function ResponseRulesPanel({
                     </div>
                     <code className="block max-w-full overflow-x-auto whitespace-pre rounded bg-muted px-2 py-1 text-[11px]">{rule.pattern}</code>
                     <p className="text-[11px] text-muted-foreground">
-                      模型：{parseList(rule.models_json).replaceAll("\n", ", ") || "全部"} · 协议：{parseList(rule.protocols_json).replaceAll("\n", ", ") || "全部"}
+                      请求模型：{parseList(rule.models_json).replaceAll("\n", ", ") || "全部"} · 协议：{parseList(rule.protocols_json).replaceAll("\n", ", ") || "全部"}
                     </p>
                   </div>
                   <div className="flex gap-1 sm:justify-end">
@@ -414,17 +418,23 @@ export function ResponseRulesPanel({
                   <SelectItem value="assistant_text">助手文本</SelectItem>
                   <SelectItem value="raw_body">原始响应</SelectItem>
                   <SelectItem value="error_message">错误信息</SelectItem>
+                  <SelectItem value="response_model">上游响应模型</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1">
-              <Label>正则表达式</Label>
-              <Textarea className="font-mono" rows={4} value={form.pattern} onChange={(event) => setForm({ ...form, pattern: event.target.value })} placeholder="(?i)temporarily unavailable|please retry" />
+              <Label>{form.target === "response_model" ? "异常响应模型正则（命中即拒绝）" : "正则表达式"}</Label>
+              <Textarea className="font-mono" rows={4} value={form.pattern} onChange={(event) => setForm({ ...form, pattern: event.target.value })} placeholder={form.target === "response_model" ? "^gpt-4o-mini$" : "(?i)temporarily unavailable|please retry"} />
+              {form.target === "response_model" ? (
+                <p className="text-xs leading-5 text-muted-foreground">
+                  例如请求模型填 gpt-4o，正则填 ^gpt-4o-mini$：仅拒绝该组合。只检查上游原始模型字段，不检查对话文本；上游未声明模型时不命中。模型审计始终记录，拦截需启用组内响应校验；流式请求还需启用流式校验。
+                </p>
+              ) : null}
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1">
-                <Label>模型过滤</Label>
-                <Textarea rows={3} value={form.models} onChange={(event) => setForm({ ...form, models: event.target.value })} placeholder="每行一个；留空表示全部" />
+                <Label>请求模型过滤</Label>
+                <Textarea rows={3} value={form.models} onChange={(event) => setForm({ ...form, models: event.target.value })} placeholder="映射前的请求模型，每行一个；支持 * 通配，留空表示全部" />
               </div>
               <div className="space-y-1">
                 <Label>协议过滤</Label>
