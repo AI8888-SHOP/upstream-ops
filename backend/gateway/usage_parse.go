@@ -34,6 +34,13 @@ func ParseOpenAIUsage(body []byte) UsageTokens {
 		}
 	}
 	if usageObj == nil {
+		// Responses terminal events, including failures, carry usage inside
+		// response. Read it before the stream can return through an error path.
+		if response, ok := raw["response"].(map[string]any); ok {
+			usageObj, _ = response["usage"].(map[string]any)
+		}
+	}
+	if usageObj == nil {
 		if hasAnyTokenField(raw) {
 			usageObj = raw
 		} else {

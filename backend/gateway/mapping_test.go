@@ -65,6 +65,31 @@ func TestParseOpenAIUsage(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageResponsesEnvelope(t *testing.T) {
+	for _, event := range []string{"response.completed", "response.failed", "response.incomplete"} {
+		body := []byte(`{"type":"` + event + `","response":{"usage":{"input_tokens":7,"output_tokens":2,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":1}}}}`)
+		want := UsageTokens{InputTokens: 7, OutputTokens: 2, CacheReadTokens: 3, ReasoningTokens: 1}
+		if got := ParseOpenAIUsage(body); got != want {
+			t.Fatalf("event=%s: usage=%+v, want %+v", event, got, want)
+		}
+		if got := ParseOpenAISSEUsage(append(append([]byte("data: "), body...), '\n', '\n')); got != want {
+			t.Fatalf("event=%s: SSE usage=%+v, want %+v", event, got, want)
+		}
+	}
+	for _, body := range []string{
+		`{"response":{"error":{"message":"busy"}}}`,
+		`{"response":{"usage":null}}`,
+		`{"response":{"output":[{"usage":{"input_tokens":7,"output_tokens":2}}]}}`,
+	} {
+		if got := ParseOpenAIUsage([]byte(body)); got != (UsageTokens{}) {
+			t.Fatalf("invented usage from %s: %+v", body, got)
+		}
+	}
+	if got := ParseOpenAIUsage([]byte(`{"usage":{"input_tokens":4,"output_tokens":1},"response":{"usage":{"input_tokens":7,"output_tokens":2}}}`)); got.InputTokens != 4 || got.OutputTokens != 1 {
+		t.Fatalf("root usage precedence changed: %+v", got)
+	}
+}
+
 func TestParseOpenAIUsage_PromptTokensDetailsCached(t *testing.T) {
 	// 对齐 sub2api：prompt_tokens_details.cached_tokens
 	body := []byte(`{"usage":{"prompt_tokens":3333,"completion_tokens":60,"prompt_tokens_details":{"cached_tokens":1536},"completion_tokens_details":{"reasoning_tokens":40}}}`)
