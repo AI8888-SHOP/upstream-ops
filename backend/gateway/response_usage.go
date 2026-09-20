@@ -112,15 +112,33 @@ func (v *responseValidator) ValidateZeroUsage(protocolName, model string, usage 
 	if !v.Enabled() || !usage.IsZero() {
 		return acceptedValidation()
 	}
+	return v.rejectZeroUsage(protocolName, model, "input_tokens=0;output_tokens=0")
+}
+
+func (v *responseValidator) rejectZeroUsage(protocolName, model, matchedOn string) validationResult {
 	for _, rule := range v.rules {
 		if rule.Target == "zero_usage" && responseRuleApplies(rule, protocolName, model) {
 			return validationResult{
 				Decision: validationRejected, RuleID: rule.ID, RuleName: rule.Name,
-				Target: rule.Target, Pattern: rule.Pattern, MatchedOn: "input_tokens=0;output_tokens=0",
+				Target: rule.Target, Pattern: rule.Pattern, MatchedOn: matchedOn,
 			}
 		}
 	}
 	return acceptedValidation()
+}
+
+// Missing usage alone is not zero usage. An empty stream with no positive
+// upstream usage is nevertheless an invalid empty answer under this rule.
+func validateStreamFinalUsage(c *gin.Context, usage responseUsageObservation, hasOutput bool) error {
+	if usage.IsZero() {
+		return validateStreamZeroUsage(c, usage)
+	}
+	if hasOutput || usage.nonZero {
+		return nil
+	}
+	return validateStreamMetadata(c, func(s *streamResponseValidator) validationResult {
+		return s.validator.rejectZeroUsage(s.protocolName, s.model, "empty_response;no_positive_usage")
+	})
 }
 
 func (v *responseValidator) ValidateBodyUsage(body []byte, protocolName, model string) validationResult {
@@ -162,7 +180,7 @@ func zeroUsageMetadataEvent(kind protocol.Kind, eventName, data string) bool {
 	if json.Unmarshal([]byte(data), &payload) != nil || payload == nil {
 		return false
 	}
-	if _, ok := payload["error"]; ok {
+	if raw, ok := payload["error"]; ok && streamErrorValuePresent(raw) {
 		return false
 	}
 	empty := func(raw json.RawMessage) bool {
@@ -220,7 +238,7 @@ func zeroUsageMetadataEvent(kind protocol.Kind, eventName, data string) bool {
 	}
 	for key := range payload {
 		switch key {
-		case "id", "object", "created", "model", "choices", "usage", "system_fingerprint", "service_tier":
+		case "id", "object", "created", "model", "choices", "usage", "system_fingerprint", "service_tier", "error":
 		default:
 			return false
 		}

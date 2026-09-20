@@ -74,6 +74,11 @@ func (svc *Service) buildUpstreamErrorInfoCfg(
 
 	if fwdErr != nil {
 		info.Type = "transport"
+		errorLabel := "transport error"
+		if errors.Is(fwdErr, errUpstreamStreamFailure) {
+			info.Type = "upstream_error"
+			errorLabel = "upstream stream error"
+		}
 		if errors.Is(fwdErr, errUpstreamQueueTimeout) {
 			info.Type = "queue_timeout"
 		}
@@ -82,7 +87,7 @@ func (svc *Service) buildUpstreamErrorInfoCfg(
 		}
 		info.Summary = fwdErr.Error()
 		var b strings.Builder
-		fmt.Fprintf(&b, "transport error\nmethod: %s\nurl: %s\nerror: %s\n", method, upstreamURL, fwdErr.Error())
+		fmt.Fprintf(&b, "%s\nmethod: %s\nurl: %s\nerror: %s\n", errorLabel, method, upstreamURL, fwdErr.Error())
 		if status > 0 {
 			fmt.Fprintf(&b, "partial_status: %d\n", status)
 		}

@@ -777,13 +777,20 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 			clientBody = rt.convertErrorBody(result.Body, req.kind, attempt.UpstreamKind, attempt.Converted)
 			validation = req.validator.Validate(clientBody, result.Headers, string(req.kind), req.requestedModel)
 		}
-		if !validation.IsRejected() && (result.Err != nil || rt.isFailoverStatus(result.Status, req.group.FailoverOn4xx)) {
+		failureErr := result.Err
+		if failureErr == nil && !rt.isClientDisconnectAfterCommit(result.ClientDisconnected, result.StreamErr) {
+			failureErr = result.StreamErr
+		}
+		if !validation.IsRejected() && (failureErr != nil || rt.isFailoverStatus(result.Status, req.group.FailoverOn4xx)) {
 			errInfo = rt.buildUpstreamErrorInfoCfg(
-				rt.gatewayRuntime(), result.Err, result.Status, result.Headers, result.Body,
+				rt.gatewayRuntime(), failureErr, result.Status, result.Headers, result.Body,
 				attempt.UpstreamURL, req.c.Request.Method,
 			)
 			if result.Err == nil {
-				result.Err = fmt.Errorf("upstream status %d: %s", result.Status, errInfo.Summary)
+				result.Err = failureErr
+				if result.Err == nil {
+					result.Err = fmt.Errorf("upstream status %d: %s", result.Status, errInfo.Summary)
+				}
 			}
 		} else if result.Status >= 400 {
 			terminal = true
@@ -1189,8 +1196,6 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			if strings.TrimSpace(errInfo.Summary) == "" {
 				errInfo = usageErrorInfo{Type: "canceled", Summary: "attempt canceled after another upstream won"}
 			}
-		} else if isWinner && status >= 200 && status < 300 {
-			attemptStatus = storage.GatewayAttemptStatusAccepted
 		} else if status >= 200 && status < 300 && attemptErr == nil {
 			attemptStatus = storage.GatewayAttemptStatusAccepted
 		}
@@ -1206,9 +1211,6 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 				rt.gatewayRuntime(), nil, status, headers,
 				upstreamBody, attempt.UpstreamURL, req.c.Request.Method,
 			)
-		}
-		if isWinner && validation.IsRejected() && validation.PostCommit {
-			attemptStatus = storage.GatewayAttemptStatusAccepted
 		}
 		if attemptStatus == storage.GatewayAttemptStatusError || attemptStatus == storage.GatewayAttemptStatusRejected {
 			rt.publishCoordinatedFailure(req, attempt, plan, number)
@@ -1477,7 +1479,7 @@ func (rt *Runtime) finishCoordinatedStream(req *coordinatedForwardRequest, winne
 	streamResult := winner.awaitStreamResult()
 	onlyClientDisconnect := rt.isClientDisconnectAfterCommit(streamResult.ClientDisconnected, streamResult.StreamErr)
 	success := winner.gateCommitError() == nil && gate.CommitError() == nil && gate.DownstreamCommitted() &&
-		winner.Status >= 200 && winner.Status < 300 &&
+		winner.Status >= 200 && winner.Status < 300 && streamResult.Err == nil &&
 		(streamResult.StreamErr == nil || onlyClientDisconnect)
 	if !success || usageID == 0 {
 		rt.finalizeUsageFailure(req.requestID, req.key)

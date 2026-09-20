@@ -97,17 +97,20 @@ func classifyResponsesSSEEventWithPayload(eventName string, payload []byte) (lif
 	if terminal || len(payload) == 0 {
 		return lifecycle, terminal, payloadType
 	}
-	if bytes.Contains(payload, []byte(`"error"`)) {
-		if _, ok := partialJSONRootMember(payload, "error"); ok {
+	if bytes.Contains(payload, []byte(`"error"`)) || bytes.Contains(payload, []byte(`\u`)) {
+		if streamEnvelopeHasError(payload) {
 			return lifecycle, true, payloadType
 		}
 	}
-	if !bytes.Contains(payload, []byte(`"response"`)) {
+	if !bytes.Contains(payload, []byte(`"response"`)) && !bytes.Contains(payload, []byte(`\u`)) {
 		return lifecycle, false, payloadType
 	}
 	response, ok := partialJSONRootMember(payload, "response")
 	if !ok {
 		return lifecycle, false, payloadType
+	}
+	if streamEnvelopeHasError(response) {
+		return lifecycle, true, payloadType
 	}
 	statusValue, ok := partialJSONRootMember(response, "status")
 	if !ok {
@@ -262,6 +265,16 @@ func (rt *Runtime) writeStreamTerminalError(c *gin.Context, kind protocolKind, e
 			},
 		})
 		payload = []byte(fmt.Sprintf("event: error\ndata: %s\n\n", body))
+	} else if protocol.NormalizeKind(kind) == protocol.KindOpenAIResponses {
+		body, _ := json.Marshal(map[string]any{
+			"type": "response.failed",
+			"response": map[string]any{
+				"object": "response",
+				"status": "failed",
+				"error":  map[string]string{"type": errType, "code": errType, "message": message},
+			},
+		})
+		payload = []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", body))
 	} else {
 		body, _ := json.Marshal(map[string]any{
 			"error": map[string]any{

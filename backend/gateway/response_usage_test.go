@@ -135,6 +135,7 @@ func TestZeroUsageMetadataClassifierReleasesContentAndTools(t *testing.T) {
 		metadata bool
 	}{
 		{protocol.KindOpenAIChat, `{"choices":[{"delta":{"role":"assistant","content":""}}]}`, true},
+		{protocol.KindOpenAIChat, `{"choices":[{"delta":{"role":"assistant"}}],"error":null}`, true},
 		{protocol.KindOpenAIChat, `{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}`, true},
 		{protocol.KindOpenAIChat, `{"choices":[{"delta":{"content":"hi"}}]}`, false},
 		{protocol.KindOpenAIChat, `{"choices":[{"delta":{"reasoning_content":"thinking"}}]}`, false},

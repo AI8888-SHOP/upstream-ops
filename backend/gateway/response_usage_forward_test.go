@@ -178,7 +178,9 @@ func TestZeroUsageStreamEOFAndLateAudit(t *testing.T) {
 		}{
 			{"zero-at-eof", "", true, false, true, false},
 			{"late-zero", "already visible", true, true, false, true},
-			{"missing-usage", "", false, true, false, false},
+			{"empty-missing-usage", "", false, true, true, false},
+			{"empty-missing-usage-eof", "", false, false, true, false},
+			{"content-missing-usage", "normal answer", false, true, false, false},
 		} {
 			t.Run(string(kind)+"/"+tc.name, func(t *testing.T) {
 				recorder := httptest.NewRecorder()

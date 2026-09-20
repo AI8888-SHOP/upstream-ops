@@ -430,6 +430,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					if errors.Is(streamErr, errRequestFirstTokenBudget) {
 						errInfo.Type = "request_timeout"
 					}
+					if errors.Is(streamErr, errUpstreamStreamFailure) {
+						errInfo = rt.buildUpstreamErrorInfoCfg(gwCfg, streamErr, status, respHeaders, respBody, upstreamFullURL, c.Request.Method)
+					}
 				}
 				if success {
 					rt.noteRouteModelSuccess(&route, upstreamModel)

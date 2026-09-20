@@ -1837,10 +1837,11 @@ func responsesSSEEventStartsVisibleOutputBytes(eventName string, payload, payloa
 
 	switch {
 	case bytes.EqualFold(eventType, []byte("response.output_text.done")),
+		bytes.EqualFold(eventType, []byte("response.refusal.done")),
 		bytes.EqualFold(eventType, []byte("response.reasoning_summary_text.done")),
 		bytes.EqualFold(eventType, []byte("response.reasoning_text.done")),
 		bytes.EqualFold(eventType, []byte("response.audio_transcript.done")):
-		return responsesJSONRootStringNonEmpty(payload, "text")
+		return responsesJSONRootStringNonEmpty(payload, "text") || responsesJSONRootStringNonEmpty(payload, "refusal")
 	case bytes.EqualFold(eventType, []byte("response.function_call_arguments.done")):
 		return responsesJSONRootStringNonEmpty(payload, "arguments")
 	case bytes.EqualFold(eventType, []byte("response.custom_tool_call_input.done")):
@@ -1858,6 +1859,7 @@ func responsesSSEEventStartsVisibleOutputBytes(eventName string, payload, payloa
 		item, ok := partialJSONRootMember(payload, "item")
 		return ok && responsesJSONValueHasVisibleItem(item)
 	case bytes.EqualFold(eventType, []byte("response.completed")),
+		bytes.EqualFold(eventType, []byte("response.incomplete")),
 		bytes.EqualFold(eventType, []byte("response.done")):
 		response, ok := partialJSONRootMember(payload, "response")
 		if !ok {
@@ -1943,6 +1945,7 @@ func scanJSONStringNonEmpty(data []byte, pos *int) (length int, complete bool) {
 
 func responsesJSONValueHasVisibleText(value []byte) bool {
 	return responsesJSONRootStringNonEmpty(value, "text") ||
+		responsesJSONRootStringNonEmpty(value, "refusal") ||
 		responsesJSONRootStringNonEmpty(value, "transcript")
 }
 

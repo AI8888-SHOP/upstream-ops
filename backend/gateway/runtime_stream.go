@@ -331,6 +331,11 @@ func (rt *Runtime) forwardStreamBuffered(
 	data = append(data, rest...)
 
 	tokens := rt.parseUsageByKind(data, true, upstream)
+	for _, payload := range sseDataPayloads(data) {
+		if err := upstreamStreamFailure("", string(payload)); err != nil {
+			return streamAttemptResult{Status: status, Headers: headers, Body: data, Tokens: tokens, Err: err}
+		}
+	}
 	if err := modelAudit.ObserveBody(data, func(model string) error { return validateStreamResponseModel(c, model) }); err != nil {
 		var rejected *responseRejectedError
 		if errors.As(err, &rejected) {
@@ -756,6 +761,7 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		responsesLifecycle bool
 		responsesVisible   bool
 		upstreamTerminal   bool
+		failure            error
 	}
 	var (
 		deferredAnthropicUsage []parsedStreamEvent
@@ -795,8 +801,12 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 				bytes.EqualFold(payloadType, []byte("error")) ||
 				isResponsesTerminalEventBytes(payloadType)
 			if !terminal {
-				_, terminal = partialJSONRootMember(payload, "error")
+				terminal = streamEnvelopeHasError(payload)
 			}
+		}
+		var failure error
+		if terminal {
+			failure = upstreamStreamFailure(eventName, data)
 		}
 		return parsedStreamEvent{
 			lines:              lines,
@@ -806,6 +816,7 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 			responsesLifecycle: lifecycle,
 			responsesVisible:   visible,
 			upstreamTerminal:   terminal,
+			failure:            failure,
 		}
 	}
 
@@ -838,6 +849,9 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 	}
 
 	markFirstToken := func(event parsedStreamEvent) bool {
+		if event.failure != nil {
+			return false
+		}
 		counts := event.hasPayload
 		if upKind == protocol.KindOpenAIResponses {
 			// Responses emits several structural events before any usable output.
@@ -865,7 +879,7 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		if !zeroUsageEnabled {
 			return nil
 		}
-		err := validateStreamZeroUsage(c, rawUsage)
+		err := validateStreamFinalUsage(c, rawUsage, zeroUsageHasOutput)
 		if err != nil {
 			result.Tokens = tokens
 			var rejected *responseRejectedError
@@ -876,12 +890,50 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		return err
 	}
 
+	var sendTerminalError func(string, string)
 	processEvent := func(event parsedStreamEvent, countsAsFirstToken bool) (bool, error) {
 		if len(event.lines) == 0 {
 			return false, nil
 		}
 		upstreamTerminal := event.upstreamTerminal
 		eventName, data := event.eventName, event.data
+		// Preserve terminal usage even when validation or a semantic failure
+		// returns before conversion, recovery and virtual-cache rewriting.
+		if upstreamTerminal {
+			rt.mergeStreamUsage(&tokens, data, upKind)
+		}
+		if event.failure != nil {
+			result.ResponseModel.Observe([]byte(data), true)
+			result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
+			var failureBody bytes.Buffer
+			appendSSEDataCapture(&failureBody, data, maxStreamResponseCapture)
+			result.Body = failureBody.Bytes()
+			// Preserve configured error-message/raw-body rule audit without
+			// writing the failed frame into a gate that could select it to win.
+			validationErr := validateStreamMetadata(c, func(s *streamResponseValidator) validationResult {
+				return s.validator.Validate([]byte("data: "+data+"\n\n"), nil, s.protocolName, s.model)
+			})
+			result.Committed = streamWriterActuallyCommitted(c)
+			result.Err = event.failure
+			if result.Committed {
+				result.StreamErr = event.failure
+				if clientKind == upKind {
+					if err := writeFrames([][]byte{[]byte(strings.Join(event.lines, "\n") + "\n\n")}, false); err == nil {
+						result.DownstreamComplete = !result.ClientDisconnected
+					}
+				} else {
+					sendTerminalError("upstream_error", event.failure.Error())
+				}
+			} else if validationErr != nil {
+				var rejected *responseRejectedError
+				if errors.As(validationErr, &rejected) {
+					result.ValidationRejection = rejected.Result
+				}
+				result.Err = validationErr
+			}
+			// No converter Close: it can manufacture a successful completion.
+			return true, result.Err
+		}
 		declared := result.ResponseModel.Observe([]byte(data), upstreamTerminal)
 		if err := validateStreamResponseModel(c, declared); err != nil {
 			// Preserve real usage on the rejected frame for upstream-cost audit.
@@ -935,7 +987,9 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		if data != "" && data != "[DONE]" && mayContainUsageFields(data, upKind) {
 			usageBuf.WriteString(data)
 			usageBuf.WriteByte('\n')
-			rt.mergeStreamUsage(&tokens, data, upKind)
+			if !upstreamTerminal {
+				rt.mergeStreamUsage(&tokens, data, upKind)
+			}
 		}
 
 		var frames [][]byte
@@ -1029,7 +1083,7 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		return nil
 	}
 
-	sendTerminalError := func(errType, msg string) {
+	sendTerminalError = func(errType, msg string) {
 		if errorEventSent || result.ClientDisconnected {
 			return
 		}
@@ -1040,7 +1094,11 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		if errors.Is(context.Cause(clientCtx), errRequestFirstTokenBudget) {
 			errType, msg = "request_timeout", errRequestFirstTokenBudget.Error()
 		}
-		_ = rt.writeStreamTerminalError(c, clientKind, errType, msg)
+		if err := rt.writeStreamTerminalError(c, clientKind, errType, msg); err == nil {
+			result.DownstreamComplete = true
+		} else {
+			result.ClientDisconnected = true
+		}
 	}
 	defer func() {
 		if errors.Is(context.Cause(clientCtx), errRequestFirstTokenBudget) {
