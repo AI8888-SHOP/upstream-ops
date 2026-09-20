@@ -134,6 +134,13 @@ func validateStreamResponseModel(c *gin.Context, response string) error {
 }
 
 func validateStreamMetadata(c *gin.Context, validate func(*streamResponseValidator) validationResult) error {
+	return validateStreamMetadataWithPolicy(c, validate, false)
+}
+
+// A strict final-usage rejection fails an already committed stream. Other
+// metadata rules retain their audit-only behavior after commit. The caller
+// must send a terminal error for a strict late rejection, never retry it.
+func validateStreamMetadataWithPolicy(c *gin.Context, validate func(*streamResponseValidator) validationResult, rejectAfterCommit bool) error {
 	if c == nil {
 		return nil
 	}
@@ -153,8 +160,11 @@ func validateStreamMetadata(c *gin.Context, validate func(*streamResponseValidat
 	}
 	if gate.committed {
 		match.PostCommit = true
-		if !gate.lateMatch.IsRejected() {
+		if rejectAfterCommit || !gate.lateMatch.IsRejected() {
 			gate.lateMatch = match
+		}
+		if rejectAfterCommit {
+			return &responseRejectedError{Result: match}
 		}
 		return nil
 	}

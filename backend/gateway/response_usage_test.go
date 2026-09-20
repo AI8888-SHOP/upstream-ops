@@ -102,7 +102,7 @@ func TestZeroUsageRuleSelectorsAndNoTextPrefixDelay(t *testing.T) {
 	}
 }
 
-func TestZeroUsageGatePreCommitRejectionAndLateAudit(t *testing.T) {
+func TestZeroUsageGatePreCommitAndPostCommitRejection(t *testing.T) {
 	for _, committed := range []bool{false, true} {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		v := mustResponseValidator(t, 8192, time.Second, responseRuleSpec{ID: 9, Enabled: true, Target: "zero_usage"})
@@ -113,17 +113,55 @@ func TestZeroUsageGatePreCommitRejectionAndLateAudit(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		err := validateStreamZeroUsage(c, responseUsageObservation{inputSeen: true, outputSeen: true})
+		err := validateStreamFinalUsage(c, responseUsageObservation{inputSeen: true, outputSeen: true})
+		var rejection *responseRejectedError
+		if !errors.As(err, &rejection) || rejection.Result.PostCommit != committed {
+			t.Fatalf("rejection=%+v err=%v committed=%v", rejection, err, committed)
+		}
 		if committed {
-			if err != nil || !gate.LateMatch().IsRejected() || !gate.LateMatch().PostCommit {
+			if !gate.LateMatch().IsRejected() || !gate.LateMatch().PostCommit {
 				t.Fatalf("late audit=%+v err=%v", gate.LateMatch(), err)
 			}
 		} else {
-			var rejection *responseRejectedError
-			if !errors.As(err, &rejection) || gate.DownstreamCommitted() || !gate.Rejection().IsRejected() {
+			if gate.DownstreamCommitted() || !gate.Rejection().IsRejected() {
 				t.Fatalf("rejection=%+v err=%v", gate.Rejection(), err)
 			}
 			gate.Lose()
+		}
+	}
+}
+
+func TestZeroUsageFinalValidationRequiresPositiveRawUsage(t *testing.T) {
+	v := mustResponseValidator(t, 8192, time.Second, responseRuleSpec{Enabled: true, Target: "zero_usage"})
+	for _, tc := range []struct {
+		name, body, matchedOn string
+	}{
+		{"explicit-zero", `{"usage":{"input_tokens":0,"output_tokens":0}}`, "input_tokens=0;output_tokens=0"},
+		{"empty-body", "", "missing_or_invalid_usage;no_positive_usage"},
+		{"missing", `{"output":[{"text":"answer"}]}`, "missing_or_invalid_usage;no_positive_usage"},
+		{"partial-zero", `{"usage":{"output_tokens":0}}`, "missing_or_invalid_usage;no_positive_usage"},
+		{"null", `{"usage":null}`, "missing_or_invalid_usage;no_positive_usage"},
+		{"invalid", `{"usage":{"input_tokens":-1,"output_tokens":"unknown"}}`, "missing_or_invalid_usage;no_positive_usage"},
+		{"malformed", `{"usage":{"input_tokens":0`, "missing_or_invalid_usage;no_positive_usage"},
+		{"positive", `{"usage":{"input_tokens":7,"output_tokens":0}}`, ""},
+		{"cache", `{"usage":{"cache_read_input_tokens":7}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := v.ValidateBodyUsage([]byte(tc.body), "openai_responses", "m")
+			if got.IsRejected() != (tc.matchedOn != "") || got.MatchedOn != tc.matchedOn {
+				t.Fatalf("validation=%+v, want matched_on=%q", got, tc.matchedOn)
+			}
+		})
+	}
+}
+
+func TestResponseUsageInvalidPlaceholderDoesNotHideLaterPositiveCounts(t *testing.T) {
+	for _, placeholder := range []string{`null`, `{"input_tokens":null,"output_tokens":null}`, `{"input_tokens":-1,"output_tokens":"unknown"}`} {
+		var usage responseUsageObservation
+		usage.ObserveStreamData(`{"usage":` + placeholder + `}`)
+		usage.ObserveStreamData(`{"usage":{"input_tokens":7,"output_tokens":2}}`)
+		if !usage.nonZero {
+			t.Fatalf("placeholder %s hid valid final usage: %+v", placeholder, usage)
 		}
 	}
 }

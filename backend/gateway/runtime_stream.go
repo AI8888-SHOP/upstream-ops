@@ -345,7 +345,7 @@ func (rt *Runtime) forwardStreamBuffered(
 	if streamZeroUsageEnabled(c) {
 		var usage responseUsageObservation
 		usage.ObserveBody(data)
-		if err := validateStreamZeroUsage(c, usage); err != nil {
+		if err := validateStreamFinalUsage(c, usage); err != nil {
 			var rejected *responseRejectedError
 			if errors.As(err, &rejected) {
 				return streamAttemptResult{Status: status, Headers: headers, FirstTokenMS: ft, Tokens: tokens, Err: err, ValidationRejection: rejected.Result}
@@ -875,22 +875,33 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		}
 		return counts
 	}
+	var sendTerminalError func(string, string)
 	checkFinalUsage := func() error {
 		if !zeroUsageEnabled {
 			return nil
 		}
-		err := validateStreamFinalUsage(c, rawUsage, zeroUsageHasOutput)
+		err := validateStreamFinalUsage(c, rawUsage)
 		if err != nil {
 			result.Tokens = tokens
+			result.Err = err
+			result.Committed = streamWriterActuallyCommitted(c)
 			var rejected *responseRejectedError
 			if errors.As(err, &rejected) {
-				result.ValidationRejection = rejected.Result
+				if rejected.Result.PostCommit {
+					result.PostCommitValidation = rejected.Result
+					result.StreamErr = err
+					if clientCtx.Err() != nil {
+						result.ClientDisconnected = true
+					}
+					sendTerminalError("invalid_upstream_usage", validationErrorInfo(rejected.Result).Summary)
+				} else {
+					result.ValidationRejection = rejected.Result
+				}
 			}
 		}
 		return err
 	}
 
-	var sendTerminalError func(string, string)
 	processEvent := func(event parsedStreamEvent, countsAsFirstToken bool) (bool, error) {
 		if len(event.lines) == 0 {
 			return false, nil
@@ -952,7 +963,9 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 				// Check raw final usage before recovery or converter-generated
 				// terminal frames can make an empty answer appear successful.
 				if err := checkFinalUsage(); err != nil {
-					appendResponseCapture(data)
+					var failureBody bytes.Buffer
+					appendSSEDataCapture(&failureBody, data, maxStreamResponseCapture)
+					result.Body = failureBody.Bytes()
 					return upstreamTerminal, err
 				}
 			}

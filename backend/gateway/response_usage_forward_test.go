@@ -169,7 +169,7 @@ func TestZeroUsageRejectionAndFallbackAcrossProtocols(t *testing.T) {
 	}
 }
 
-func TestZeroUsageStreamEOFAndLateAudit(t *testing.T) {
+func TestZeroUsageStreamEOFAndLateRejection(t *testing.T) {
 	for _, kind := range []protocol.Kind{protocol.KindOpenAIChat, protocol.KindAnthropic, protocol.KindOpenAIResponses} {
 		for _, tc := range []struct {
 			name, text        string
@@ -180,7 +180,7 @@ func TestZeroUsageStreamEOFAndLateAudit(t *testing.T) {
 			{"late-zero", "already visible", true, true, false, true},
 			{"empty-missing-usage", "", false, true, true, false},
 			{"empty-missing-usage-eof", "", false, false, true, false},
-			{"content-missing-usage", "normal answer", false, true, false, false},
+			{"content-missing-usage", "normal answer", false, true, false, true},
 		} {
 			t.Run(string(kind)+"/"+tc.name, func(t *testing.T) {
 				recorder := httptest.NewRecorder()
@@ -225,11 +225,17 @@ func TestZeroUsageStreamEOFAndLateAudit(t *testing.T) {
 					if result.ValidationRejection.IsRejected() != tc.reject || gate.LateMatch().IsRejected() != tc.lateAudit {
 						t.Fatalf("result=%+v late=%+v", result, gate.LateMatch())
 					}
-					if tc.reject && (recorder.Body.Len() != 0 || recoveryCalls.Load() != 0) {
+					if tc.reject && recorder.Body.Len() != 0 {
 						t.Fatalf("empty response leaked or was recovered: body=%s recovery=%d", recorder.Body.String(), recoveryCalls.Load())
 					}
-					if !tc.reject && result.Err != nil {
-						t.Fatal(result.Err)
+					if result.Err == nil || recoveryCalls.Load() != 0 {
+						t.Fatalf("invalid usage accepted or recovered: result=%+v recovery=%d", result, recoveryCalls.Load())
+					}
+					if tc.lateAudit {
+						if result.StreamErr == nil || !result.PostCommitValidation.IsRejected() {
+							t.Fatalf("late rejection only audited: %+v", result)
+						}
+						assertStrictUsageFailureTerminal(t, kind, recorder.Body.String())
 					}
 				case <-time.After(3 * time.Second):
 					t.Fatal("stream did not finish")

@@ -67,13 +67,16 @@ func validationErrorInfo(result validationResult) usageErrorInfo {
 	}
 	if result.Target == "zero_usage" {
 		reason = fmt.Sprintf("upstream reported zero input and output tokens; matched rejection rule %q", result.RuleName)
+		if result.MatchedOn == "missing_or_invalid_usage;no_positive_usage" {
+			reason = fmt.Sprintf("upstream completed without valid usage (no positive token counts); matched rejection rule %q", result.RuleName)
+		}
 	}
 	return usageErrorInfo{
 		Type:    "validation",
 		Summary: reason,
 		Detail: fmt.Sprintf(
-			"response validation rejection\nrule_id: %d\nrule: %s\ntarget: %s\npattern: %s\npost_commit: %v\n",
-			result.RuleID, result.RuleName, result.Target, result.Pattern, result.PostCommit,
+			"response validation rejection\nrule_id: %d\nrule: %s\ntarget: %s\npattern: %s\nmatched_on: %s\npost_commit: %v\n",
+			result.RuleID, result.RuleName, result.Target, result.Pattern, result.MatchedOn, result.PostCommit,
 		),
 	}
 }

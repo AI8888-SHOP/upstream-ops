@@ -86,8 +86,14 @@ func (svc *Service) buildUpstreamErrorInfoCfg(
 			info.Type = "request_timeout"
 		}
 		info.Summary = fwdErr.Error()
+		var rejection *responseRejectedError
+		if errors.As(fwdErr, &rejection) {
+			info = validationErrorInfo(rejection.Result)
+			errorLabel = "response validation error"
+		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "%s\nmethod: %s\nurl: %s\nerror: %s\n", errorLabel, method, upstreamURL, fwdErr.Error())
+		fmt.Fprintf(&b, "%s\nmethod: %s\nurl: %s\nerror: %s\n", errorLabel, method, upstreamURL, info.Summary)
+		b.WriteString(info.Detail)
 		if status > 0 {
 			fmt.Fprintf(&b, "partial_status: %d\n", status)
 		}

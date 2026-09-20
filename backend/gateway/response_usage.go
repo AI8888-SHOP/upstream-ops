@@ -27,14 +27,14 @@ func (u responseUsageObservation) IsZero() bool {
 func (u *responseUsageObservation) ObserveStreamData(data string) {
 	// Avoid allocating a byte copy for each ordinary text/tool delta, or after
 	// positive usage has already ruled out this condition for the attempt.
-	if u.nonZero || u.invalid || (!strings.Contains(data, `"usage"`) && !strings.Contains(data, `\u`)) {
+	if u.nonZero || (!strings.Contains(data, `"usage"`) && !strings.Contains(data, `\u`)) {
 		return
 	}
 	u.Observe([]byte(data))
 }
 
 func (u *responseUsageObservation) Observe(payload []byte) {
-	if u.nonZero || u.invalid || (!bytes.Contains(payload, []byte(`"usage"`)) && !bytes.Contains(payload, []byte(`\u`))) || !json.Valid(payload) {
+	if u.nonZero || (!bytes.Contains(payload, []byte(`"usage"`)) && !bytes.Contains(payload, []byte(`\u`))) || !json.Valid(payload) {
 		return
 	}
 	observeObject := func(object []byte) {
@@ -109,10 +109,14 @@ func (u *responseUsageObservation) ObserveBody(body []byte) {
 }
 
 func (v *responseValidator) ValidateZeroUsage(protocolName, model string, usage responseUsageObservation) validationResult {
-	if !v.Enabled() || !usage.IsZero() {
+	if !v.Enabled() || usage.nonZero {
 		return acceptedValidation()
 	}
-	return v.rejectZeroUsage(protocolName, model, "input_tokens=0;output_tokens=0")
+	matchedOn := "missing_or_invalid_usage;no_positive_usage"
+	if usage.IsZero() {
+		matchedOn = "input_tokens=0;output_tokens=0"
+	}
+	return v.rejectZeroUsage(protocolName, model, matchedOn)
 }
 
 func (v *responseValidator) rejectZeroUsage(protocolName, model, matchedOn string) validationResult {
@@ -125,20 +129,6 @@ func (v *responseValidator) rejectZeroUsage(protocolName, model, matchedOn strin
 		}
 	}
 	return acceptedValidation()
-}
-
-// Missing usage alone is not zero usage. An empty stream with no positive
-// upstream usage is nevertheless an invalid empty answer under this rule.
-func validateStreamFinalUsage(c *gin.Context, usage responseUsageObservation, hasOutput bool) error {
-	if usage.IsZero() {
-		return validateStreamZeroUsage(c, usage)
-	}
-	if hasOutput || usage.nonZero {
-		return nil
-	}
-	return validateStreamMetadata(c, func(s *streamResponseValidator) validationResult {
-		return s.validator.rejectZeroUsage(s.protocolName, s.model, "empty_response;no_positive_usage")
-	})
 }
 
 func (v *responseValidator) ValidateBodyUsage(body []byte, protocolName, model string) validationResult {
@@ -163,13 +153,16 @@ func streamZeroUsageEnabled(c *gin.Context) bool {
 	return s != nil && s.validator.StreamEnabled() && s.validator.needsTarget("zero_usage", s.protocolName, s.model)
 }
 
-func validateStreamZeroUsage(c *gin.Context, usage responseUsageObservation) error {
-	if !usage.IsZero() {
+// Validate only at the upstream terminal event or EOF, before conversion or
+// recovery can invent usage. Content is streamed immediately, but it cannot
+// substitute for real upstream token counts when this rule is enabled.
+func validateStreamFinalUsage(c *gin.Context, usage responseUsageObservation) error {
+	if usage.nonZero {
 		return nil
 	}
-	return validateStreamMetadata(c, func(s *streamResponseValidator) validationResult {
+	return validateStreamMetadataWithPolicy(c, func(s *streamResponseValidator) validationResult {
 		return s.validator.ValidateZeroUsage(s.protocolName, s.model, usage)
-	})
+	}, true)
 }
 
 // Hold only recognized metadata until the first meaningful output. Unknown

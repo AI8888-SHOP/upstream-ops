@@ -128,13 +128,13 @@ func TestStreamFailureBeforeAndAfterOutputAcrossProtocols(t *testing.T) {
 	}
 }
 
-func TestZeroUsagePreservesNonTextOutputWithoutUsage(t *testing.T) {
+func TestZeroUsagePreservesNonTextOutputWithRealUsage(t *testing.T) {
 	for _, tc := range []struct {
 		name, payload string
 	}{
-		{"refusal", `{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"refusal","refusal":"Cannot comply"}]}]}}`},
-		{"tool", `{"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","name":"clock","arguments":"{}"}]}}`},
-		{"length-stop", `{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial answer"}]}]}}`},
+		{"refusal", `{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":7,"output_tokens":2},"output":[{"type":"message","content":[{"type":"refusal","refusal":"Cannot comply"}]}]}}`},
+		{"tool", `{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":7,"output_tokens":2},"output":[{"type":"function_call","name":"clock","arguments":"{}"}]}}`},
+		{"length-stop", `{"type":"response.incomplete","response":{"status":"incomplete","usage":{"input_tokens":7,"output_tokens":2},"incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial answer"}]}]}}`},
 		{"real-cache", `{"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":8}}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

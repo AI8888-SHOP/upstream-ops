@@ -719,12 +719,12 @@ func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coor
 		attempt.ClientBody = rt.convertUpstreamResponse(attempt.UpstreamBody, req.kind, attempt.UpstreamKind, attempt.UpstreamModel, false, attempt.Converted)
 		attempt.Tokens = rt.parseUsageByKind(attempt.UpstreamBody, false, attempt.UpstreamKind)
 	}
-	if attempt.Err == nil && len(attempt.ClientBody) > 0 {
+	if attempt.Err == nil {
 		attempt.Validation = modelValidation
-		if !attempt.Validation.IsRejected() {
+		if !attempt.Validation.IsRejected() && attempt.Status >= 200 && attempt.Status < 300 {
 			attempt.Validation = req.validator.ValidateBodyUsage(attempt.UpstreamBody, string(req.kind), req.requestedModel)
 		}
-		if !attempt.Validation.IsRejected() {
+		if !attempt.Validation.IsRejected() && len(attempt.ClientBody) > 0 {
 			attempt.Validation = req.validator.Validate(attempt.ClientBody, attempt.Headers, string(req.kind), req.requestedModel)
 		}
 		if attempt.Validation.IsRejected() {
@@ -814,7 +814,11 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 			result.ValidationRejection = final
 			validation = final
 		}
-		if late := gate.LateMatch(); late.IsRejected() {
+		if result.PostCommitValidation.IsRejected() {
+			// A strict usage failure is decisive even if Finish also finds an
+			// audit-only text/model match in the already delivered response.
+			validation = result.PostCommitValidation
+		} else if late := gate.LateMatch(); late.IsRejected() {
 			result.PostCommitValidation = late
 			validation = late
 		}

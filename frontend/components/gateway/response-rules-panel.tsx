@@ -95,7 +95,7 @@ function listJSON(raw: string) {
 }
 
 function targetLabel(target: GatewayResponseValidationTarget) {
-  if (target === "zero_usage") return "输入输出 Token 均为 0"
+  if (target === "zero_usage") return "零 Token 或缺失有效用量"
   if (target === "response_model") return "上游响应模型"
   if (target === "raw_body") return "原始响应"
   if (target === "error_message") return "错误信息"
@@ -422,13 +422,13 @@ export function ResponseRulesPanel({
                   <SelectItem value="raw_body">原始响应</SelectItem>
                   <SelectItem value="error_message">错误信息</SelectItem>
                   <SelectItem value="response_model">上游响应模型</SelectItem>
-                  <SelectItem value="zero_usage">输入输出 Token 均为 0</SelectItem>
+                  <SelectItem value="zero_usage">零 Token 或缺失有效用量</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             {form.target === "zero_usage" ? (
               <p className="text-xs leading-5 text-muted-foreground">
-                仅匹配上游明确返回的零用量，包含真实缓存用量；缺失用量不匹配。流式请求在结束时判断，已向用户输出的请求仅记录审计，不重试。
+                上游未提供任何有效的正数 Token 用量时拒绝，包括输入输出均为 0、缺失或无效用量；真实输入、输出、缓存或推理 Token 任一大于 0 即放行。流式请求在结束时判断，不等待用量才输出首字：未输出时按配置重试或切换渠道，已输出时返回错误并记录失败，不再重试。
               </p>
             ) : (
               <div className="space-y-1">
