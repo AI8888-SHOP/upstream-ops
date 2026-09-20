@@ -337,6 +337,16 @@ func (rt *Runtime) forwardStreamBuffered(
 			return streamAttemptResult{Status: status, Headers: headers, FirstTokenMS: ft, Tokens: tokens, Err: err, ValidationRejection: rejected.Result}
 		}
 	}
+	if streamZeroUsageEnabled(c) {
+		var usage responseUsageObservation
+		usage.ObserveBody(data)
+		if err := validateStreamZeroUsage(c, usage); err != nil {
+			var rejected *responseRejectedError
+			if errors.As(err, &rejected) {
+				return streamAttemptResult{Status: status, Headers: headers, FirstTokenMS: ft, Tokens: tokens, Err: err, ValidationRejection: rejected.Result}
+			}
+		}
+	}
 	clientBody := rt.convertUpstreamResponse(data, inbound, upstream, model, true, converted)
 	if len(clientBody) == 0 {
 		clientBody = data
@@ -437,6 +447,9 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 	result = streamAttemptResult{Status: status, Headers: headers}
 	clientKind := protocol.NormalizeKind(inbound)
 	upKind := protocol.NormalizeKind(upstream)
+	zeroUsageEnabled := streamZeroUsageEnabled(c)
+	var rawUsage responseUsageObservation
+	var zeroUsageHasOutput bool
 	var virtualCache *virtualCacheSSETransformer
 	if cachePercent > 0 {
 		virtualCache = newVirtualCacheSSETransformerPercent(clientKind, cachePercent)
@@ -832,6 +845,12 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 			// matches the client-facing TTFT reported by downstream gateways.
 			counts = event.responsesVisible
 		}
+		if zeroUsageEnabled && !zeroUsageHasOutput {
+			if upKind != protocol.KindOpenAIResponses {
+				counts = event.hasPayload && !event.upstreamTerminal && !zeroUsageMetadataEvent(upKind, event.eventName, event.data)
+			}
+			zeroUsageHasOutput = counts
+		}
 		if counts && !sawUpstreamData {
 			sawUpstreamData = true
 			stopFirstTimer()
@@ -841,6 +860,20 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 			}
 		}
 		return counts
+	}
+	checkFinalUsage := func() error {
+		if !zeroUsageEnabled {
+			return nil
+		}
+		err := validateStreamZeroUsage(c, rawUsage)
+		if err != nil {
+			result.Tokens = tokens
+			var rejected *responseRejectedError
+			if errors.As(err, &rejected) {
+				result.ValidationRejection = rejected.Result
+			}
+		}
+		return err
 	}
 
 	processEvent := func(event parsedStreamEvent, countsAsFirstToken bool) (bool, error) {
@@ -860,6 +893,17 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 				result.ValidationRejection = rejected.Result
 			}
 			return upstreamTerminal, err
+		}
+		if zeroUsageEnabled && !replayingDeferredUsage {
+			rawUsage.ObserveStreamData(data)
+			if upstreamTerminal {
+				// Check raw final usage before recovery or converter-generated
+				// terminal frames can make an empty answer appear successful.
+				if err := checkFinalUsage(); err != nil {
+					appendResponseCapture(data)
+					return upstreamTerminal, err
+				}
+			}
 		}
 		// Chat-compatible converters emit usage on message_delta, while the
 		// actual Anthropic terminal marker arrives in the following message_stop.
@@ -932,19 +976,14 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 				responsesLifecycleBuffer = append(responsesLifecycleBuffer, frame...)
 				return upstreamTerminal, nil
 			}
-			if len(responsesLifecycleBuffer) > 0 {
-				combined := make([]byte, 0, len(responsesLifecycleBuffer)+len(frames[0]))
-				combined = append(combined, responsesLifecycleBuffer...)
-				combined = append(combined, frames[0]...)
-				responsesLifecycleBuffer = nil
-				frames[0] = combined
-			}
 		}
 		// Responses structural events (including output_item.added) may produce
 		// converter metadata such as message_start/content_block_start. Keep
 		// those frames with the raw lifecycle prefix until real content or a
 		// terminal event arrives, so a later failed event remains retryable.
-		if upKind == protocol.KindOpenAIResponses && !countsAsFirstToken && !upstreamTerminal && len(frames) > 0 {
+		// Zero-usage rules also hold Chat/Anthropic metadata-only prefixes.
+		holdMetadata := upKind == protocol.KindOpenAIResponses && !countsAsFirstToken || zeroUsageEnabled && !zeroUsageHasOutput
+		if holdMetadata && !upstreamTerminal && len(frames) > 0 {
 			var size int
 			for _, frame := range frames {
 				size += len(frame)
@@ -1215,6 +1254,10 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 						return result
 					}
 				}
+				if err := checkFinalUsage(); err != nil {
+					result.Err = err
+					return result
+				}
 				if upKind == protocol.KindOpenAIResponses && !sawUpstreamData {
 					result.Err = errors.New("upstream Responses stream ended before output or terminal event")
 					return result
@@ -1230,6 +1273,13 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 				if (anth2resp != nil || virtualCache != nil) && tokens.InputTokens <= 0 {
 					recoverAnthropicInput()
 					applyRecoveredInput(&parsedStreamEvent{})
+				}
+				if zeroUsageEnabled && len(responsesLifecycleBuffer) > 0 {
+					if err := writeFrames([][]byte{responsesLifecycleBuffer}, false); err != nil {
+						result.Err = err
+						return result
+					}
+					responsesLifecycleBuffer = nil
 				}
 				if !streamStarted {
 					// 空流

@@ -474,6 +474,8 @@ const (
 	GatewayResponseRuleTargetRawBody       = "raw_body"
 	GatewayResponseRuleTargetErrorMessage  = "error_message"
 	GatewayResponseRuleTargetResponseModel = "response_model"
+	GatewayResponseRuleTargetZeroUsage     = "zero_usage"
+	GatewayResponseRuleZeroUsagePattern    = `^input_tokens=0;output_tokens=0$`
 
 	GatewayAttemptKindPrimary     = "primary"
 	GatewayAttemptKindRetry       = "retry"

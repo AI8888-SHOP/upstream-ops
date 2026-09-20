@@ -1090,6 +1090,7 @@ export type GatewayResponseValidationTarget =
   | "raw_body"
   | "error_message"
   | "response_model"
+  | "zero_usage"
 
 export interface GatewayResponseRule {
   id: number

@@ -95,6 +95,7 @@ function listJSON(raw: string) {
 }
 
 function targetLabel(target: GatewayResponseValidationTarget) {
+  if (target === "zero_usage") return "输入输出 Token 均为 0"
   if (target === "response_model") return "上游响应模型"
   if (target === "raw_body") return "原始响应"
   if (target === "error_message") return "错误信息"
@@ -167,15 +168,15 @@ export function ResponseRulesPanel({
   }
 
   async function save() {
-    if (!form.name.trim() || !form.pattern.trim()) {
-      toast.error("请填写规则名称和正则表达式")
+    if (!form.name.trim() || (form.target !== "zero_usage" && !form.pattern.trim())) {
+      toast.error(form.target === "zero_usage" ? "请填写规则名称" : "请填写规则名称和正则表达式")
       return
     }
     const payload = {
       name: form.name.trim(),
       enabled: form.enabled,
       priority: Math.max(0, Math.min(100000, Number(form.priority) || 0)),
-      pattern: form.pattern,
+      pattern: form.target === "zero_usage" ? "" : form.pattern,
       target: form.target,
       models_json: listJSON(form.models),
       protocols_json: listJSON(form.protocols),
@@ -369,7 +370,9 @@ export function ResponseRulesPanel({
                       <Badge variant="outline">优先级 {rule.priority}</Badge>
                       <Badge variant="outline">{targetLabel(rule.target)}</Badge>
                     </div>
-                    <code className="block max-w-full overflow-x-auto whitespace-pre rounded bg-muted px-2 py-1 text-[11px]">{rule.pattern}</code>
+                    {rule.target !== "zero_usage" ? (
+                      <code className="block max-w-full overflow-x-auto whitespace-pre rounded bg-muted px-2 py-1 text-[11px]">{rule.pattern}</code>
+                    ) : null}
                     <p className="text-[11px] text-muted-foreground">
                       请求模型：{parseList(rule.models_json).replaceAll("\n", ", ") || "全部"} · 协议：{parseList(rule.protocols_json).replaceAll("\n", ", ") || "全部"}
                     </p>
@@ -419,18 +422,25 @@ export function ResponseRulesPanel({
                   <SelectItem value="raw_body">原始响应</SelectItem>
                   <SelectItem value="error_message">错误信息</SelectItem>
                   <SelectItem value="response_model">上游响应模型</SelectItem>
+                  <SelectItem value="zero_usage">输入输出 Token 均为 0</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1">
-              <Label>{form.target === "response_model" ? "异常响应模型正则（命中即拒绝）" : "正则表达式"}</Label>
-              <Textarea className="font-mono" rows={4} value={form.pattern} onChange={(event) => setForm({ ...form, pattern: event.target.value })} placeholder={form.target === "response_model" ? "^gpt-4o-mini$" : "(?i)temporarily unavailable|please retry"} />
-              {form.target === "response_model" ? (
-                <p className="text-xs leading-5 text-muted-foreground">
-                  例如请求模型填 gpt-4o，正则填 ^gpt-4o-mini$：仅拒绝该组合。只检查上游原始模型字段，不检查对话文本；上游未声明模型时不命中。模型审计始终记录，拦截需启用组内响应校验；流式请求还需启用流式校验。
-                </p>
-              ) : null}
-            </div>
+            {form.target === "zero_usage" ? (
+              <p className="text-xs leading-5 text-muted-foreground">
+                仅匹配上游明确返回的零用量，包含真实缓存用量；缺失用量不匹配。流式请求在结束时判断，已向用户输出的请求仅记录审计，不重试。
+              </p>
+            ) : (
+              <div className="space-y-1">
+                <Label>{form.target === "response_model" ? "异常响应模型正则（命中即拒绝）" : "正则表达式"}</Label>
+                <Textarea className="font-mono" rows={4} value={form.pattern} onChange={(event) => setForm({ ...form, pattern: event.target.value })} placeholder={form.target === "response_model" ? "^gpt-4o-mini$" : "(?i)temporarily unavailable|please retry"} />
+                {form.target === "response_model" ? (
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    例如请求模型填 gpt-4o，正则填 ^gpt-4o-mini$：仅拒绝该组合。只检查上游原始模型字段，不检查对话文本；上游未声明模型时不命中。模型审计始终记录，拦截需启用组内响应校验；流式请求还需启用流式校验。
+                  </p>
+                ) : null}
+              </div>
+            )}
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1">
                 <Label>请求模型过滤</Label>

@@ -722,6 +722,9 @@ func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coor
 	if attempt.Err == nil && len(attempt.ClientBody) > 0 {
 		attempt.Validation = modelValidation
 		if !attempt.Validation.IsRejected() {
+			attempt.Validation = req.validator.ValidateBodyUsage(attempt.UpstreamBody, string(req.kind), req.requestedModel)
+		}
+		if !attempt.Validation.IsRejected() {
 			attempt.Validation = req.validator.Validate(attempt.ClientBody, attempt.Headers, string(req.kind), req.requestedModel)
 		}
 		if attempt.Validation.IsRejected() {

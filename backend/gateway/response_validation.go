@@ -12,6 +12,8 @@ import (
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/bejix/upstream-ops/backend/storage"
 )
 
 const (
@@ -139,16 +141,19 @@ func newResponseValidator(cfg responseValidationConfig, rules []responseRuleSpec
 			continue
 		}
 		rule.Name = strings.TrimSpace(rule.Name)
+		rule.Target = strings.ToLower(strings.TrimSpace(rule.Target))
+		if rule.Target == storage.GatewayResponseRuleTargetZeroUsage {
+			rule.Pattern = storage.GatewayResponseRuleZeroUsagePattern
+		}
 		rule.Pattern = strings.TrimSpace(rule.Pattern)
 		if rule.Pattern == "" {
 			return nil, fmt.Errorf("response rule %d has an empty pattern", i)
 		}
-		rule.Target = strings.ToLower(strings.TrimSpace(rule.Target))
 		if rule.Target == "" {
 			rule.Target = "assistant_text"
 		}
 		switch rule.Target {
-		case "assistant_text", "raw_body", "error_message", "response_model":
+		case "assistant_text", "raw_body", "error_message", "response_model", "zero_usage":
 		default:
 			return nil, fmt.Errorf("response rule %q has unsupported target %q", rule.Name, rule.Target)
 		}
@@ -322,7 +327,7 @@ func (v *responseValidator) matchCompiledWithPrefilters(rules []compiledResponse
 func matchCompiledResponseRule(rule compiledResponseRule, raw, assistant, errorMessage []byte, postCommit bool) validationResult {
 	var candidate []byte
 	switch rule.Target {
-	case "response_model":
+	case "response_model", "zero_usage":
 		// Checked against raw upstream metadata, never converted response text.
 		return acceptedValidation()
 	case "raw_body":
@@ -432,7 +437,7 @@ func (v *responseValidator) NewStreamValidator(protocolName, model string) *stre
 	}
 	if v != nil && v.StreamEnabled() {
 		for _, rule := range v.rules {
-			if rule.Target == "response_model" || !responseRuleApplies(rule, protocolName, model) {
+			if rule.Target == "response_model" || rule.Target == "zero_usage" || !responseRuleApplies(rule, protocolName, model) {
 				continue
 			}
 			s.rules = append(s.rules, rule)

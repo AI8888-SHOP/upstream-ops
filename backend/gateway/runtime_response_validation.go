@@ -65,6 +65,9 @@ func validationErrorInfo(result validationResult) usageErrorInfo {
 	if result.Target == "response_model" {
 		reason = fmt.Sprintf("upstream response model %q matched rejection rule %q", result.MatchedOn, result.RuleName)
 	}
+	if result.Target == "zero_usage" {
+		reason = fmt.Sprintf("upstream reported zero input and output tokens; matched rejection rule %q", result.RuleName)
+	}
 	return usageErrorInfo{
 		Type:    "validation",
 		Summary: reason,

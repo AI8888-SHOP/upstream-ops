@@ -125,7 +125,16 @@ func (v *responseValidator) ValidateResponseModel(protocolName, requested, respo
 // The gate serializes this with timer/commit decisions. A late match is audit
 // only: switching after output would splice two different answers together.
 func validateStreamResponseModel(c *gin.Context, response string) error {
-	if response == "" || c == nil {
+	if response == "" {
+		return nil
+	}
+	return validateStreamMetadata(c, func(s *streamResponseValidator) validationResult {
+		return s.validator.ValidateResponseModel(s.protocolName, s.model, response)
+	})
+}
+
+func validateStreamMetadata(c *gin.Context, validate func(*streamResponseValidator) validationResult) error {
+	if c == nil {
 		return nil
 	}
 	gate, ok := c.Writer.(*streamPrefixGateWriter)
@@ -138,7 +147,7 @@ func validateStreamResponseModel(c *gin.Context, response string) error {
 	if s == nil || !s.validator.StreamEnabled() {
 		return nil
 	}
-	match := s.validator.ValidateResponseModel(s.protocolName, s.model, response)
+	match := validate(s)
 	if !match.IsRejected() {
 		return nil
 	}

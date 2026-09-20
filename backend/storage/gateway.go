@@ -1315,6 +1315,10 @@ func normalizeGatewayResponseRule(item *GatewayResponseRule) error {
 	if len(item.Name) > 128 {
 		return fmt.Errorf("name exceeds 128 bytes")
 	}
+	item.Target = strings.ToLower(strings.TrimSpace(item.Target))
+	if item.Target == GatewayResponseRuleTargetZeroUsage {
+		item.Pattern = GatewayResponseRuleZeroUsagePattern
+	}
 	if strings.TrimSpace(item.Pattern) == "" {
 		return fmt.Errorf("pattern is required")
 	}
@@ -1324,14 +1328,13 @@ func normalizeGatewayResponseRule(item *GatewayResponseRule) error {
 	if _, err := regexp.Compile(item.Pattern); err != nil {
 		return fmt.Errorf("compile response rule %q: %w", item.Name, err)
 	}
-	item.Target = strings.ToLower(strings.TrimSpace(item.Target))
 	if item.Target == "" {
 		item.Target = GatewayResponseRuleTargetAssistantText
 	}
 	switch item.Target {
-	case GatewayResponseRuleTargetAssistantText, GatewayResponseRuleTargetRawBody, GatewayResponseRuleTargetErrorMessage, GatewayResponseRuleTargetResponseModel:
+	case GatewayResponseRuleTargetAssistantText, GatewayResponseRuleTargetRawBody, GatewayResponseRuleTargetErrorMessage, GatewayResponseRuleTargetResponseModel, GatewayResponseRuleTargetZeroUsage:
 	default:
-		return fmt.Errorf("target must be assistant_text, raw_body, error_message, or response_model")
+		return fmt.Errorf("target must be assistant_text, raw_body, error_message, response_model, or zero_usage")
 	}
 	if item.Priority < 0 || item.Priority > 100000 {
 		return fmt.Errorf("priority must be between 0 and 100000")
