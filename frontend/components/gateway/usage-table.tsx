@@ -1439,9 +1439,10 @@ function SchedulingDecision({ value }: { value?: string }) {
       <TooltipContent side="left" className="max-w-xs space-y-1 p-3 text-xs">
         <p>{reason ?? "动态选路"}</p>
         <p>倍率 {number("rate")} / 本次上限 {number("ceiling")}</p>
-        <p>近 {number("window_minutes")} 分钟：{number("samples")} 次完成，{number("first_samples")} 次有效首字</p>
+        <p>首字窗口 {number("window_minutes")} 分钟：{number("first_samples")} 次有效首字；结果窗口 {number("failure_window_minutes") || number("window_minutes")} 分钟：{number("samples")} 次完成</p>
         <p>首字均值 {formatDurationMS(number("mean_ms"))} / P90 ≈ {formatDurationMS(number("p90_ms"))}</p>
         <p>平滑失败率 {number("failure_percent").toFixed(1)}%，综合等待评分 {formatDurationMS(number("estimated_ms"))}</p>
+        {number("failure_wait_ms") > 0 && <p>失败尝试平均耗时 {formatDurationMS(number("failure_wait_ms"))}（已计入等待评分）</p>}
         <p>渠道并发 {number("active")} / {number("limit") || "不限"}，排队 {number("queued")}</p>
         <p className="text-muted-foreground">选择当时的统计快照；P90 为区间估计，评分不是响应时间保证。</p>
       </TooltipContent>

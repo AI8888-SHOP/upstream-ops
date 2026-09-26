@@ -915,7 +915,7 @@ export function GroupFormDialog({
               </SelectContent>
             </Select>
             <p className="text-[11px] leading-5 text-muted-foreground">
-              动态策略适用于流式文本请求，结合近期有效首字、失败率和当前负载。表现接近时保留会话渠道。
+              动态策略适用于流式文本请求，结合近期有效首字、完整请求失败率、失败耗时和当前负载，避免优选首字快但经常失败的渠道。表现接近时保留会话渠道。
               图片、实时和非流式请求沿用原策略。
             </p>
             {groupForm.scheduling_mode !== "cost" && (
@@ -942,7 +942,7 @@ export function GroupFormDialog({
                 </div>
                 <p className="col-span-2 text-[11px] leading-5 text-muted-foreground">
                   例如最低倍率 0.05、允许溢价 20%，则主请求、重试及并发备选都不超过 0.06，且受最大计费倍率约束。
-                  样本不足时参考最近 60 分钟；约 5% 的首选机会用于范围内的低样本渠道。重启后重新积累统计。
+                  首字与成功率分别判断样本是否充足，不足时参考最近 60 分钟；近期失败样本充足时不会被旧成功记录冲淡。约 5% 的首选机会用于范围内的低样本渠道。重启后重新积累统计。
                 </p>
               </div>
             )}
@@ -1112,7 +1112,7 @@ export function GroupFormDialog({
                   }
                 />
                 <p className="text-[11px] text-muted-foreground">
-                  同一路由额外尝试次数（不含首次）
+                  同一路由额外尝试上限（不含首次）；允许顺延且仍有其它候选时优先换源，避免重复失败耗光总尝试数。
                 </p>
               </div>
               <div className="space-y-1">
@@ -1148,14 +1148,14 @@ export function GroupFormDialog({
                 }
               />
               <p className="text-[11px] text-muted-foreground">
-                -1 跟随通用重试次数；0 表示命中正则后不在当前渠道重试；最多 10 次。
+                -1 跟随通用重试次数；0 表示命中正则后不在当前渠道重试；最多 10 次。开启普通顺延且有其它候选时直接换源，不再返回该失败渠道重试。
               </p>
             </div>
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <Label>顺延下一个接口</Label>
                 <p className="text-[11px] leading-5 text-muted-foreground">
-                  当前路由重试耗尽后，按倍率顺序切换下一条路由。
+                  上游失败后优先切换其它候选。动态策略按速度、成功率与负载排序，倍率优先策略沿用原排序；始终受倍率和请求总预算限制。
                 </p>
               </div>
               <Switch
@@ -1187,8 +1187,8 @@ export function GroupFormDialog({
               <div className="min-w-0 flex-1">
                 <Label>4xx 状态码顺延</Label>
                 <p className="text-[11px] leading-5 text-muted-foreground">
-                  默认仅网络错误、429、5xx 会重试/顺延。开启后 400/401/403/404
-                  等 4xx 也按上方策略重试与顺延。
+                  网络错误、429、5xx，以及结构化错误明确报告的模型不可用、上游密钥失效或余额不足，可按顺延策略换源。
+                  开启后其它 4xx 也可顺延；参数错误可能在所有渠道重复失败，请谨慎开启。
                 </p>
               </div>
               <Switch
@@ -1266,7 +1266,7 @@ export function GroupFormDialog({
                 onChange={(e) => setGroupForm({ ...groupForm, request_first_token_timeout_sec: e.target.value })} />
               <p className="text-[11px] leading-5 text-muted-foreground">
                 0 继承全局转发超时。流式请求从进入网关开始计时，准备、排队、重试和响应校验共享同一预算，最后一个候选也受限制。
-                首个有效内容写出后停止计时，不限制后续正常生成；预算耗尽不触发渠道冷却。
+                首个有效内容写出后停止计时，不限制后续正常生成；预算耗尽不触发渠道冷却。该值是用户等待首字的上限，不是每条渠道各有一份预算。
               </p>
               <Label>每个请求最多尝试次数</Label>
               <Input type="number" min={0} max={64} step={1}
@@ -1276,6 +1276,14 @@ export function GroupFormDialog({
                 0 沿用原有重试、顺延和并发兜底次数。填写后限制总尝试数，包含首次请求、同路由重试及换源；已发出的并发请求可继续竞争结果。
                 限流、过载优先换源，不进行同路由重复重试。
               </p>
+              {groupForm.retry_enabled && groupForm.failover_enabled &&
+                Number(groupForm.failover_max) > 0 && Number(groupForm.request_max_attempts) > 0 &&
+                Number(groupForm.request_max_attempts) < 1 + Number(groupForm.failover_max) && (
+                <p className="rounded-md border border-amber-200/80 bg-amber-50/80 px-2 py-1.5 text-[11px] leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                  当前总尝试上限为 {groupForm.request_max_attempts} 次（包含首次），低于顺延允许的 {1 + Number(groupForm.failover_max)} 条。
+                  即使还有可用候选，也会在总次数耗尽时停止；并发、正则拒绝和同源重试共用该上限。
+                </p>
+              )}
             </div>
             <div className="space-y-3 border-t border-border/60 pt-3">
               <div className="flex items-center justify-between gap-2">

@@ -85,6 +85,18 @@ func claimRequestAttempt(ctx context.Context, max int) error {
 	return nil
 }
 
+// Negative means the operator did not configure a shared launch limit.
+func requestAttemptsRemaining(ctx context.Context, max int) int {
+	if max <= 0 || requestTiming(ctx) == nil {
+		return -1
+	}
+	remaining := clampRequestMaxAttempts(max) - int(requestTiming(ctx).attempts.Load())
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 func (s *forwardRequestTiming) flushed() {
 	s.mu.Lock()
 	var callback func()

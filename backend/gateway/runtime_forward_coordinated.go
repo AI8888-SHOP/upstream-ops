@@ -379,7 +379,24 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		}
 		attemptTimeout := coordinatedAttemptFirstTokenTimeout(
 			req.firstToken, req.group, req.hedgeActive, planScheduler.snapshot(), info.Number, attempt.Route.ID,
+			func(entry coordinatedRoutePlan) bool {
+				if _, excluded := excludedRoutes.Load(entry.Candidate.Route.ID); excluded {
+					return false
+				}
+				if entry.TryOnRoute > 0 {
+					if _, suppressed := retrySuppressedRoutes.Load(entry.Candidate.Route.ID); suppressed {
+						return false
+					}
+				}
+				if _, rejected := responseRejectedRoutes.Load(entry.Candidate.Route.ID); rejected {
+					return entry.TryOnRoute > 0 && entry.TryOnRoute < entry.responseMaxTries()
+				}
+				return true
+			},
 		)
+		if requestAttemptsRemaining(ctx, req.group.RequestMaxAttempts) == 0 {
+			attemptTimeout = 0
+		}
 		var runErr error
 		if req.stream {
 			_, runErr = rt.runCoordinatedStreamAttempt(ctx, &req, attempt, attemptTimeout)
@@ -387,8 +404,19 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 			_, runErr = rt.runCoordinatedNonStreamAttempt(ctx, &req, attempt, attemptTimeout)
 		}
 		suppressSameRouteRetry := coordinatedAttemptSuppressesSameRouteRetries(attempt)
+		validation, status, attemptErr, terminal := attempt.validationSnapshot()
+		failed := runErr != nil || attemptErr != nil || terminal || validation.IsRejected() || status < 200 || status >= 300
+		if failed && coordinatedPreferUntriedAlternative(req.group, planScheduler.snapshot(), info.Number, attempt.Route.ID) {
+			suppressSameRouteRetry = true
+		}
 		if suppressSameRouteRetry {
 			retrySuppressedRoutes.Store(attempt.Route.ID, struct{}{})
+		}
+		// A caller error is a terminal failure, never a successful stream gate.
+		// HTTP errors carry ClientBody without writing to the gate; selecting
+		// that empty gate would commit its default 200 and lose the real error.
+		if terminal && runErr == nil && !validation.IsRejected() && status >= 400 {
+			return attempt, stopHedgeAttempts(fmt.Errorf("upstream status %d", status))
 		}
 		// Response validation is allowed to switch routes even when the legacy
 		// transport failover toggle is off. Ordinary transport/status failures
@@ -415,7 +443,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		if !accepted && attempt != nil {
 			validation, _, _, _ := attempt.validationSnapshot()
 			if validation.IsRejected() && !validation.PostCommit {
-				if !coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+				if !coordinatedTransportFailoverEnabled(req.group) && !coordinatedAttemptSuppressesSameRouteRetries(attempt) {
 					planScheduler.prioritizeRetry(attempt)
 				}
 			}
@@ -504,8 +532,9 @@ func buildCoordinatedRoutePlan(candidates []ScoredRoute, group *storage.GatewayG
 		routeLimit = minInt(len(candidates), maxAttempts)
 	} else if validationEnabled {
 		// A pre-commit response-rule match is an explicit route-switch signal.
-		// It must not be gated by the ordinary transport failover toggle. The
-		// configured same-route retry ladder is still honored before switching.
+		// It must not be gated by the ordinary transport failover toggle. With
+		// transport failover disabled, keep the configured same-route ladder;
+		// otherwise give fresh candidates priority within the shared budget.
 		// A positive failover_max is
 		// still honored as the operator's route budget; zero means all available
 		// routes for validation so enabling a rule cannot silently become a
@@ -532,10 +561,10 @@ func buildCoordinatedRoutePlan(candidates []ScoredRoute, group *storage.GatewayG
 	}
 	planRetries := maxInt(transportRetries, responseRetries)
 	plan := make([]coordinatedRoutePlan, 0, routeLimit*(1+planRetries))
-	if hedgeActive {
+	if hedgeActive || coordinatedTransportFailoverEnabled(group) {
 		// Keep distinct routes in the initial hedge rounds. If a response rule
-		// rejects a route, the coordinator promotes that route's next retry into
-		// the next unstarted slot without disturbing already-running hedges.
+		// rejects a route, ordinary failover also visits the remaining candidates
+		// before spending scarce request attempts on the same failed source.
 		for try := 0; try <= planRetries; try++ {
 			for routeIndex := 0; routeIndex < routeLimit; routeIndex++ {
 				plan = append(plan, coordinatedRoutePlan{
@@ -559,6 +588,21 @@ func buildCoordinatedRoutePlan(candidates []ScoredRoute, group *storage.GatewayG
 
 func coordinatedTransportFailoverEnabled(group *storage.GatewayGroup) bool {
 	return group != nil && group.RetryEnabled && group.FailoverEnabled && group.FailoverMax > 0
+}
+
+// Preserve one-source retry behavior, but do not revisit a failed source after
+// electing to fail over to an untried alternative. This also lets health be
+// published immediately instead of waiting for retry slots that will be skipped.
+func coordinatedPreferUntriedAlternative(group *storage.GatewayGroup, plan []coordinatedRoutePlan, number int, routeID uint) bool {
+	if !coordinatedTransportFailoverEnabled(group) || number <= 0 {
+		return false
+	}
+	for index := number; index < len(plan); index++ {
+		if plan[index].TryOnRoute == 0 && plan[index].Candidate.Route.ID != routeID {
+			return true
+		}
+	}
+	return false
 }
 
 func coordinatedSameRouteRetryAllowed(group *storage.GatewayGroup, attempt *coordinatedForwardAttempt) bool {
@@ -593,21 +637,19 @@ func coordinatedAttemptFirstTokenTimeout(
 	plan []coordinatedRoutePlan,
 	number int,
 	routeID uint,
+	eligible ...func(coordinatedRoutePlan) bool,
 ) time.Duration {
 	if configured <= 0 {
 		return 0
 	}
-	if hedgeActive {
-		if number > 0 && number < len(plan) {
-			return configured
-		}
-		return 0
-	}
-	if !coordinatedTransportFailoverEnabled(group) || number <= 0 {
+	if number <= 0 || (!hedgeActive && !coordinatedTransportFailoverEnabled(group)) {
 		return 0
 	}
 	for index := number; index < len(plan); index++ {
-		if plan[index].Candidate.Route.ID != routeID {
+		if len(eligible) > 0 && eligible[0] != nil && !eligible[0](plan[index]) {
+			continue
+		}
+		if hedgeActive || plan[index].Candidate.Route.ID != routeID {
 			return configured
 		}
 	}
@@ -732,7 +774,7 @@ func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coor
 			return attempt, nil
 		}
 	}
-	if attempt.Err != nil || rt.isFailoverStatus(attempt.Status, req.group.FailoverOn4xx) {
+	if attempt.Err != nil || rt.isFailoverResponse(attempt.Status, req.group.FailoverOn4xx, attempt.UpstreamBody) {
 		attempt.ErrInfo = rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), attempt.Err, attempt.Status, attempt.Headers, attempt.UpstreamBody, attempt.UpstreamURL, req.c.Request.Method)
 		if attempt.Err == nil {
 			attempt.Err = fmt.Errorf("upstream status %d: %s", attempt.Status, attempt.ErrInfo.Summary)
@@ -781,7 +823,7 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 		if failureErr == nil && !rt.isClientDisconnectAfterCommit(result.ClientDisconnected, result.StreamErr) {
 			failureErr = result.StreamErr
 		}
-		if !validation.IsRejected() && (failureErr != nil || rt.isFailoverStatus(result.Status, req.group.FailoverOn4xx)) {
+		if !validation.IsRejected() && (failureErr != nil || rt.isFailoverResponse(result.Status, req.group.FailoverOn4xx, result.Body)) {
 			errInfo = rt.buildUpstreamErrorInfoCfg(
 				rt.gatewayRuntime(), failureErr, result.Status, result.Headers, result.Body,
 				attempt.UpstreamURL, req.c.Request.Method,
@@ -975,14 +1017,19 @@ func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, att
 		if !coordinatedRejectedUpstreamFailure(attempt) {
 			return
 		}
+	} else if terminal && attemptErr == nil {
+		// Non-failover HTTP responses (for example invalid input) terminate
+		// this request, but must not cool the model for unrelated callers.
+		return
 	} else if attemptErr == nil && !terminal && status >= 200 && status < 300 {
 		return
 	}
 	firstTokenTimedOut := rt.isFirstTokenTimeout(attemptErr)
-	suppress := coordinatedAttemptSuppressesSameRouteRetries(attempt)
+	suppress := coordinatedAttemptSuppressesSameRouteRetries(attempt) || coordinatedPreferUntriedAlternative(req.group, plan, number, attempt.Route.ID)
 	if !req.group.RetryEnabled || req.group.CooldownSeconds <= 0 ||
 		(firstTokenTimedOut && !req.group.FirstTokenTimeoutCooldownEnabled) ||
-		(!suppress && coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
+		(!suppress && requestAttemptsRemaining(req.c.Request.Context(), req.group.RequestMaxAttempts) != 0 &&
+			coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
 		return
 	}
 	if strings.TrimSpace(errInfo.Summary) == "" || validation.IsRejected() {
@@ -1521,6 +1568,7 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 		lastBody       []byte
 		lastHeaders    http.Header
 		lastErr        error
+		lastTerminal   bool
 		lastValidation validationResult
 	)
 	for i := len(result.Attempts) - 1; i >= 0; i-- {
@@ -1535,6 +1583,7 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 			lastBody = append([]byte(nil), attempt.ClientBody...)
 			lastHeaders = attempt.Headers.Clone()
 			lastErr = attempt.Err
+			lastTerminal = attempt.Terminal
 			lastValidation = attempt.Validation
 			attempt.streamMu.Unlock()
 		} else {
@@ -1542,6 +1591,7 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 			lastBody = attempt.ClientBody
 			lastHeaders = attempt.Headers
 			lastErr = attempt.Err
+			lastTerminal = attempt.Terminal
 			lastValidation = attempt.Validation
 		}
 		if lastStatus > 0 || lastErr != nil {
@@ -1550,6 +1600,14 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 	}
 	// A response rejected by a validation rule must never be replayed merely
 	// because the attempt chain is exhausted. Doing so would bypass the rule.
+	if found && !lastValidation.IsRejected() && lastTerminal && lastErr == nil && lastStatus >= 400 && len(lastBody) == 0 {
+		// Even an empty caller-error body must keep its original HTTP status,
+		// rather than becoming a gateway 502 just because no JSON was supplied.
+		rt.copyResponseHeaders(req.c.Writer.Header(), lastHeaders)
+		req.c.Header("Content-Type", "application/json")
+		rt.writeGatewayError(req.c, req.kind, lastStatus, "api_error", fmt.Sprintf("upstream status %d", lastStatus))
+		return
+	}
 	if found && !lastValidation.IsRejected() && lastStatus > 0 && len(lastBody) > 0 {
 		body := rt.injectUpstreamOpsRequestID(lastBody, req.requestID)
 		rt.copyResponseHeaders(req.c.Writer.Header(), lastHeaders)

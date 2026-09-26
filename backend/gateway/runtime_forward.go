@@ -221,6 +221,11 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				goto finishError
 			}
 			attemptNo++
+			if requestAttemptsRemaining(c.Request.Context(), group.RequestMaxAttempts) == 0 {
+				// No launch budget remains for a fallback. The final attempt keeps
+				// the total request deadline, not an earlier failover-only timer.
+				attemptFTTimeout = 0
+			}
 			attemptStarted := time.Now()
 			attemptKind := attemptKindPrimary
 			if tryOnRoute > 0 {
@@ -483,7 +488,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				return
 			}
 
-			if fwdErr != nil || rt.isFailoverStatus(status, failoverOn4xx) {
+			if fwdErr != nil || rt.isFailoverResponse(status, failoverOn4xx, respBody) {
 				gwCfg := rt.gatewayRuntime()
 				errInfo := rt.buildUpstreamErrorInfoCfg(gwCfg, fwdErr, status, respHeaders, respBody, upstreamFullURL, c.Request.Method)
 				if rt.isFirstTokenTimeout(fwdErr) {
@@ -523,11 +528,12 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				// Permanent capability/auth/balance errors do not benefit from
 				// repeating the same request on the same route. Keep failover to
 				// other routes available, but end this route's retry ladder now.
-				if tryOnRoute < maxTriesOnRoute-1 && (!isSameRouteRetryableUpstreamFailure(status, errInfo) ||
+				preferAlternative := retryEnabled && failoverEnabled && failoversDone < failoverMax && len(remainingAfter) > 0
+				if tryOnRoute < maxTriesOnRoute-1 && (preferAlternative || !isSameRouteRetryableUpstreamFailure(status, errInfo) ||
 					rt.isFirstTokenTimeout(fwdErr) || errors.Is(fwdErr, errUpstreamQueueTimeout)) {
 					maxTriesOnRoute = tryOnRoute + 1
 				}
-				lastTryOnRoute := tryOnRoute >= maxTriesOnRoute-1
+				lastTryOnRoute := tryOnRoute >= maxTriesOnRoute-1 || requestAttemptsRemaining(c.Request.Context(), group.RequestMaxAttempts) == 0
 				var cooldownUntil *time.Time
 				firstTokenTimedOut := rt.isFirstTokenTimeout(fwdErr)
 				firstTokenCooldownEnabled := group.FirstTokenTimeoutCooldownEnabled
@@ -589,7 +595,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				break // 同路由耗尽，顺延
 			}
 
-			// 默认 4xx（非 429）不重试不顺延，直接回显；组开启 failover_on_4xx 时已在上方 isFailoverStatus 分支处理。
+			// Unclassified 4xx remain caller-visible unless explicitly enabled.
+			// Structured source-local model/key/quota failures were handled above.
 			if status >= 400 {
 				errInfo := rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), nil, status, respHeaders, respBody, upstreamFullURL, c.Request.Method)
 				clientBody := rt.convertErrorBody(respBody, kind, upstreamKind, converted)

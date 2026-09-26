@@ -752,6 +752,21 @@ func TestCoordinatedPlanSchedulerPromotesSameRouteRetry(t *testing.T) {
 	}
 }
 
+func TestCoordinatedModelErrorRejectionSuppressesSameSourceRetries(t *testing.T) {
+	attempt := &coordinatedForwardAttempt{
+		Status:       http.StatusBadRequest,
+		UpstreamBody: []byte(`{"error":{"code":"model_not_found","type":"invalid_request_error"}}`),
+		Validation:   validationResult{Decision: validationRejected},
+	}
+	if !coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+		t.Fatal("model error matched by a rule should skip the unavailable source")
+	}
+	attempt.UpstreamBody = []byte(`{"error":{"type":"invalid_request_error","message":"invalid input"}}`)
+	if coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+		t.Fatal("ordinary caller error should retain explicit validation semantics")
+	}
+}
+
 func TestCoordinatedAttemptFirstTokenTimeoutFollowsTransportRoutes(t *testing.T) {
 	plan := []coordinatedRoutePlan{
 		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 1}}, TryOnRoute: 0, MaxTries: 2},

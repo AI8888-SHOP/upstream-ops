@@ -24,6 +24,8 @@ type schedulingDecision struct {
 	MeanMS         float64 `json:"mean_ms"`
 	P90MS          float64 `json:"p90_ms"`
 	FailurePercent float64 `json:"failure_percent"`
+	FailureWindow  int     `json:"failure_window_minutes"`
+	FailureWaitMS  float64 `json:"failure_wait_ms"`
 	Active         int     `json:"active"`
 	Limit          int     `json:"limit"`
 	Queued         int     `json:"queued"`
@@ -197,10 +199,12 @@ func (rt *Runtime) orderAdaptiveCandidates(candidates []ScoredRoute, r *adaptive
 			load += math.Min(1, float64(active)*0.03)
 		}
 		// Failed attempts have a cost even when they produced no token at all.
-		score := (prediction + failure*math.Max(30000, targetMS*2)) / math.Max(0.05, 1-failure) * load
+		failureCost := math.Max(estimate.FailureWaitMS, math.Max(30000, targetMS*2))
+		score := (prediction + failure*failureCost) / math.Max(0.05, 1-failure) * load
 		decision := &schedulingDecision{Mode: r.group.SchedulingMode, Reason: "latency", Rate: candidate.EffectiveRate, Ceiling: r.ceiling,
 			Samples: estimate.Samples, FirstSamples: estimate.FirstSamples, Window: estimate.Window, EstimatedMS: score, MeanMS: estimate.MeanMS,
-			P90MS: estimate.P90MS, FailurePercent: failure * 100, Active: active, Limit: limit, Queued: queued}
+			P90MS: estimate.P90MS, FailurePercent: failure * 100, FailureWindow: estimate.FailureWindow, FailureWaitMS: estimate.FailureWaitMS,
+			Active: active, Limit: limit, Queued: queued}
 		candidate.Decision = decision
 		candidate.StatisticsKey = key
 		meets := estimate.FirstSamples >= minimum && prediction*load <= targetMS && failure <= 0.1

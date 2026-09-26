@@ -29,12 +29,87 @@ func (svc *Service) isFailoverStatus(code int, failoverOn4xx bool) bool {
 	return false
 }
 
+// A model/key/quota failure belongs to this upstream, not necessarily to the
+// caller. Recognize only explicit error envelopes; never scan assistant text
+// or tool arguments. Ordinary invalid-input 400s keep the configured policy.
+func upstreamRouteUnavailable(body []byte) bool {
+	check := func(payload []byte) bool {
+		var envelope struct {
+			Error    json.RawMessage `json:"error"`
+			Response struct {
+				Error json.RawMessage `json:"error"`
+			} `json:"response"`
+		}
+		if json.Unmarshal(payload, &envelope) != nil {
+			return false
+		}
+		for _, raw := range []json.RawMessage{envelope.Error, envelope.Response.Error} {
+			var failure struct {
+				Code    string `json:"code"`
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(raw, &failure) != nil {
+				if json.Unmarshal(raw, &failure.Message) != nil {
+					continue
+				}
+			}
+			code := strings.ToLower(failure.Code + " " + failure.Type)
+			if strings.Contains(code, "context_length") || strings.Contains(code, "content_filter") {
+				continue
+			}
+			for _, marker := range []string{"model_not_found", "model_not_available", "model_unavailable", "unsupported_model", "model_not_supported", "invalid_api_key", "authentication_error", "insufficient_quota", "insufficient_balance"} {
+				if strings.Contains(code, marker) {
+					return true
+				}
+			}
+			message := strings.ToLower(strings.TrimSpace(failure.Message))
+			for _, marker := range []string{"insufficient account balance", "insufficient balance", "invalid api key", "invalid_api_key", "the requested model is unavailable", "model_not_found", "model not found", "no available channel for model", "模型不存在", "余额不足"} {
+				if strings.Contains(message, marker) {
+					return true
+				}
+			}
+			if strings.Contains(message, "model") && (strings.Contains(message, "does not exist") || strings.Contains(message, "not supported by any configured account") || strings.Contains(message, "not enabled for this group")) {
+				return true
+			}
+		}
+		return false
+	}
+	if check(body) {
+		return true
+	}
+	if !bytes.Contains(body, []byte("data:")) {
+		return false
+	}
+	for _, frame := range bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
+		_, data := (*Runtime)(nil).parseSSEEventLines(strings.Split(string(frame), "\n"))
+		if check([]byte(data)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (svc *Service) isFailoverResponse(status int, failoverOn4xx bool, body []byte) bool {
+	if svc.isFailoverStatus(status, failoverOn4xx) {
+		return true
+	}
+	switch status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
+		return upstreamRouteUnavailable(body)
+	}
+	return false
+}
+
 // isSameRouteRetryableUpstreamFailure distinguishes transient failures from
 // responses that cannot succeed by sending the same request to the same route
 // again. The caller may still fail over to another route when its policy allows
 // it. Saturation and deterministic failures switch sources; other transient
 // transport/HTTP failures retain the configured same-route retry policy.
 func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
+	if upstreamRouteUnavailable([]byte(info.UpstreamBody)) {
+		return false
+	}
 	// Retrying a saturated source immediately amplifies its queue. Fail over
 	// instead; other transient transport/HTTP failures retain their retry policy.
 	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
@@ -76,6 +151,9 @@ func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
 // Only protocol error envelopes count here. A content rule matching prose
 // about rate limits must never poison shared upstream health.
 func hasStructuredUpstreamError(body []byte) bool {
+	if upstreamRouteUnavailable(body) {
+		return true
+	}
 	check := func(payload []byte) bool {
 		var envelope struct {
 			Error    json.RawMessage `json:"error"`

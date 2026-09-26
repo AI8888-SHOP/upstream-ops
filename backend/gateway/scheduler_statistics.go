@@ -29,6 +29,7 @@ type schedulerBucket struct {
 	minute                     int64
 	completed, failures, first uint32
 	sumMS                      float64
+	failureWaitMS              float64
 	hist                       [len(schedulerLatencyBounds)]uint32
 }
 type schedulerSeries struct {
@@ -45,6 +46,8 @@ type schedulerEstimate struct {
 	FirstSamples               int
 	Window                     int
 	MeanMS, P90MS, FailureRate float64
+	FailureWindow              int
+	FailureWaitMS              float64
 }
 
 func (s *Service) schedulingStatistics() *schedulerStatistics {
@@ -56,7 +59,7 @@ func (s *Service) schedulingStatistics() *schedulerStatistics {
 	return s.schedulerStats
 }
 
-func (s *schedulerStatistics) record(key schedulerStatsKey, now time.Time, firstMS *float64, failed *bool) {
+func (s *schedulerStatistics) record(key schedulerStatsKey, now time.Time, firstMS *float64, failed *bool, failureWaitMS ...float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	element := s.keys[key]
@@ -80,6 +83,9 @@ func (s *schedulerStatistics) record(key schedulerStatsKey, now time.Time, first
 		b.completed++
 		if *failed {
 			b.failures++
+			if len(failureWaitMS) > 0 && !math.IsNaN(failureWaitMS[0]) && !math.IsInf(failureWaitMS[0], 0) {
+				b.failureWaitMS += math.Max(0, math.Min(failureWaitMS[0], schedulerLatencyBounds[len(schedulerLatencyBounds)-1]))
+			}
 		}
 	}
 	if firstMS != nil {
@@ -100,20 +106,28 @@ func (s *schedulerStatistics) estimate(key schedulerStatsKey, now time.Time, win
 	defer s.mu.Unlock()
 	element := s.keys[key]
 	if element == nil {
-		return schedulerEstimate{Window: window}
+		return schedulerEstimate{Window: window, FailureWindow: window}
 	}
 	series := element.Value.(*schedulerSeries)
 	result := series.estimate(now, window)
 	if result.FirstSamples < minimum || result.Samples < minimum {
-		result = series.estimate(now, schedulerHistoryMinutes)
+		history := series.estimate(now, schedulerHistoryMinutes)
+		// No first token is exactly what an outage looks like. Borrow latency
+		// history without erasing a sufficiently sampled recent failure window.
+		if result.FirstSamples < minimum {
+			result.FirstSamples, result.MeanMS, result.P90MS, result.Window = history.FirstSamples, history.MeanMS, history.P90MS, history.Window
+		}
+		if result.Samples < minimum {
+			result.Samples, result.FailureRate, result.FailureWaitMS, result.FailureWindow = history.Samples, history.FailureRate, history.FailureWaitMS, history.Window
+		}
 	}
 	return result
 }
 
 func (s *schedulerSeries) estimate(now time.Time, window int) schedulerEstimate {
-	result := schedulerEstimate{Window: window}
+	result := schedulerEstimate{Window: window, FailureWindow: window}
 	minute := now.Unix() / 60
-	var first, sum, completed, failures float64
+	var first, sum, completed, failures, failureWait float64
 	var histogram [len(schedulerLatencyBounds)]float64
 	for i := range s.buckets {
 		b := &s.buckets[i]
@@ -128,6 +142,7 @@ func (s *schedulerSeries) estimate(now time.Time, window int) schedulerEstimate 
 		sum += b.sumMS * weight
 		completed += float64(b.completed) * weight
 		failures += float64(b.failures) * weight
+		failureWait += b.failureWaitMS * weight
 		for index, count := range b.hist {
 			histogram[index] += float64(count) * weight
 		}
@@ -145,6 +160,9 @@ func (s *schedulerSeries) estimate(now time.Time, window int) schedulerEstimate 
 	}
 	// A small prior avoids declaring one successful call perfectly reliable.
 	result.FailureRate = (failures + 0.5) / (completed + 10)
+	if failures > 0 {
+		result.FailureWaitMS = failureWait / failures
+	}
 	return result
 }
 
@@ -199,10 +217,13 @@ func (o *schedulerObservation) finish(ctx context.Context, success bool, errorTy
 		return
 	}
 	// Invalid payload/size errors primarily describe the caller's request.
-	if len(statuses) > 0 && (statuses[0] == 400 || statuses[0] == 413 || statuses[0] == 422) {
+	if len(statuses) > 0 && errorType != "upstream_error" && (statuses[0] == 400 || statuses[0] == 413 || statuses[0] == 422) {
 		return
 	}
-	o.finishOnce.Do(func() { failed := !success || !o.hasFirst.Load(); o.stats.record(o.key, time.Now(), nil, &failed) })
+	o.finishOnce.Do(func() {
+		failed := !success || !o.hasFirst.Load()
+		o.stats.record(o.key, time.Now(), nil, &failed, float64(time.Since(o.started).Milliseconds()))
+	})
 }
 
 func schedulerCredential(cipher, baseURL string) [32]byte {
