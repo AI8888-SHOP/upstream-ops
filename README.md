@@ -1,1404 +1,255 @@
 # UpstreamOps
 
-[English](README.md) | [简体中文](README.zh.md)
+**多上游运维面板 · AI 请求网关 · 倍率与首字调度**
 
-> UpstreamOps is a centralized monitoring and operations dashboard for NewAPI and Sub2API upstream sites. It helps manage upstream accounts, balances, spending, model or group rates, Sub2API upstream synchronization, rate changes, upstream API keys, recharge and redeem workflows, subscriptions, announcements, and notification alerts.
+把 NewAPI / Sub2API 上游的账号、余额、倍率、API Key 和告警集中到一个面板，再通过统一网关向客户端提供服务。支持接入监控渠道或直连上游，在配置的费用与尝试预算内选择线路、处理故障切换，并记录每次请求的用量和调度依据。
 
-It also includes an OpenAI / Claude / Responses compatible request gateway: create gateway API keys, bind monitored channels or direct providers, schedule by rate and weight, convert protocols, fail over on errors, and record per-request usage and cost estimates.
+[快速部署](#快速部署) · [网关接入](#网关接入) · [调度与故障处理](#调度与故障处理) · [详细手册](README.zh.md) · [下载发行版](https://github.com/AI8888-SHOP/upstream-ops/releases) · [反馈问题](https://github.com/AI8888-SHOP/upstream-ops/issues)
 
-> This project is based on [worryzyy/upstream-hub](https://github.com/worryzyy/upstream-hub). Thanks to [@worryzyy](https://github.com/worryzyy) for the original open-source work.
-
-## Sponsor
-
-<details open>
-<summary>Click to expand</summary>
+## 赞助商
 
 <table>
 <tr>
-<td width="180"><a href="https://cmzi.com/aff/CHTVTQWE"><img src="https://zhenxiansheng-1251032746.file.myqcloud.com/Markdown/2020/12/29/zi-yuan-32.png" alt="cmzi.com" width="150"></a></td>
-<td>Thanks to 触摸云 for sponsoring this project. 触摸云 provides overseas cloud computing services, including Hong Kong cloud servers, US high-defense servers, physical servers, protection services, acceleration CDN, and self-developed CDN systems. UpstreamOps users can use <a href="https://cmzi.com/aff/CHTVTQWE">this link</a>.</td>
+<td width="200" align="center">
+<a href="https://www.ai8888.shop"><img src="docs/images/ai8888-shop-logo.png" alt="ai8888.shop Logo" width="180"></a>
+</td>
+<td>
+<strong><a href="https://www.ai8888.shop">ai8888.shop（低价稳定token）</a></strong><br>
+感谢 ai8888.shop 对本项目的支持。点击名称或 Logo 访问网站。
+</td>
 </tr>
 </table>
 
+## 可以做什么
+
+| 场景 | 能力 |
+| --- | --- |
+| 集中管理上游 | 接入 NewAPI / Sub2API，查看余额、消费、分组倍率、公告与订阅状态，管理上游 API Key、充值和兑换。 |
+| 统一请求入口 | 创建网关分组和密钥，接入监控渠道或直连 Provider，配置模型映射、模型列表、代理与鉴权方式。 |
+| 控制成本与等待 | 提供倍率优先、均衡、首字优先策略，结合近期首字、失败情况与负载选路，遵守配置的倍率上限。 |
+| 处理上游故障 | 支持重试、故障顺延、冷却、首字等待预算，以及可选的响应校验和并发兜底。 |
+| 回看请求过程 | 记录请求与尝试耗时、Token、缓存、费用、响应模型、错误详情、胜出线路和调度依据。 |
+| 同步与告警 | 向 Sub2API 同步上游账号与分组；通过 Telegram、Webhook、邮件、企业微信、钉钉、飞书、ServerChan3 推送通知。 |
+
+上游账号操作取决于对应站点开放的 API；网关兼容性也取决于上游模型、协议和功能支持。
+
+## 界面预览
+
+![UpstreamOps 界面预览](docs/images/demo1.png)
+
+<details>
+<summary>展开更多截图</summary>
+
+![UpstreamOps 界面预览 2](docs/images/demo2.png)
+![UpstreamOps 界面预览 3](docs/images/demo3.png)
+![UpstreamOps 界面预览 4](docs/images/demo4.png)
+![UpstreamOps 界面预览 5](docs/images/demo5.png)
+![UpstreamOps 界面预览 6](docs/images/demo6.png)
+![UpstreamOps 界面预览 7](docs/images/demo7.png)
+
 </details>
 
-## Why Use UpstreamOps
+## 快速部署
 
-When you maintain multiple NewAPI or Sub2API upstream accounts, balance, spending, rates, announcements, API keys, subscriptions, recharge entry points, and downstream synchronization are usually scattered across different admin panels. Manually logging in one by one is repetitive and can easily miss low balances, rate changes, login failures, expiring subscriptions, or upstream announcements.
+### 准备环境
 
-UpstreamOps focuses on these problems:
+- Docker Engine 与 Docker Compose v2；也可使用下文的预编译二进制。
+- 一个可连接的 **PostgreSQL 数据库**和专用账号。默认 Compose 只启动应用，不会创建数据库。
+- 一份妥善保存的 `APP_SECRET`，用于加密上游凭据等敏感字段。
 
-- Centralized status view: balances, spending, rates, announcements, subscriptions, and abnormal states across multiple upstreams.
-- Less manual checking: scheduled balance, spending, rate, and subscription usage synchronization.
-- Faster risk detection: low balances, rate changes, login failures, monitor failures, low subscription quota, and expiring subscriptions can be pushed through notifications.
-- Historical tracking: rate changes, balance snapshots, notification logs, and upstream announcements are stored locally.
-- Easier operations: API key management, recharge, redeem, subscription purchase, renewal, and Sub2API upstream synchronization are available from one entry point.
-- Complex network support: global proxy support with per-upstream, per-notification-channel, and per-captcha-provider proxy switches.
+**当前服务端只支持 PostgreSQL。** SQLite / MySQL 旧部署应先完成数据迁移；仅修改数据库驱动或替换镜像不会迁移数据。
 
-## Preview
+### 使用 Docker Compose
 
-![UpstreamOps preview 1](docs/images/demo1.png)
-
-![UpstreamOps preview 2](docs/images/demo2.png)
-
-![UpstreamOps preview 3](docs/images/demo3.png)
-
-![UpstreamOps preview 4](docs/images/demo4.png)
-
-![UpstreamOps preview 5](docs/images/demo5.png)
-
-![UpstreamOps preview 6](docs/images/demo6.png)
-
-![UpstreamOps preview 7](docs/images/demo7.png)
-
-## Features
-
-### Request Gateway
-
-- Client endpoints (Bearer / `x-api-key`):
-  - `GET /v1` (or `GET /` when the SPA is not mounted) for endpoints discovery
-  - `GET /v1/models`, `GET /v1/usage`
-  - `POST /v1/chat/completions`, `POST /v1/completions`
-  - `POST /v1/responses` (OpenAI Responses, including stream / subpaths)
-  - `POST /v1/messages`, `POST /v1/messages/count_tokens` (Anthropic)
-  - Passthrough-style: `/v1/embeddings`, `/v1/images/*`, `/v1/videos/*`, and similar (model rewrite, path preserved)
-  - Compatibility paths: `/chat/completions`, `/responses`, Codex `/backend-api/codex/*`, Gemini `/v1beta/*`, and more
-- **Gateway groups** own routes, mapping, model lists, and retry/failover policy; multiple keys per group share the same config.
-- **Two route sources**:
-  - **Monitored channel**: NewAPI / Sub2API channel + source group; “ensure upstream keys” creates/reuses dedicated source API keys.
-  - **Direct provider**: base URL, API key, default billing rate, auth style, and proxy toggle managed inside the gateway (no monitor channel required).
-- Scheduling: source-group rate conversion (raw / ×100 / ÷100 / custom) plus weight; group sort direction; optional re-sort after rate scans.
-- Visual model mapping (A→B, `*` wildcard) and model list (upstream sync with dedupe / custom / auto·manual·hybrid); preview, sync, and probe per route.
-- **Protocol conversion** (JSON and incremental SSE):
-  - OpenAI Chat ↔ Anthropic Messages
-  - OpenAI Chat ↔ OpenAI Responses
-  - Anthropic ↔ OpenAI Responses
-  - Per-route `upstream_protocol`: `auto` / `openai` (Chat) / `openai_responses` / `anthropic`
-- Failover on network errors, 429, 5xx, and explicit model/key/balance failures; optional “failover on 4xx”; group-level retry count, max switches, and cooldown. Untried alternatives take priority over repeatedly retrying a failed source when ordinary failover is enabled.
-- **First-token timeout** (optional): fail fast on the first byte when another route can still be tried.
-- **Concurrent fallback (hedging, optional and off by default)**: when the primary has no valid result after the group delay, start other routes up to the configured limits. The first validated attempt wins and in-flight losers are canceled. `maxParallel` includes the primary and `maxAttempts` caps all attempts; image/video generation and Realtime requests are always excluded.
-- **Hedge virtual cache credit (optional and off by default)**: when a real overlapping hedge was launched and a successful winner is delivered, the group can bill the winner's fresh input as cache-read tokens. The gateway charges only the discounted winner amount while retaining every attempt's raw upstream cost and extra-cost audit; image/video generation and Realtime requests never qualify.
-- **Regex response validation (optional and off by default)**: priority-ordered rules inspect `assistant_text`, `raw_body`, or `error_message`, with optional model/protocol filters. With ordinary failover enabled, a match prefers an untried alternative; otherwise the current route follows `response_validation_retry_count` (`-1` inherits `retry_count`) before trying other validation candidates. Non-stream responses are checked in full; streams are checked through a configurable pre-commit prefix gate.
-- User-Agent modes: `passthrough` / `group` / `custom`; admin model pull and probe fall back to the default UA.
-- Usage logs aligned with sub2api fields (endpoint, protocol, tokens including cache buckets, cost, latency, first-token latency, attempt kind/status, winner, response rule, and error detail) with list, stats, model filters, and cleanup.
-- Pricing: built-in unit prices (overridable) and `actual_cost = base_cost × account_billing_rate` (same conversion rules as upstream sync).
-- Runtime knobs (hot-reloadable `gateway` section in system settings): forward timeout, models cache TTL, temp pause, batch concurrency, usage error truncation, and more.
-- Admin UI: Dock **Request Gateway** (`/gateway`); management APIs under `/api/gateway/*` (admin auth required).
-
-### Upstream Channel Management
-
-- Supports NewAPI and Sub2API upstreams.
-- Supports username/password credentials and token/cookie credentials.
-- Enables or disables monitoring per channel.
-- Supports custom channel sort order; higher values are displayed and monitored first.
-- Configures low-balance alert thresholds.
-- Tests login and manually syncs balances and rates.
-- Supports extra login form parameters for modified NewAPI or Sub2API login endpoints.
-- Supports Cloudflare Turnstile solving for upstream login flows.
-- Opens upstream site URLs directly from channel cards.
-- Supports clearing saved login information from channel cards.
-- Supports channel-level recharge multiplier conversion for balance, spending, and redeem values. Empty or non-positive values keep the upstream result; valid values can divide or multiply and are rounded to four decimal places.
-- Supports channel-level group multiplier conversion for upstream model/group rates and API Key group ratios. It uses the same divide/multiply algorithm and affects rate snapshots, change notifications, gateway scheduling, upstream sync, and API Key displays.
-- Supports a "only show groups with created keys" toggle: when enabled, channel cards, group dialogs, rate panels, and rate-change notifications only cover groups that already have API keys; gateway forwarding, upstream sync, and notification settings still see all groups, and local rate snapshots always keep the full set.
-- Deleting a channel cleans related snapshots, rates, announcements, notification cooldowns, and notification logs.
-
-### Sub2API Upstream Synchronization
-
-- Adds an **Upstream Sync** tab to system settings for managing writable Sub2API target upstreams.
-- Stores target addresses and encrypted Admin API Keys, checks connectivity, synchronizes target groups, and queries proxy lists.
-- Manages local synchronization groups and accounts by source channel, source group, target group, proxy, concurrency, weight, rate conversion, model limits, pool mode, and custom error codes.
-- Supports upstream model synchronization and custom model lists. Source models can be queried before applying a synchronization group.
-- Supports account testing with a selected model; failed tests disable scheduling for that target account.
-- Supports name templates with `{同步分组ID}`, `{渠道ID}`, and `{源分组ID}` placeholders.
-- Supports manual apply, managed-object deletion, and paginated execution logs.
-- Enabled synchronization groups are reapplied after scheduled rate scans.
-- Synchronization group changes and apply results can trigger `upstream_sync_group_changed` notifications.
-
-### Balance and Spending Monitoring
-
-- Shows total balance, today spending, total spending, lowest-balance channel, and abnormal channel count.
-- Periodically collects balance and spending data.
-- Displays balance history trends.
-- Pushes notifications when balance falls below the configured threshold.
-- Supports cooldown for repeated low-balance alerts.
-- Supports recharge multiplier conversion for balance, spending, and redeem values, using either the upstream multiplier or a manual divide/multiply mode.
-
-### Rate Monitoring
-
-- Syncs upstream model or group rates.
-- Stores current rate snapshots.
-- Records rate change history.
-- Supports paginated rate change history and channel filters.
-- Sends rate change notifications.
-- Merges multiple rate changes from the same scan into one notification.
-- Merges added and removed groups in the same scan into one structure-change notification.
-- Filters small rate changes by minimum percentage.
-- Supports notification subscriptions filtered by upstream channel and rate group.
-- Provides a full channel group overview with search and sorting by channel or rate.
-- Applies the configured channel group multiplier before storing and displaying rates; existing channels with no group multiplier keep upstream values unchanged.
-
-### Subscription Management and Usage Monitoring
-
-For Sub2API upstream channels, UpstreamOps provides subscription lifecycle management and usage monitoring:
-
-- Queries upstream subscription plans and payment methods.
-- Purchases or renews subscriptions.
-- Supports QR code, redirect URL, and form-submit payment launch modes.
-- Queries daily, weekly, and monthly quota limits, used amount, remaining amount, and remaining percentage.
-- Shows subscription expiration time, remaining days, and status.
-- Sends low remaining-quota alerts for daily, weekly, and monthly windows.
-- Sends expiring-subscription alerts.
-- Supports cooldown for repeated subscription alerts.
-- Provides summary cards and detail dialogs in the frontend.
-
-### Captcha Provider Balance Management
-
-- Supports CapSolver, 2Captcha, AntiCaptcha, and YesCaptcha.
-- Queries captcha provider account balances.
-- Refreshes one provider balance manually.
-- Refreshes all provider balances in batch.
-- Shows balance value, balance unit, refresh time, and error message.
-
-### Global Proxy and Upstream HTTP Settings
-
-- Supports HTTP, HTTPS, and SOCKS5 proxies.
-- Supports proxy username and password.
-- Allows upstream channels, notification channels, and captcha providers to opt in separately.
-- Allows version checks to use the proxy separately.
-- Configures upstream request timeout and `User-Agent`.
-- Provides proxy connectivity testing in the system settings page.
-
-### Upstream Announcements
-
-- Syncs NewAPI announcements from `/api/status` and `/api/notice`.
-- Syncs Sub2API user-visible announcements from `/api/v1/announcements`.
-- Announcement sync runs with rate sync and does not require a separate cron task.
-- The first sync only creates a baseline and does not push historical announcements.
-- New announcements are stored locally and pushed through notification channels.
-- Shows recent announcements on the dashboard.
-- Supports paginated announcement queries and detail views.
-- Renders announcement details as Markdown.
-- Cleans up related announcements when an upstream channel is deleted.
-- Supports retention-based announcement cleanup.
-- Supports channel-level `ignore_announcements`.
-
-### Notification Channels
-
-Supported notification channels:
-
-- Telegram
-- Webhook
-- Email
-- WeCom
-- DingTalk
-- Feishu
-- ServerChan3
-
-Notification channels support subscription filters:
-
-- Empty or `[]`: receive all events.
-- `mode=all`: receive all events from selected upstreams.
-- `mode=groups`: receive only selected rate groups for rate-related events. Announcement, balance, login failure, and monitor failure events are still filtered by upstream channel.
-
-### Upstream API Key Management
-
-From each channel card, you can manage upstream API keys:
-
-- List API keys.
-- Search by name or key.
-- Filter by status.
-- Create API keys.
-- Edit name, group, status, quota, expiration time, IP allowlist or blocklist, model restrictions, and related fields.
-- Delete API keys.
-- Reveal and copy full keys.
-- From the group overview, create an API key directly in a selected group or move one existing key from the same channel into that group.
-- Before moving a key, the target group is revalidated and a source-to-target confirmation is shown. Keys already in the target group remain visible but cannot be selected again.
-
-Available fields depend on the upstream type and its API capability.
-
-### Recharge and Redeem
-
-From each channel card, you can handle upstream recharge and redeem workflows:
-
-- Query upstream recharge configuration.
-- Supports upstream-provided payment methods such as Alipay and WeChat Pay.
-- Supports QR code, redirect URL, and form-submit payment launch modes.
-- Prefers QR code on desktop and redirect on mobile.
-- Redeems redeem codes online.
-- Shows returned balance, concurrency, group subscription, validity period, and related results.
-- Sub2API channels additionally support subscription purchase and renewal.
-
-### System Settings
-
-The system settings page manages:
-
-- Admin login authentication.
-- Admin username and password.
-- Token signing secret.
-- Balance sync cron.
-- Rate sync cron.
-- Scheduler concurrency.
-- Monitor log, balance snapshot, notification log, gateway usage, and announcement retention.
-- Rate change notification merge policy.
-- Minimum rate change percentage for notifications.
-- Low-balance alert cooldown.
-- Daily, weekly, and monthly subscription remaining percentage thresholds.
-- Subscription expiration threshold.
-- Subscription alert cooldown.
-- Maximum notification retry attempts.
-- Global proxy configuration.
-- Proxy connectivity test.
-- Version check result notification.
-- Upstream request timeout and `User-Agent`.
-- Request gateway runtime settings (`gateway` section: forward timeout, models cache, temp pause, batch concurrency, usage error truncation, and more).
-- Sub2API upstream synchronization targets and groups.
-- Notification channels.
-- Captcha providers.
-
-Saving writes the configuration file. Applying settings hot-reloads authentication, scheduler, notification policy, proxy, upstream HTTP, and gateway runtime settings. Notification channels and captcha providers take effect immediately after database writes.
-
-## Quick Start
-
-### Docker Compose with PostgreSQL
-
-PostgreSQL is the only production database mode. SQLite remains available to
-the migration helper and tests, but the server refuses to start with SQLite
-because its single-writer lock can stall gateway traffic.
+获取仓库并复制配置模板：
 
 ```bash
+git clone https://github.com/AI8888-SHOP/upstream-ops.git
+cd upstream-ops
 cp .env.example .env
 ```
 
-Edit `.env` and set at least:
+生成主密钥，将输出填入 `.env` 的 `APP_SECRET`：
 
-```env
-APP_SECRET=replace-with-a-random-string-at-least-32-bytes
+```bash
+openssl rand -hex 32
+```
+
+编辑 `.env`，替换以下占位值：
+
+```dotenv
+HTTP_PORT=8418
+IMAGE_REPOSITORY=ghcr.io/ai8888-shop/upstream-ops
+IMAGE_TAG=latest
+
+APP_SECRET=替换为上一步生成的随机字符串
+
 DATABASE_DRIVER=postgres
-DATABASE_HOST=postgres.example.internal
+DATABASE_HOST=替换为应用容器可访问的数据库地址
 DATABASE_PORT=5432
 DATABASE_USER=upstreamops
-DATABASE_PASSWORD=replace-with-database-password
+DATABASE_PASSWORD=替换为数据库密码
 DATABASE_NAME=upstreamops
 DATABASE_SSL_MODE=require
-```
 
-`APP_SECRET` is used to encrypt sensitive fields with AES-GCM, including upstream passwords, tokens, cookies, notification channel secrets, and captcha provider API keys. If you change it later, existing encrypted data cannot be decrypted.
-
-For public access, enable admin login:
-
-```env
 AUTH_ENABLED=true
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=replace-with-a-strong-password
+ADMIN_PASSWORD=替换为强密码
 ```
 
-Docker pulls `${IMAGE_REPOSITORY:-ghcr.io/ai8888-shop/upstream-ops}:${IMAGE_TAG:-latest}` by default, so no local compilation is required. Override `IMAGE_REPOSITORY` when mirroring the project to another registry. Configuration and data are stored in the host `data/` directory.
+`DATABASE_SSL_MODE` 应与数据库的 TLS 配置一致。对未启用 TLS 的可信内网数据库，可设为 `disable`。容器内的 `localhost` 指向应用容器自身；连接已有 PostgreSQL 容器时，应用需要加入它所在的 Docker 网络，并使用该网络内可解析的数据库服务名：
 
-Start:
+```dotenv
+DATABASE_NETWORK_NAME=替换为已有数据库网络名
+DATABASE_NETWORK_EXTERNAL=true
+```
+
+启动并检查：
 
 ```bash
+docker compose pull
 docker compose up -d
-```
-
-Default URL:
-
-```text
-http://localhost:8418
-```
-
-Check the container and health endpoint:
-
-```bash
 docker compose ps
 curl -fsS http://localhost:8418/healthz
 ```
 
-`HTTP_PORT` changes only the host mapping. The container and health check keep the original default port `8418`.
-
-Runtime system settings are still persisted to `data/config.yaml`, while
-application data, usage logs, quota, and settlement are stored in PostgreSQL.
-
-### Pin the Image Version
-
-The default image repository and tag come from `.env`:
-
-```env
-IMAGE_REPOSITORY=ghcr.io/ai8888-shop/upstream-ops
-IMAGE_TAG=latest
-```
-
-The `CI` workflow runs Go tests, native Linux/Windows/macOS builds, frontend checks, and a no-push Docker build for pull requests and every branch push. The existing `Publish Docker Image` workflow pushes to the current public repository's GHCR package only from `main`, a version tag, or a manual run. After the first fork release, make sure its Package visibility is public before relying on anonymous Docker pulls.
-
-Commit only `.env.example` to a public repository. Never commit `.env`, `data/`, `config.yaml`, `APP_SECRET`, upstream API keys, admin/database passwords, or runtime credentials to a workflow or README; publishing the image does not require those secrets.
-
-For production, pin a specific version:
-
-```env
-IMAGE_TAG=v0.0.33
-```
-
-## Legacy MySQL Deployments
-
-New server versions require PostgreSQL. The MySQL compose file is retained only
-for operators who need to inspect or migrate an older installation; it cannot
-start the current server because `DATABASE_DRIVER=mysql` is rejected.
+浏览器打开 `http://localhost:8418`，使用上面设置的后台账号登录。排查启动问题时运行：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d
+docker compose logs --tail=100 app
 ```
 
-Required `.env` values:
+默认镜像来自 GHCR，包含前端页面，无需本机编译。生产环境可将 `IMAGE_TAG` 固定为 [Releases](https://github.com/AI8888-SHOP/upstream-ops/releases) 中已发布的具体版本。
 
-```env
-APP_SECRET=replace-with-a-random-string-at-least-32-bytes
-MYSQL_DATABASE=upstreamops
-MYSQL_USER=upstreamops
-MYSQL_PASSWORD=replace-with-database-password
-MYSQL_ROOT_PASSWORD=replace-with-root-password
-MYSQL_PORT=33069
-```
+### 使用预编译二进制
 
-## High-load deployment and one-click upgrade
+从 [Releases](https://github.com/AI8888-SHOP/upstream-ops/releases) 下载对应系统与架构的安装包，并按同一发行版的 `SHA256SUMS` 校验。发行包覆盖 Linux、Windows、macOS 和 FreeBSD 的支持架构，包含主程序和迁移工具；可用文件以该发行版附件为准。
 
-Legacy SQLite deployments must be migrated to PostgreSQL before serving
-production traffic. PostgreSQL's connection pool lets usage queries, cooldown
-updates, and gateway settlement proceed without SQLite's single-writer queue.
-Redis remains optional cache/lock infrastructure and is not used as the
-accounting source of truth.
-
-### Upgrade an older Docker installation
-
-Download the `upstream-ops-upgrade-kit-<version>` asset from the GitHub Release
-and extract it outside the live deployment directory. The kit contains the
-helpers and Compose templates, but never contains `.env`, `data/`, or secrets.
-For the complete path-based guide, see [`docs/UPGRADE.md`](docs/UPGRADE.md).
-
-For a normal image upgrade that keeps the existing database, run the guided
-helper with the live deployment paths:
+解压后，通过进程环境变量或 `config.yaml` 设置前面的 PostgreSQL、主密钥与后台登录参数，再启动：
 
 ```bash
-chmod +x scripts/upgrade.sh
-TARGET_TAG=v0.0.33 ./scripts/upgrade.sh
+./upstream-ops -config ./data/config.yaml
 ```
 
-On Windows PowerShell:
+Windows 使用 `upstream-ops.exe`。原生程序不会自动加载 Docker Compose 的 `.env`；请由 shell 或服务管理器注入环境变量，或使用 YAML 配置。配置字段见 [详细手册](README.zh.md)。
 
-```powershell
-.\scripts\upgrade.ps1 -TargetTag v0.0.33
-```
+### 数据与配置
 
-The helper defaults to `ghcr.io/ai8888-shop/upstream-ops` as the image
-repository. Set `IMAGE_REPOSITORY` in the live `.env` when using a fork or
-private mirror. It also writes `docker-compose.upstream-ops-image.yml` beside
-the first Compose file and persists that override in `COMPOSE_FILE`, so a later
-plain `docker compose up` cannot fall back to an old hard-coded image.
+| 位置或变量 | 用途 |
+| --- | --- |
+| PostgreSQL | 保存业务数据、网关使用记录、配额和结算信息。 |
+| `data/config.yaml` | Docker 部署中持久化到宿主机的应用配置文件。 |
+| `.env` | Compose 的部署参数，包含数据库连接、主密钥和后台登录设置。 |
+| `APP_SECRET` | 解密已保存的敏感字段；升级和迁移时必须保持一致。 |
+| `AUTH_ENABLED` | 控制后台登录；模板默认关闭，公网部署应按上面的示例开启。 |
 
-The helper backs up `data/` and `.env`, gives the old image an immutable local
-rollback tag, pulls the target image, waits for the container health check,
-and persists the target `IMAGE_TAG` to `.env`. It restores the rollback image
-when startup or health verification fails. Set `HEALTH_URL`,
-`HEALTH_TIMEOUT_SECONDS`, `COMPOSE_FILE`, `COMPOSE_EXTRA_FILES`, or `SERVICE`
-for a non-default installation. For MySQL, include
-`COMPOSE_EXTRA_FILES=docker-compose.mysql.yml` (PowerShell uses
-`-ComposeExtraFile`). Keep the generated `backups/` directory until the new release
-has passed a complete request and billing check.
+备份时同时保留数据库、`.env` 和 `data/`。只备份 `data/` 不包含 PostgreSQL 业务数据；更换 `APP_SECRET` 会导致既有加密凭据无法解密。公网访问建议通过 HTTPS 反向代理接入。
 
-### Migrate a high-load SQLite installation
+## 网关接入
 
-Create a new empty PostgreSQL database and set these values in `.env`:
+### 在后台完成配置
 
-```env
-DATABASE_HOST=postgres.example.internal
-DATABASE_PORT=5432
-DATABASE_USER=upstreamops
-DATABASE_PASSWORD=replace-with-database-password
-DATABASE_NAME=upstreamops
-DATABASE_SSL_MODE=require
-```
+1. **添加来源**：在上游管理中添加 NewAPI / Sub2API 渠道，或在请求网关中添加直连 Provider。
+2. **创建网关分组**：添加路由，选择源分组、设置有效计费倍率、模型映射和模型列表。
+3. **检查上游密钥与模型**：监控渠道可创建或复用上游专用密钥；使用模型同步、预览和探测确认路线可用。
+4. **设置调度与预算**：按业务选择策略，设置倍率上限、重试、顺延、总尝试次数和首字等待时间。
+5. **创建网关 API Key**：绑定对应分组，将网关地址和密钥填入客户端。
 
-For an old Docker/SQLite deployment that also needs the database migration, run
-the PostgreSQL helper from the kit with explicit live deployment paths:
+后台登录凭据、上游 API Key、客户端使用的网关 API Key 各有用途。客户端应使用**网关 API Key**，不能用后台登录 Token 代替。
+
+### 常用接口
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /v1/models` | 获取当前网关密钥可见的模型列表。 |
+| `POST /v1/chat/completions` | OpenAI Chat 兼容请求。 |
+| `POST /v1/responses` | OpenAI Responses 兼容请求，支持流式处理。 |
+| `POST /v1/messages` | Anthropic Messages 兼容请求。 |
+| `POST /v1/messages/count_tokens` | Anthropic Token 计数接口。 |
+| `GET /v1/usage` | 查询当前网关密钥的用量信息。 |
+
+常用鉴权方式为 `Authorization: Bearer <网关密钥>` 或 `x-api-key: <网关密钥>`。其他兼容路径和管理接口见 [网关详细说明](README.zh.md#请求网关使用说明)。
+
+以下示例假设已在当前 shell 设置 `GATEWAY_API_KEY` 和 `MODEL_NAME`；模型名应取自当前分组的模型列表：
 
 ```bash
-chmod +x /tmp/upstream-ops-upgrade-kit-v0.0.33/scripts/upgrade-to-postgres.sh
-ENV_FILE=/srv/upstream-ops/.env DATA_DIR=/srv/upstream-ops/data \
-COMPOSE_FILE=/srv/upstream-ops/docker-compose.yml \
-POSTGRES_COMPOSE_FILE=/tmp/upstream-ops-upgrade-kit-v0.0.33/docker-compose.postgres.yml \
-TARGET_TAG=v0.0.33 MIGRATION_IMAGE_TAG=v0.0.33 \
-/tmp/upstream-ops-upgrade-kit-v0.0.33/scripts/upgrade-to-postgres.sh
+curl http://localhost:8418/v1/models \
+  -H "Authorization: Bearer ${GATEWAY_API_KEY}"
+
+curl http://localhost:8418/v1/chat/completions \
+  -H "Authorization: Bearer ${GATEWAY_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"${MODEL_NAME}\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false}"
 ```
 
-On Windows PowerShell:
+网关支持 OpenAI Chat、OpenAI Responses、Anthropic Messages 之间的 JSON 与 SSE 协议转换。图片、视频、Embedding 等接口按相应兼容路径转发，具体功能仍需上游支持；协议转换不意味着所有模型能力完全等价。
 
-```powershell
-.\scripts\upgrade-to-postgres.ps1 `
-  -ComposeFile 'D:\upstream-ops\docker-compose.yml' `
-  -PostgresComposeFile 'C:\Temp\upstream-ops-upgrade-kit-v0.0.33\docker-compose.postgres.yml' `
-  -EnvFile 'D:\upstream-ops\.env' -DataDir 'D:\upstream-ops\data' `
-  -TargetTag 'v0.0.33' -MigrationImageTag 'v0.0.33'
-```
+## 调度与故障处理
 
-The helper validates both Compose files and the external network before stopping
-the old service, pulls the same target image used by the migration tool and the
-new app, backs up `data/` and `.env`, refuses a populated target, copies all
-compatible tables (including schemas from older releases), and waits for
-`/healthz` before completing. On success it persists `DATABASE_DRIVER=postgres`,
-`IMAGE_TAG`, and a generated Compose override so a normal restart does not
-switch back to SQLite. A migration or health failure restores the immutable old
-image. Keep the backup until usage, billing, and gateway requests have been
-verified. The helper copies the SQLite database and any WAL/SHM sidecars into a
-writable temporary snapshot before migration and removes that snapshot on every
-exit. Set `MIGRATION_TIMEOUT_SECONDS` (PowerShell:
-`-MigrationTimeoutSeconds`) for a larger database; the default is 30 minutes.
+### 三种选路策略
 
-The migration helper uses the repository's `latest` image by default so an old
-deployment does not accidentally run a version without
-`upstream-ops-migrate`. Override it with `IMAGE` (PowerShell `-Image`) or
-`MIGRATION_IMAGE_TAG` (PowerShell `-MigrationImageTag`) when using a private
-registry or a pinned release. `TARGET_TAG` is used for both the migration
-binary and the new app when provided; otherwise `MIGRATION_IMAGE_TAG` supplies
-both.
+| 策略 | 适用方式 |
+| --- | --- |
+| 倍率优先 `cost` | 按既有倍率顺序、权重与会话亲和规则调度。 |
+| 均衡 `balanced` | 优先选择达到首字目标、失败率较低的便宜来源；没有达标来源时按综合等待评分选择。 |
+| 首字优先 `latency` | 在允许的倍率范围内，结合近期首字均值、近似 P90、失败率、失败等待与当前负载选择线路。 |
 
-For a MySQL installation, keep both Compose files in the upgrade command;
-PowerShell accepts repeated `-ComposeExtraFile` values and Bash accepts
-`COMPOSE_EXTRA_FILES=docker-compose.mysql.yml`.
+动态策略目前用于**流式文本请求**；非流式、图片、视频和实时连接沿用原调度方式。策略受分组最大计费倍率和动态策略的允许溢价约束，候选失败后不会自动突破本次倍率预算。
 
-## Environment Variables
+速度统计在进程内维护，重启后重新学习，多实例间不共享。使用记录中的“调度依据”可以查看当时的样本数、统计窗口、倍率、失败情况和负载。配置与统计口径见 [首字调度说明](docs/scheduler-ttft.md)。
 
-### Basic
+### 故障切换与次数预算
 
-```env
-HTTP_PORT=8418
-IMAGE_REPOSITORY=ghcr.io/ai8888-shop/upstream-ops
-IMAGE_TAG=latest
-SERVER_MODE=release
-LOG_LEVEL=info
-```
+- 网络错误、429、5xx，以及可识别的模型不存在、上游凭据失效或余额不足错误，可按配置重试或切换来源。普通参数错误默认不会向所有上游重复发送。
+- 启用普通顺延且存在其他候选时，优先尝试未使用的来源，减少反复请求同一坏源。
+- **总尝试次数包含首次请求、重试、顺延和并发兜底。** 总上限设为 2 时，即使允许顺延 8 次，也最多发起 2 次尝试。
+- 单次首字超时用于快速换源；整个请求的首字总预算还包含入口准备、排队、失败尝试与校验等待。最后一个候选同样受总预算约束。
+- 所有候选不可用、额度不足或预算耗尽时，网关会返回失败。路由只能利用已有可用来源，不能保证所有请求成功。
 
-- `HTTP_PORT`: host port.
-- `IMAGE_REPOSITORY`: GHCR image path; set this to the public fork's package.
-- `IMAGE_TAG`: Docker image tag.
-- `SERVER_MODE`: Gin mode, usually `release`.
-- `LOG_LEVEL`: log level.
+### 响应校验与并发兜底
 
-### Database
+按需启用响应内容规则、响应模型核查和零用量校验，识别不符合分组要求的返回。流式内容校验使用提交前的前缀缓冲；有效内容已经交付后，不能再无缝替换成另一条回答。
 
-The server accepts PostgreSQL only:
+并发兜底（Hedging）默认关闭：主请求超过配置等待时间后启动备选，首个通过校验的结果胜出，取消仍在运行的其他尝试。图片、视频和实时请求不参与这类竞速。**取消请求不保证上游不计费**，开启前应结合总尝试次数、并发上限和使用记录评估额外成本。
 
-```env
-DATABASE_DRIVER=postgres
-DATABASE_HOST=postgres.example.internal
-DATABASE_PORT=5432
-DATABASE_USER=upstreamops
-DATABASE_PASSWORD=change-me
-DATABASE_NAME=upstreamops
-DATABASE_SSL_MODE=require
-DATABASE_MAX_OPEN_CONNS=32
-DATABASE_MAX_IDLE_CONNS=8
-```
+可选的并发虚拟缓存折扣属于网关计费策略，不代表上游发生了真实缓存命中；使用记录保留各次尝试的原始费用和额外成本，便于核对。
 
-PostgreSQL is the durable primary store for configuration, usage, quota, and
-settlement. Redis can be added later for short-lived cache or locks, but must
-not replace these records.
+## 使用记录与排障
 
-The MySQL driver remains in the storage and migration code for legacy data
-handling, but the server rejects `DATABASE_DRIVER=mysql`. Migrate legacy
-deployments to PostgreSQL before upgrading.
+遇到慢请求或 502 / 503 时，先按请求 ID 查看完整尝试链：哪些来源被尝试、是否切换、何时失败、哪个结果最终交付，再结合分组的次数、倍率和时间预算判断原因。
 
-### Security and Login
+- **用户等待**：优先查看请求级首字时间，它包含前面失败与换源消耗的时间；单次尝试首字只衡量该次尝试。
+- **失败原因**：查看上游状态码、错误详情、响应模型、校验规则与冷却状态。
+- **实际费用**：区分最终交付费用、各次上游尝试费用、真实缓存与虚拟缓存折扣。
+- **历史记录**：没有请求级耗时字段的旧记录仍使用尝试口径，不宜直接混算为用户首字体验。
 
-```env
-APP_SECRET=please-change-me-to-a-long-random-secret-32bytes-min
-AUTH_ENABLED=false
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=
-AUTH_TOKEN_SECRET=
-```
+健康检查使用 `/healthz`，会同时检查数据库连接；版本信息使用 `/api/version`，启用后台登录时需携带管理端凭据。健康检查通过不代表每条上游线路或每个模型都可用。
 
-- `APP_SECRET`: required master secret.
-- `AUTH_ENABLED`: enables admin login.
-- `ADMIN_USERNAME`: admin username.
-- `ADMIN_PASSWORD`: admin password.
-- `AUTH_TOKEN_SECRET`: token signing secret. Falls back to `APP_SECRET` when empty.
+## 升级与回退
 
-## Local Development
+升级前备份 PostgreSQL、`.env` 和 `data/`，保留原 `APP_SECRET`，并核对目标版本的发行说明。旧 SQLite 部署可使用仓库的迁移工具迁往空 PostgreSQL 数据库；旧 MySQL 部署也需先完成到 PostgreSQL 的数据迁移，不能直接套用 SQLite 迁移脚本。
 
-Backend:
+- **已有 PostgreSQL 的 Docker 部署**：使用 [升级脚本说明](docs/UPGRADE.md)，或按现有 Compose 配置升级镜像。文档中的旧版本号是示例，目标应选用实际发布的版本。
+- **网页升级与回退**：先启用后台登录并配置独立更新服务，支持 Docker Compose 与 Linux systemd 部署，见 [自动升级说明](docs/AUTO_UPDATE.md)。
+- **旧 SQLite 部署**：参阅 [迁移步骤](docs/UPGRADE.md#3-sqlite-to-postgresql-migration)，迁移后验证健康检查、网关请求、用量与结算。
 
-```bash
-go run ./cmd/server
-```
+升级工具的 `data/` 备份和旧镜像恢复不能替代 PostgreSQL 数据库备份。回退程序也不等于回退数据库结构与数据，回退前应核对版本兼容性。
 
-Default backend port:
+## 文档与项目结构
 
-```text
-8418
-```
+| 入口 | 内容 |
+| --- | --- |
+| [中文详细手册](README.zh.md) | 完整配置、通知渠道、订阅、上游同步、管理 API 和常见问题。 |
+| [首字调度说明](docs/scheduler-ttft.md) | 动态选路、请求预算、统计口径与边界。 |
+| [升级指南](docs/UPGRADE.md) | Docker 升级、SQLite 迁移、备份与恢复。 |
+| [网页升级与回退](docs/AUTO_UPDATE.md) | 独立更新服务的 Docker / systemd 配置。 |
+| [backend/](backend) | 网关转发、上游连接、监控、通知与数据存储。 |
+| [frontend/](frontend) | 管理界面。 |
+| [cmd/](cmd) | 服务和迁移工具入口。 |
+| [scripts/](scripts) | 升级、迁移与运维脚本。 |
 
-Frontend:
+## 致谢与许可
 
-```bash
-cd frontend
-pnpm install
-pnpm dev
-```
+本项目基于 [worryzyy/upstream-hub](https://github.com/worryzyy/upstream-hub) 二次开发，感谢原作者 [@worryzyy](https://github.com/worryzyy) 的开源工作。
 
-Default frontend development URL:
-
-```text
-http://127.0.0.1:3010
-```
-
-Checks:
-
-```bash
-go test ./...
-```
-
-```bash
-cd frontend
-pnpm lint
-pnpm exec tsc --noEmit --incremental false
-pnpm build
-```
-
-## Proxy and Upstream HTTP Settings
-
-System settings can configure global proxy and upstream request settings. Proxy is disabled by default, protocol defaults to `http`, upstream timeout defaults to `30` seconds, and `User-Agent` defaults to `upstream-ops/0.1`.
-
-Configuration fields:
-
-```yaml
-proxy:
-  enabled: false
-  versionCheckEnabled: false
-  protocol: http
-  host: 127.0.0.1
-  port: 7890
-  username: ""
-  password: ""
-
-upstream:
-  timeoutSeconds: 30
-  userAgent: upstream-ops/0.1
-
-gateway:
-  tempPauseSeconds: 30
-  forwardTimeoutSeconds: 600
-  modelsCacheTTLSeconds: 60
-  maxFailoverSwitches: 8
-  routeBatchConcurrency: 8
-  usageErrorBodyBytes: 32768
-  usageErrorMsgRunes: 500
-  usageErrorHeaderValueRunes: 8192
-  usageErrorHeadersJSONBytes: 65536
-  # Cache protection is disabled by default; set all three controls > 0 to enable.
-  cacheHitRateWindowMinutes: 0
-  cacheHitRateThresholdPercent: 0
-  cacheHitRateBlacklistMinutes: 0
-  cacheHitRateMinimumRequests: 10
-  modelCooldownProbeEnabled: true
-  modelCooldownProbeIntervalMinutes: 5
-  modelCooldownProbeTimeoutSeconds: 10
-  modelCooldownProbeConcurrency: 2
-  modelCooldownProbeMaxBackoffMinutes: 60
-  hedge:
-    enabled: false
-    delaySeconds: 10
-    maxParallel: 2
-    maxAttempts: 4
-  responseValidation:
-    enabled: false
-    streamMode: prefix
-    prefixBytes: 8192
-    prefixTimeoutMs: 2000
-```
-
-- `proxy.enabled`: enables global proxy.
-- `proxy.versionCheckEnabled`: routes version checks through proxy.
-- `proxy.protocol`: `http`, `https`, or `socks5`.
-- `proxy.host` / `proxy.port`: proxy host and port.
-- `proxy.username` / `proxy.password`: optional proxy authentication.
-- `upstream.timeoutSeconds`: upstream request timeout.
-- `upstream.userAgent`: upstream request `User-Agent` (also the default UA fallback for gateway admin model pull / probe).
-- `gateway.*`: request-gateway runtime knobs plus the hedge / response-validation defaults for new groups; hot-reloadable from system settings without overwriting policies on existing groups.
-- When `proxy.enabled=false`, per-channel `proxy_enabled` settings do not take effect.
-
-Proxy test endpoint:
-
-```text
-POST /api/settings/proxy/test
-```
-
-## Upstream Channel Configuration
-
-Upstream channels can enable `proxy_enabled` individually. Upstream login, balance sync, rate sync, announcement sync, API key management, recharge, redeem, and subscription APIs use proxy only when both global proxy and channel proxy are enabled.
-
-Channel-level conversions are configured in the channel form or channel create/update API:
-
-- `recharge_multiplier` / `recharge_multiplier_mode`: converts balance, spending, and redeem values.
-- `group_multiplier` / `group_multiplier_mode`: converts upstream model/group rates and API Key group ratios.
-- A missing or non-positive multiplier preserves the upstream value. `divide` means `upstream / value`; `multiply` means `upstream × value`. Results use the same four-decimal rounding as recharge conversion.
-- Group conversion runs before a Sub2API synchronization account or gateway route applies its own rate conversion, so the two configured factors are applied in sequence exactly once.
-
-### NewAPI
-
-NewAPI supports two credential modes.
-
-Username/password mode:
-
-- Provide upstream site URL, username, and password.
-- If the login endpoint requires extra fields, provide a JSON object in extra form parameters.
-- If Turnstile is enabled, configure a captcha provider first, then enable Turnstile in the channel.
-
-Newer NewAPI builds (QuantumNous/new-api and forks) issue short-lived `access_token` Bearer JWTs (default 15 minutes) at login and return a `new_api_refresh` refresh token. UpstreamOps automatically calls `/api/user/auth/refresh` to renew the access token and rotate the refresh token before it expires, so frequent re-login is not needed. Older NewAPI builds still authenticate via `Set-Cookie: session=...` plus the `New-Api-User` header; the connector auto-detects and supports both.
-
-Token/cookie mode:
-
-```json
-{
-  "cookie": "session=xxx; other=yyy",
-  "user_id": "123"
-}
-```
-
-NewAPI token mode also supports the system access token (`user.access_token`, the 32 character token generated from the personal settings page). Use `access_token` instead of `cookie`. Cookie and access token are mutually exclusive, but `user_id` is always required:
-
-```json
-{
-  "access_token": "your-system-access-token",
-  "user_id": "123"
-}
-```
-
-When editing a NewAPI token/cookie channel, the form shows the saved `user_id` for reuse, while the saved cookie or access token remains hidden.
-
-### Sub2API
-
-Sub2API supports username/password mode and token mode.
-
-Token mode credentials:
-
-```json
-{
-  "access_token": "your-access-token",
-  "refresh_token": "your-refresh-token"
-}
-```
-
-`refresh_token` is optional but recommended. When present, Sub2API sessions and token-mode credentials can be refreshed automatically after access-token expiration. Without `refresh_token`, paste updated credentials when the token expires.
-
-### Clear Login Information
-
-The channel card menu provides a clear-login action:
-
-- Password mode: clears only cached login sessions.
-- Token mode: clears cached sessions and the saved token/cookie credential JSON.
-
-## Notification Channel Configuration
-
-Notification secrets, webhooks, and SMTP passwords are encrypted at rest. Add or edit a notification channel with the JSON configuration matching its type.
-
-Notification channels can enable `proxy_enabled` individually. Telegram, Webhook, WeCom, DingTalk, Feishu, and ServerChan3 requests use proxy only when both global proxy and notification-channel proxy are enabled.
-
-### Telegram
-
-```json
-{
-  "bot_token": "1234567890:AAEh...",
-  "chat_id": "-1001234567890"
-}
-```
-
-### Webhook
-
-```json
-{
-  "url": "https://example.com/hook",
-  "method": "POST",
-  "headers": {
-    "Authorization": "Bearer xxx"
-  }
-}
-```
-
-Webhook body example:
-
-```json
-{
-  "event": "announcement",
-  "subject": "[UpstreamOps] xxx",
-  "body": "notification body",
-  "extra": {}
-}
-```
-
-### Email
-
-```json
-{
-  "host": "smtp.example.com",
-  "port": 465,
-  "use_tls": true,
-  "username": "alert@example.com",
-  "password": "smtp-password-or-app-password",
-  "from": "alert@example.com",
-  "to": ["ops@example.com"]
-}
-```
-
-### WeCom
-
-```json
-{
-  "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"
-}
-```
-
-### DingTalk
-
-```json
-{
-  "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=xxx",
-  "secret": "SEC..."
-}
-```
-
-### Feishu
-
-```json
-{
-  "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx",
-  "secret": "..."
-}
-```
-
-### ServerChan3
-
-```json
-{
-  "uid": "your UID",
-  "sendkey": "sctp_xxx"
-}
-```
-
-Messages are sent through `https://{uid}.push.ft07.com/send/{sendkey}.send`.
-
-## Subscription Rules
-
-Notification channels can limit which upstreams, events, or rate groups they receive. Empty value, empty string, `null`, or `[]` means all upstreams and all events.
-
-```json
-[
-  { "channel_ids": [1, 2], "mode": "all" },
-  { "channel_ids": [3], "mode": "groups", "groups": ["default", "pro"], "events": ["rate_changed"] },
-  { "channel_ids": [4], "mode": "all", "events": ["announcement", "monitor_failed"] }
-]
-```
-
-- `channel_ids`: upstream channel ID list. Historical `channel_id` single-value rules are still accepted.
-- `events`: event type list. Empty means all events for that upstream.
-- `mode=all`: receive all rate groups.
-- `mode=groups`: receive only selected groups for rate-related events.
-
-## Notification Event Types
-
-- `balance_low`: balance below threshold.
-- `rate_changed`: rate changed.
-- `rate_structure_changed`: group structure changed.
-- `rate_added`: group added. Kept for historical compatibility.
-- `rate_removed`: group removed. Kept for historical compatibility.
-- `announcement`: new upstream announcement.
-- `login_failed`: login failed.
-- `captcha_failed`: captcha solving failed.
-- `monitor_failed`: balance, spending, or rate collection failed.
-- `subscription_daily_remaining_low`: daily subscription remaining quota below threshold.
-- `subscription_weekly_remaining_low`: weekly subscription remaining quota below threshold.
-- `subscription_monthly_remaining_low`: monthly subscription remaining quota below threshold.
-- `subscription_expiring`: subscription is about to expire.
-- `upstream_sync_group_changed`: a Sub2API synchronization group or managed account changed.
-
-## Request Gateway Guide
-
-The request gateway aggregates multiple upstreams (monitored NewAPI/Sub2API channels, or direct Providers maintained inside the gateway) into a unified OpenAI / Anthropic / Responses–compatible entry. Clients hold a single **gateway key**; real upstream secrets, billing multipliers, protocol conversion, and failover are handled server-side.
-
-### Concepts
-
-| Concept | Description |
-|---------|-------------|
-| **Group** | Configuration unit: route table, group-level model map, model list, retry / failover / cooldown / first-token timeout, hedging, response validation, group UA, and an optional maximum billing multiplier |
-| **Key** | Client auth credential bound to a group; supports quota and IP allow/deny lists; plaintext is shown only on create/reveal |
-| **Route** | A schedulable upstream target: monitor channel + source group, or a direct Provider; weight, ratio conversion, protocol, UA policy |
-| **Provider** | Gateway-managed base URL + API key + default billing ratio; no need to create a monitor channel first |
-| **Model map** | Client model name → upstream model name; group and route maps stack (route first, then group); `"*"` wildcard supported |
-| **Model list** | Exposed via `/v1/models`; modes: `auto` / `manual` / `hybrid` |
-
-### Recommended setup
-
-1. **Prepare upstreams**
-   - Option A: an existing monitored NewAPI/Sub2API channel and the source group to use.
-   - Option B: create a **Provider** on the gateway page (base URL, key, protocol, default billing ratio).
-2. **Create a gateway group**
-   Sort direction (ratio asc/desc), reorder-after-scan, retry/failover, and optional first-token timeout, hedging, regex response validation, group UA, and a maximum billing multiplier. Set the maximum to `0` to disable the guard; routes whose effective billing multiplier is higher are excluded from scheduling automatically.
-3. **Add routes**
-   Choose monitor or provider; set weight, ratio conversion, `upstream_protocol`, UA mode; optionally **Ensure upstream keys** (monitor routes only).
-4. **Models**
-   Configure group/route maps; use Preview / Sync / Probe to maintain the model list.
-5. **Response rules (optional)**
-   On the group's **Response rules** tab, create Go RE2 patterns, choose an inspection target, and optionally filter models/protocols; then enable regex response validation in **Edit group**.
-6. **Create a gateway key**
-   Give clients the plaintext `sk-...` (shown once; use **Reveal** later).
-7. **Client**
-   Base URL points at this service (e.g. `http://host:8418`), paths under `/v1/...`, auth as below.
-
-### Client authentication
-
-```http
-Authorization: Bearer sk-...
-```
-
-or:
-
-```http
-x-api-key: sk-...
-```
-
-Rules:
-
-- Key must be **active**; its group must be **active**.
-- If an IP allowlist is set, the request IP must match; if a denylist is set, a match rejects the request.
-- If `quota > 0`, requests are rejected when `quota_used >= quota`.
-- Auth failures return an error body shaped for the client protocol (OpenAI / Anthropic).
-
-### Public endpoints (no admin login)
-
-These paths are registered by the gateway and use a **gateway key** (separate from admin `/api/*`):
-
-| Category | Paths |
-|----------|--------|
-| Discovery | `GET /v1` (also `GET /` when SPA is off) returns endpoint list |
-| Models | `GET /v1/models`; Codex `GET /backend-api/codex/models`; Gemini `GET /v1beta/models` |
-| Chat | `POST /v1/chat/completions`, `POST /v1/completions`; alias `POST /chat/completions` |
-| Responses | `POST /v1/responses`, `POST /v1/responses/*`; aliases `/responses`, `/backend-api/codex/responses` |
-| Anthropic | `POST /v1/messages`, `POST /v1/messages/count_tokens`; Antigravity prefix same as Messages |
-| Passthrough | embeddings / images / videos / alpha, etc.: rewrite model then forward upstream path (no chat↔messages conversion) |
-| Usage | `GET /v1/usage` (gateway key) |
-
-Streaming: body `stream: true` (or equivalent) uses SSE. Chat streams try to force `stream_options.include_usage` so the final frame can report usage.
-
-### Request flow (summary)
-
-```text
-Client → auth (key / IP / quota) → read body → take model
-       → order schedulable routes by group policy
-       → start primary immediately; hedge may start other routes after its delay
-       → each attempt: model map → protocol conversion → upstream HTTP → validation
-       → first valid result becomes winner; cancel unfinished losers; deliver to client
-       → regex match retries the current route first, then switches routes per policy
-       → record every attempt; all failed → return last error
-```
-
-### Protocols and conversion
-
-| Inbound (client) | Upstream (route) | Behavior |
-|------------------|------------------|----------|
-| Chat | Chat | Same shape; stream may inject include_usage |
-| Chat | Anthropic | body + path convert; SSE incremental or buffered |
-| Chat | Responses | convert to `/v1/responses` |
-| Anthropic | Anthropic | Same shape |
-| Anthropic | Chat / Responses | Cross-convert |
-| Responses | Chat / Anthropic / Responses | Cross-convert or same shape |
-| embeddings etc. | any | No chat/messages semantics; model rewrite only |
-
-Route field `upstream_protocol`:
-
-- `auto`: Claude-like model names → Anthropic; otherwise follow inbound (Chat inbound does **not** silently upgrade to Responses)
-- `openai` / `openai_chat`: upstream Chat Completions
-- `openai_responses`: upstream Responses
-- `anthropic`: upstream Messages
-
-### Scheduling and billing ratio
-
-- Only **enabled** routes not inside a temporary pause window are scheduled.
-- Order: effective ratio (group direction asc/desc) → weight → position.
-- Effective ratio (aligned with monitor account sync logic):
-  1. `custom` → use custom value
-  2. if source group matches → live ratio with raw / ×100 / ÷100 conversion
-  3. else stored “account billing ratio” on the route
-  4. else conversion default
-- A group's optional `max_billing_rate_multiplier` guard uses the same effective ratio. `0` disables it; a route above the limit is automatically excluded from scheduling and model discovery. The derived auto-disabled marker is separate from the route's manual `enabled` setting, and is cleared when the ratio returns within the limit.
-- When the group enables reorder-after-ratio-scan, ratio scan rewrites route order and billing-ratio snapshots for related groups.
-- Cost: `base_cost` from model unit price × token buckets; `actual_cost = base_cost × account billing ratio` (multiplied once).
-
-### Failover, hedging, and response validation
-
-- Default failover: no response, 429, 5xx, and model-unavailable, invalid upstream key or insufficient-balance failures recognized inside explicit `error` / `response.error` envelopes. Group retry/failover switches and budgets still apply. With “failover on 4xx”, other 4xx may fail over too; ordinary caller errors are not retried by default and assistant text/tool arguments are not scanned.
-- Failed routes may get a temporary not-schedulable deadline (cooldown seconds from `gateway.tempPauseSeconds` / group config).
-- Automatic cooldown is isolated by route and final upstream model, so a failure for one model does not pause the channel for other models. Model aliases that resolve to the same upstream model share the cooldown; the management "clear pause" action clears all model cooldowns for that route.
-- The route page shows model cooldowns and cache-health blacklist deadlines/reasons for each concrete source group, with actions to release route cooldowns or one route's cache restriction early. A manual cache release suppresses re-blacklisting for one complete statistics window.
-- Group: `retry_count`, `response_validation_retry_count`, `failover_max`, `cooldown_seconds`. With ordinary failover enabled, untried alternatives take priority and a failed source is not revisited after electing to switch away. Without an alternative, `response_validation_retry_count` controls extra attempts on the same route after a pre-commit regex rejection; `-1` inherits `retry_count`, while `0` disables only regex-triggered retries. `request_max_attempts` caps all actual attempts including the first, regardless of a larger `failover_max`.
-- **First-token timeout**: enabled only when another route can still be tried; the last candidate turns first-token cut-off off so a pointless timeout is avoided.
-- **Hedging (off by default)**: the primary starts immediately. If no attempt has produced a validated response after `hedge_delay_seconds`, other routes start on the delay ladder. `hedge_max_parallel` includes the primary; `hedge_max_attempts` is the total request budget. The first validated result wins and unfinished requests are canceled.
-- Image generation, video generation, and Realtime/WebSocket operations always use the original sequential policy. Multimodal text requests that only include images as input are not excluded.
-- **Regex response validation (off by default)** uses Go RE2 syntax and checks rules in ascending numeric priority. Targets are `assistant_text` (client-visible text after protocol conversion), `raw_body`, and `error_message`. Empty model/protocol filters match all values; `*` / `?` globs are supported.
-- A non-stream response is checked in full before delivery. A match records the attempt as `regex_reject` / `rejected`. With ordinary failover enabled, untried alternatives take priority; otherwise the current route uses `response_validation_retry_count` (or `retry_count` when it is `-1`) before moving through the validation route budget.
-- Streaming uses the fixed `prefix` mode: buffer at most `response_validation_prefix_bytes` or wait `response_validation_prefix_timeout_ms` before first commit. A match after commit cannot safely switch routes and is audit-only with the post-commit marker.
-- Once valid SSE has been committed to the client, the gateway does not switch routes (avoids half-stream dual responses).
-
-In the admin UI, configure hedge/validation switches and limits under **Request Gateway → Edit group**, and maintain regexes on the group's **Response rules** tab. The equivalent system settings are defaults copied only into newly created groups; saved groups keep their own policy.
-
-### Model list modes
-
-- `auto`: mainly dedupe-merge of each route’s upstream `/models` sync.
-- `manual`: hand / custom list wins.
-- `hybrid`: merge sync results with custom entries.
-Admin UI: Preview / Sync / probe-by-model. Public `GET /v1/models` uses a short TTL cache (`gateway.modelsCacheTTLSeconds`).
-
-### User-Agent
-
-Route `user_agent_mode`:
-
-- `passthrough`: do not rewrite client UA on the forward path
-- `group`: use group-level UA (empty → no rewrite)
-- `custom`: use route custom UA
-
-Admin model list / probe without a client UA falls back to `upstream.userAgent` or a built-in default when empty.
-
-### Request ID and troubleshooting
-
-- Each request gets a gateway-owned **X-Upstream-Ops-Request-Id** (24 hex chars) used to correlate usage rows. Client `X-Request-Id` is **not** used as the primary key (avoids replay pollution).
-- Client request-id headers are forwarded upstream as-is; the gateway response adds its own header without overwriting upstream/client `X-Request-Id`.
-- Usage page filters by request id, model, group, success/failure; failures store a truncated upstream error summary and redacted response headers.
-
-### Route sources: monitor vs direct Provider
-
-| | **Monitor route** | **Provider route** |
-|--|-------------------|--------------------|
-| Upstream | Monitored NewAPI/Sub2API channel + source group | Gateway Provider (base URL + key) |
-| Keys | **Ensure upstream keys** creates/reuses a dedicated source key | Provider’s own key; no ensure |
-| Billing ratio | Live source-group ratio + conversion | Provider default billing rate (or custom) |
-| Best for | Same channels as balance/rate monitoring | Ad-hoc or unmonitored direct APIs |
-
-A group may mix both route types; scheduling and failover rules are the same.
-
-### Usage and billing records
-
-Every primary / retry / failover / hedge / regex-rejection attempt (accepted, failed, rejected, or canceled) tries to write a usage row, field style aligned with sub2api for reconciliation:
-
-- Correlation: gateway request id, group, key, route, endpoint, inbound/upstream protocol
-- Tokens: prompt / completion / total, plus cache read/write buckets when the upstream reports them
-- Cost: `base_cost` (unit price × tokens), `actual_cost` (× account billing ratio once)
-- Latency: total latency, first-token latency (streaming)
-- Scheduling: `attempt`, `attempt_kind`, `attempt_status`, `winner`, matched response rule, and post-commit marker
-- Outcome: success / failure; failures store truncated upstream error summary and redacted headers
-- Extra cost: `estimated_cost` and `estimated_extra_cost` on loser/rejected attempts for upstream-cost reconciliation
-
-**A gateway key's `quota_used` increases exactly once, using only the successfully delivered winner's `actual_cost`.** Losers, regex rejections, cancellations, and terminal failures do not consume gateway quota, but their attempts and possible upstream costs remain available for audit. Request finalization is keyed by request id so concurrent completion or replay cannot settle twice; an all-failed request has no winner and charges zero quota.
-
-Admin UI: list filters, stats aggregation, model filter options, cleanup API. Clients may call `GET /v1/usage` with a gateway key (see actual response shape).
-
-### Compatibility paths
-
-Besides standard `/v1/*`, aliases and multi-product paths help point existing clients at this service:
-
-| Client-style path | Gateway behavior |
-|-------------------|------------------|
-| `/chat/completions`, `/embeddings` | Same as corresponding `/v1/...` Chat family |
-| `/responses`, `/backend-api/codex/responses` | Responses |
-| `/backend-api/codex/models` | Model list |
-| `/v1beta/models` (Gemini-style) | Model list compatibility |
-| `/antigravity/v1/messages`, `/antigravity/v1/models` | Anthropic Messages / models |
-
-Canonical list: `GET /v1` discovery payload at runtime.
-
-### Examples
-
-**Chat client → Claude upstream (route protocol anthropic)**
-
-```bash
-curl -s http://127.0.0.1:8418/v1/chat/completions \
-  -H "Authorization: Bearer sk-YOUR_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4",
-    "messages": [{"role":"user","content":"hi"}],
-    "stream": false
-  }'
-```
-
-**Anthropic client**
-
-```bash
-curl -s http://127.0.0.1:8418/v1/messages \
-  -H "x-api-key: sk-YOUR_GATEWAY_KEY" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4",
-    "max_tokens": 256,
-    "messages": [{"role":"user","content":"hi"}]
-  }'
-```
-
-**Responses client (streaming)**
-
-```bash
-curl -sN http://127.0.0.1:8418/v1/responses \
-  -H "Authorization: Bearer sk-YOUR_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o",
-    "input": "hi",
-    "stream": true
-  }'
-```
-
-**Model map JSON (group or route)**
-
-```json
-{
-  "gpt-4o": "gpt-4o-2024-11-20",
-  "claude-sonnet-4": "claude-sonnet-4-20250514",
-  "*": "gpt-4o-mini"
-}
-```
-
-Exact match first, then `"*"`. When group and route maps both apply, **route map first**, then group map.
-
-### Runtime config (`gateway` section)
-
-Editable in `config.yaml` or system settings; **hot-reloads after Apply** (no process restart). Base runtime values ≤0 fall back to built-in defaults. Cache protection is enabled only when all three duration/threshold controls are positive; any zero value disables it. `hedge` and `responseValidation` are defaults copied when a gateway group is created; they do not overwrite saved groups:
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `tempPauseSeconds` | 30 | Default route cooldown (temp not-schedulable) for new groups |
-| `forwardTimeoutSeconds` | 600 | Per-upstream forward / stream drain timeout (seconds) |
-| `modelsCacheTTLSeconds` | 60 | Public `GET /v1/models` cache TTL |
-| `maxFailoverSwitches` | 8 | Default max failover switches for new groups |
-| `routeBatchConcurrency` | 8 (cap 64) | Concurrency for batch probe / ensure / model sync |
-| `usageErrorBodyBytes` | 32768 | Max error body bytes stored on usage rows |
-| `usageErrorMsgRunes` | 500 | Max error summary runes |
-| `usageErrorHeaderValueRunes` | 8192 | Per error response-header value truncation |
-| `usageErrorHeadersJSONBytes` | 65536 | Max error headers JSON size |
-| `cacheHitRateWindowMinutes` | 0 (off) | Rolling real-upstream cache hit-rate window (minutes) |
-| `cacheHitRateThresholdPercent` | 0 (off) | Trigger protection below this hit-rate percentage |
-| `cacheHitRateBlacklistMinutes` | 0 (off) | Minutes to pause the affected source group route |
-| `cacheHitRateMinimumRequests` | 10 (default/minimum) | Configurable in Settings; successful requests required before auto-blacklisting. Minimum 10 prevents cold-start false positives |
-| `modelCooldownProbeEnabled` | true | Probe a model shortly before its error cooldown expires; a successful probe restores it without a local gateway usage row |
-| `modelCooldownProbeIntervalMinutes` | 5 | Base retry interval after a failed probe; consecutive failures use exponential backoff |
-| `modelCooldownProbeTimeoutSeconds` | 10 | Independent timeout for one probe (seconds) |
-| `modelCooldownProbeConcurrency` | 2 | Maximum concurrent model cooldown probes (1-16) |
-| `modelCooldownProbeMaxBackoffMinutes` | 60 | Maximum retry backoff after consecutive failures (minutes) |
-| `hedge.enabled` | false | Enable hedging by default for new groups |
-| `hedge.delaySeconds` | 10 | Delay ladder for launching additional attempts (0.1-300 seconds) |
-| `hedge.maxParallel` | 2 | Concurrent attempts including the primary (1-32) |
-| `hedge.maxAttempts` | 4 | Total attempt budget (1-64 and not less than `maxParallel`) |
-| `responseValidation.enabled` | false | Enable regex response validation by default for new groups |
-| `responseValidation.streamMode` | `prefix` | Streaming validation mode; currently fixed to `prefix` |
-| `responseValidation.prefixBytes` | 8192 | Maximum stream prefix inspected before commit (1024-1048576 bytes) |
-| `responseValidation.prefixTimeoutMs` | 2000 | Wait from first stream content before accepting the prefix (100-30000 ms) |
-
-Full example with both features disabled by default:
-
-```yaml
-gateway:
-  hedge:
-    enabled: false
-    delaySeconds: 10
-    maxParallel: 2
-    maxAttempts: 4
-  responseValidation:
-    enabled: false
-    streamMode: prefix
-    prefixBytes: 8192
-    prefixTimeoutMs: 2000
-```
-
-Note: `upstream.timeoutSeconds` mainly affects **monitor-side** calls to upstream sites (login, sync). Gateway forward timeout is `gateway.forwardTimeoutSeconds` — do not confuse the two.
-
-Group policy (`retry_count` / `failover_max` / `cooldown_seconds` / first-token timeout / hedge / response validation, etc.) is configured per group; new groups use the gateway defaults where applicable.
-
-### Management APIs (admin auth required)
-
-Admin APIs live under `/api/gateway/*` with a different auth system than public `/v1/*` (admin HMAC token).
-
-```text
-GET/POST     /api/gateway/groups
-PUT          /api/gateway/groups/reorder
-GET/PUT/DELETE /api/gateway/groups/:id
-GET/POST     /api/gateway/groups/:id/keys
-GET/PUT      /api/gateway/groups/:id/routes
-POST         /api/gateway/groups/:id/routes/ensure-keys
-GET          /api/gateway/groups/:id/models/preview
-POST         /api/gateway/groups/:id/models/sync
-POST         /api/gateway/groups/:id/models/test
-GET/POST     /api/gateway/groups/:id/response-rules
-GET/PUT/DELETE /api/gateway/response-rules/:id
-PUT/DELETE   /api/gateway/keys/:id
-POST         /api/gateway/keys/:id/reveal
-POST         /api/gateway/routes/:id/clear-pause
-POST         /api/gateway/cache-health/clear
-POST         /api/gateway/providers/:id/cache-health/clear
-GET/POST     /api/gateway/providers
-GET          /api/gateway/providers/options
-PUT/DELETE   /api/gateway/providers/:id
-POST         /api/gateway/providers/:id/reveal
-GET          /api/gateway/usage
-GET          /api/gateway/usage/stats
-GET          /api/gateway/usage/models
-POST         /api/gateway/usage/cleanup
-GET/PUT      /api/gateway/prices
-GET          /api/gateway/prices/defaults
-DELETE       /api/gateway/prices/:id
-```
-
-Group create/update requests accept the policy fields directly, for example:
-
-```json
-{
-  "hedge_enabled": true,
-  "hedge_delay_seconds": 10,
-  "hedge_max_parallel": 2,
-  "hedge_max_attempts": 4,
-  "retry_count": 2,
-  "response_validation_retry_count": 1,
-  "response_validation_enabled": true,
-  "response_validation_stream_mode": "prefix",
-  "response_validation_prefix_bytes": 8192,
-  "response_validation_prefix_timeout_ms": 2000
-}
-```
-
-Example response-rule create body (`models_json` / `protocols_json` are JSON array strings; `[]` means no filter):
-
-```json
-{
-  "name": "retry temporary upstream replies",
-  "enabled": true,
-  "priority": 10,
-  "pattern": "(?i)temporarily unavailable|please retry",
-  "target": "assistant_text",
-  "models_json": "[\"gpt-*\"]",
-  "protocols_json": "[\"openai_chat\",\"openai_responses\"]"
-}
-```
-
-### Backend layout (developers)
-
-Gateway code lives under `backend/gateway`:
-
-- `Service`: composition root and public API delegates
-- `AdminService`: groups / keys / routes / direct providers / model sync
-- `Runtime`: auth, forward, streaming, usage recording
-- `protocol`: Chat / Messages / Responses conversion (including SSE state machines)
-- Runtime defaults: `GatewayConfig` / `gateway.*` in `backend/config`
-
-### FAQ
-
-- **401 / invalid api key**: use a gateway key, not an upstream key; key and group must both be enabled.
-- **No route / 502**: group has enabled routes? all temp-paused? use **Clear pause**.
-- **Model 404 / upstream 400**: check mapped upstream model name and whether route `upstream_protocol` matches the real upstream.
-- **Cost is 0 or wrong**: built-in prices may not cover the model; override on the Prices page; check account billing ratio vs source group.
-- **Stream cut off then retry**: once SSE is committed, routes are not switched; client disconnect vs upstream error are recorded separately in usage.
-- **Ensure keys failed**: monitor routes need ChannelAPI and a valid channel login; direct Providers do not use ensure.
-
-## APIs and Operations
-
-Announcement list:
-
-```text
-GET /api/announcements?page=1&page_size=20
-```
-
-Notification logs:
-
-```text
-GET /api/notifications/logs?page=1&page_size=20
-```
-
-Notification log rows include the upstream channel ID when the event is tied to a specific upstream channel.
-
-Rate change logs:
-
-```text
-GET /api/rate-changes?page=1&page_size=20
-GET /api/rate-changes?channel_id=1&page=1&page_size=20
-```
-
-Channels:
-
-```text
-GET /api/channels?page=1&page_size=20
-GET /api/channels?page=1&page_size=-1
-POST /api/channels/:id/clear-login-info
-```
-
-Recharge:
-
-```text
-GET  /api/channels/:id/recharge-info
-POST /api/channels/:id/recharge
-```
-
-Redeem:
-
-```text
-POST /api/channels/:id/redeem
-```
-
-Subscription:
-
-```text
-GET  /api/channels/:id/subscription-info
-POST /api/channels/:id/subscription
-GET  /api/channels/:id/subscription-usage
-```
-
-Captcha providers:
-
-```text
-GET    /api/captcha-configs
-POST   /api/captcha-configs
-PUT    /api/captcha-configs/:id
-POST   /api/captcha-configs/:id/refresh-balance
-DELETE /api/captcha-configs/:id
-```
-
-Sub2API upstream synchronization targets:
-
-```text
-GET    /api/upstream-sync/targets
-POST   /api/upstream-sync/targets
-PUT    /api/upstream-sync/targets/:id
-DELETE /api/upstream-sync/targets/:id
-POST   /api/upstream-sync/targets/:id/check
-POST   /api/upstream-sync/targets/:id/groups/sync
-GET    /api/upstream-sync/targets/:id/groups
-GET    /api/upstream-sync/targets/:id/proxies
-GET    /api/upstream-sync/source-models?channel_id=1&platform=openai
-```
-
-`channel_id` is required. `platform` defaults to OpenAI-compatible model discovery and also supports `gemini`. Optional filters include `source_group_id`, `source_group_name`, and `sync_account_id`.
-
-Synchronization groups:
-
-```text
-GET    /api/upstream-sync/sync-groups
-POST   /api/upstream-sync/sync-groups
-PUT    /api/upstream-sync/sync-groups/:id
-DELETE /api/upstream-sync/sync-groups/:id
-POST   /api/upstream-sync/sync-groups/:id/apply
-POST   /api/upstream-sync/sync-groups/:id/delete-managed
-GET    /api/upstream-sync/sync-groups/:id/logs?page=1&page_size=20
-```
-
-The target Admin API Key is encrypted at rest. The managed-object action requests deletion of the remote Sub2API account and source-channel API key, clears the local mapping, and leaves target groups unchanged. Deleting a target or synchronization group only removes local records, so run the managed-object action first when remote cleanup is required.
-
-SSE progress endpoints:
-
-```text
-POST /api/channels/:id/test-login
-POST /api/channels/:id/sync
-POST /api/channels/sync-all
-```
-
-## Runtime Configuration Hot Reload
-
-The system settings page supports runtime hot reload without restarting the service.
-
-Hot-reloadable modules:
-
-- `app`
-- `auth`
-- `scheduler`
-- `notifications`
-- `retention`
-- `proxy`
-- `upstream`
-- `gateway`
-
-Database connection, HTTP port, and log level still require restart.
-
-## Scheduler and Retention
-
-Default schedules:
-
-- Balance sync: every 15 minutes.
-- Rate sync: every 30 minutes.
-- Enabled Sub2API synchronization groups: reapplied after rate sync.
-- Subscription usage check: runs with balance sync.
-- Captcha balance refresh: scheduled and manual refresh are supported.
-- History cleanup: daily.
-
-Default retention:
-
-- Monitor logs: 30 days.
-- Upstream synchronization logs: follow the monitor log retention period.
-- Balance snapshots: 90 days.
-- Notification logs: 90 days.
-- Gateway usage records and cost details: 90 days.
-- Upstream announcements: controlled by announcement retention days. `0` disables cleanup.
-- Rate change logs are not cleaned by default.
-
-## Data Security
-
-The following sensitive fields are encrypted with `APP_SECRET`:
-
-- Upstream account passwords.
-- NewAPI cookies.
-- Sub2API access tokens.
-- Sub2API target Admin API Keys.
-- Login session cookies and tokens.
-- Notification channel secrets.
-- SMTP passwords.
-- Captcha provider API keys.
-
-Important:
-
-- `APP_SECRET` must remain stable.
-- Changing `APP_SECRET` makes existing encrypted data undecryptable.
-- Back up `.env` or configuration files together with the database.
-
-## FAQ
-
-### The page opens, but API requests fail
-
-Check whether the backend service is running and whether reverse proxy routes `/api/*` correctly.
-
-Frontend development URL:
-
-```text
-http://127.0.0.1:3010
-```
-
-Backend URL:
-
-```text
-http://127.0.0.1:8418
-```
-
-### Upstream login fails
-
-Check the site URL, username, password, Turnstile requirement, captcha provider configuration, and whether token or cookie credentials have expired.
-
-### Announcements are not pushed
-
-Check whether the first announcement baseline sync has completed, rate sync runs successfully, notification channels are enabled, subscription rules include the upstream, and failed notification logs exist.
-
-### Rate changes are not pushed
-
-Check the minimum change percentage, notification subscription groups, and rate change history.
-
-### Added or removed groups are not pushed
-
-Added and removed groups are merged into a `rate_structure_changed` notification for the same scan. If a notification channel uses `mode=groups`, the added/removed list is filtered by subscribed groups before generating the notification.
-
-The first rate sync only creates a baseline and does not push all existing groups as newly added groups.
-
-### Low-balance alerts repeat too rarely
-
-Check the low-balance alert cooldown in system settings. Cooldown state is stored in the database and survives restarts.
-
-## License
-
-MIT
+许可证：MIT。

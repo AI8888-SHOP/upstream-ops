@@ -1,6 +1,8 @@
 # UpstreamOps
 
-[English](README.md) | [简体中文](README.zh.md)
+[项目首页](README.md) | 中文详细说明
+
+本文保留完整功能与配置参考；首次安装请先阅读 [项目首页的快速部署](README.md#快速部署)。当前服务端仅支持 PostgreSQL。
 
 > 本项目基于 [worryzyy/upstream-hub](https://github.com/worryzyy/upstream-hub) 二次开发，感谢原作者 [@worryzyy](https://github.com/worryzyy) 的开源工作。
 
@@ -9,20 +11,17 @@
 
 
 ## ❤️赞助商
-<details open>
-<summary>点击折叠</summary>
-
 <table>
 <tr>
-<td width="180"><a href="https://cmzi.com/aff/CHTVTQWE"><img src="https://zhenxiansheng-1251032746.file.myqcloud.com/Markdown/2020/12/29/zi-yuan-32.png" alt="cmzi.com" width="150"></a></td>
-<td>感谢 触摸云 赞助了本项目！触摸云 是一家专注海外云计算服务的品牌，提供香港云服务器、美国高防云服务器、物理服务器、防御与加速 CDN、自研 CDN 系统等产品。触摸云为本软件用户提供了特别优惠，使用
-<a href="https://cmzi.com/aff/CHTVTQWE">此链接</a></td>
+<td width="180" align="center">
+<a href="https://www.ai8888.shop"><img src="docs/images/ai8888-shop-logo.png" alt="ai8888.shop Logo" width="150"></a>
+</td>
+<td>
+<strong><a href="https://www.ai8888.shop">ai8888.shop（低价稳定token）</a></strong><br>
+感谢 ai8888.shop 对本项目的支持。点击名称或 Logo 访问网站。
+</td>
 </tr>
-
-
 </table>
-
-</details>
 
 ## 为什么使用？
 
@@ -303,7 +302,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=请替换为强密码
 ```
 
-Docker 默认拉取 `${IMAGE_REPOSITORY:-ghcr.io/ai8888-shop/upstream-ops}:${IMAGE_TAG:-latest}`，不会在本机编译镜像。镜像到其它仓库时可覆盖 `IMAGE_REPOSITORY`；配置和数据都会写入宿主机项目目录下的 `data/`。
+Docker 默认拉取 `${IMAGE_REPOSITORY:-ghcr.io/ai8888-shop/upstream-ops}:${IMAGE_TAG:-latest}`，不会在本机编译镜像。镜像到其它仓库时可覆盖 `IMAGE_REPOSITORY`；配置写入宿主机项目目录下的 `data/`，业务数据存储在 PostgreSQL。默认 Compose 不包含数据库，需要提前创建数据库及专用账号。
 
 启动：
 
@@ -347,24 +346,9 @@ IMAGE_TAG=latest
 IMAGE_TAG=v0.0.33
 ```
 
-## MySQL 部署
+## MySQL 旧部署说明
 
-MySQL 配置仅用于兼容旧部署；生产新部署请使用 PostgreSQL：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d
-```
-
-`.env` 至少设置：
-
-```env
-APP_SECRET=请替换为 32 字节以上随机字符串
-MYSQL_DATABASE=upstreamops
-MYSQL_USER=upstreamops
-MYSQL_PASSWORD=请替换为数据库密码
-MYSQL_ROOT_PASSWORD=请替换为 root 密码
-MYSQL_PORT=33069
-```
+当前服务端只接受 PostgreSQL，不能通过叠加 `docker-compose.mysql.yml` 启动新版应用。该文件仅保留用于旧部署参考；旧 MySQL 数据需要先迁移到 PostgreSQL，并验证业务数据与结算结果，再升级应用。SQLite 迁移脚本不能直接用于 MySQL。
 
 ## 高负载部署与旧版一键升级
 
@@ -376,7 +360,7 @@ MYSQL_PORT=33069
 
 普通升级默认使用 `ghcr.io/ai8888-shop/upstream-ops`。如果使用 fork 或私有镜像，可在运行目录的 `.env` 中设置 `IMAGE_REPOSITORY` 覆盖。升级成功后会在第一个 Compose 文件旁生成 `docker-compose.upstream-ops-image.yml`，并把它持久化到 `COMPOSE_FILE`，后续直接执行 `docker compose up` 也不会回退到旧的固定镜像。
 
-如果只升级镜像、保留现有数据库，请在包含 `docker-compose.yml`、`.env` 和 `data/` 的目录执行：
+以下普通升级步骤要求现有数据库已是 PostgreSQL；旧 SQLite 应先使用下方迁移流程。请在包含 `docker-compose.yml`、`.env` 和 `data/` 的目录执行：
 
 ```bash
 chmod +x scripts/upgrade.sh
@@ -402,7 +386,7 @@ DATABASE_USER=upstreamops
 DATABASE_PASSWORD=请替换为数据库密码
 DATABASE_NAME=upstreamops
 DATABASE_SSL_MODE=require
-# PostgreSQL 与 upstream-ops 不在同一个网络时填写；外部网络必须已存在
+# PostgreSQL 位于已有 Docker 网络时填写；该网络必须已存在
 DATABASE_NETWORK_NAME=sub2api-localtest_default
 DATABASE_NETWORK_EXTERNAL=true
 ```
