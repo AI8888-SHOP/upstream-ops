@@ -41,6 +41,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		// routes under group
 		gp.GET("/groups/:id/routes", func(c *gin.Context) { listGatewayGroupRoutes(c, d) })
 		gp.PUT("/groups/:id/routes", func(c *gin.Context) { saveGatewayGroupRoutes(c, d) })
+		gp.GET("/groups/:id/routes/:route_id/models/preview", func(c *gin.Context) { previewGatewayRouteModels(c, d) })
 		gp.POST("/groups/:id/routes/ensure-keys", func(c *gin.Context) { ensureGatewayGroupRouteKeys(c, d) })
 
 		// models
@@ -918,6 +919,25 @@ func saveGatewayGroupRoutes(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": list})
+}
+
+func previewGatewayRouteModels(c *gin.Context, d *Deps) {
+	groupID, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group id"})
+		return
+	}
+	routeID, err := parseUintParam(c, "route_id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid route id"})
+		return
+	}
+	preview, err := d.Gateway.PreviewRouteModels(c.Request.Context(), groupID, routeID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, preview)
 }
 
 func ensureGatewayGroupRouteKeys(c *gin.Context, d *Deps) {

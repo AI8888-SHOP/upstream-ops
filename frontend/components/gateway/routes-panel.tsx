@@ -28,6 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { formatRatio } from "@/lib/format"
+import { RouteModelsSelect, routeModelSourceKey } from "./route-models-select"
 import type {
   GatewayProviderOption,
   GatewayRateConvertMode,
@@ -193,6 +194,7 @@ function RouteUserAgentSelect({
 }
 
 type RoutesPanelProps = {
+  groupID: number
   busy: boolean
   rateSort: string
   onRateSortChange: (v: string) => void
@@ -216,6 +218,7 @@ type RoutesPanelProps = {
 }
 
 export function RoutesPanel({
+  groupID,
   busy,
   rateSort,
   onRateSortChange,
@@ -311,6 +314,7 @@ export function RoutesPanel({
             <TableHead>类型</TableHead>
             <TableHead className={SOURCE_COLUMN_CLASS}>来源</TableHead>
             <TableHead className={SOURCE_COLUMN_CLASS}>源分组</TableHead>
+            <TableHead>支持模型</TableHead>
             <TableHead>上游协议</TableHead>
             <TableHead>User-Agent</TableHead>
             <TableHead>权重</TableHead>
@@ -534,6 +538,19 @@ export function RoutesPanel({
                     </SelectContent>
                   </Select>
                   )}
+                </TableCell>
+                <TableCell>
+                  <RouteModelsSelect
+                    key={`${groupID}:${r.id ?? idx}:${routeModelSourceKey(r)}`}
+                    groupID={groupID}
+                    route={r}
+                    disabled={busy}
+                    onChange={(policy, modelsJSON) => setRouteDrafts((prev) => {
+                      const next = [...prev]
+                      next[idx] = { ...next[idx], model_policy: policy, allowed_models_json: modelsJSON }
+                      return next
+                    })}
+                  />
                 </TableCell>
                 <TableCell>
                   <Select

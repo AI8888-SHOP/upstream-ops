@@ -665,6 +665,8 @@ type GatewayRoute struct {
 	RateLimitAutoDisabled       bool    `gorm:"not null;default:false" json:"rate_limit_auto_disabled"`
 	RateLimitAutoDisabledReason string  `gorm:"size:512;not null;default:''" json:"rate_limit_auto_disabled_reason,omitempty"`
 	ModelMappingJSON            string  `gorm:"type:text" json:"model_mapping,omitempty"`
+	ModelPolicy                 string  `gorm:"size:16;not null;default:'all'" json:"model_policy"`
+	AllowedModelsJSON           string  `gorm:"type:text;not null;default:'[]'" json:"allowed_models_json"`
 	UpstreamProtocol            string  `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
 	Concurrency                 int     `gorm:"default:10" json:"concurrency"`
 	// UserAgentMode: passthrough | group | custom（见 GatewayUserAgentMode*）

@@ -153,6 +153,11 @@ func (s *Service) pullRouteModels(ctx context.Context, group *storage.GatewayGro
 	return s.admin().pullRouteModels(ctx, group, route)
 }
 
+// PreviewRouteModels 拉取单条已保存路由的候选模型，不应用路由白名单。
+func (s *Service) PreviewRouteModels(ctx context.Context, groupID, routeID uint) (*RouteModelsPreview, error) {
+	return s.admin().PreviewRouteModels(ctx, groupID, routeID)
+}
+
 // PreviewGroupModels 预览分组可聚合的模型清单（不落库）。
 func (s *Service) PreviewGroupModels(ctx context.Context, groupID uint) ([]ModelPreviewItem, error) {
 	return s.admin().PreviewGroupModels(ctx, groupID)

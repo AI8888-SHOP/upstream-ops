@@ -874,6 +874,9 @@ export interface GatewayRoute {
   rate_limit_auto_disabled?: boolean
   rate_limit_auto_disabled_reason?: string
   model_mapping?: string
+  /** 限制映射后的上游模型；默认 all，allowlist 空列表不支持任何模型 */
+  model_policy?: GatewayProviderModelPolicy
+  allowed_models_json?: string
   upstream_protocol: GatewayUpstreamProtocol
   concurrency: number
   /** 透传 / 组 UA / 自定义；默认透传 */

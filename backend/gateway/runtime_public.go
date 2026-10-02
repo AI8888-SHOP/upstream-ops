@@ -119,6 +119,10 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 			if err != nil {
 				continue
 			}
+			models, err = FilterRouteModels(&route, models)
+			if err != nil {
+				continue
+			}
 			routeMapping := ParseModelMapping(route.ModelMappingJSON)
 			for _, m := range models {
 				id := m
@@ -244,9 +248,11 @@ func (rt *Runtime) HandleCountTokens(c *gin.Context) {
 			continue
 		}
 		rt.applyRouteUserAgent(target, auth.Group, &route)
+		upstreamModel, _ := ResolveModel(requestedModel, ParseModelMapping(route.ModelMappingJSON), groupMapping)
+		upstreamBody := RewriteModelInBody(body, upstreamModel)
 		status, _, respBody, _, ferr := rt.forwardOnce(
 			c.Request.Context(), c, target, "/v1/messages/count_tokens",
-			http.MethodPost, c.Request.Header, body, false, protocol.KindAnthropic, 0,
+			http.MethodPost, c.Request.Header, upstreamBody, false, protocol.KindAnthropic, 0,
 		)
 		if ferr == nil && status >= 200 && status < 300 && len(respBody) > 0 {
 			c.Data(status, "application/json", respBody)

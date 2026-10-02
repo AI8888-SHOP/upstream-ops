@@ -195,9 +195,51 @@ func (a *AdminService) pullRouteModels(ctx context.Context, group *storage.Gatew
 		}
 	}
 
+	var filterErr error
+	models, filterErr = FilterRouteModels(&route, models)
+	if filterErr != nil {
+		rr.Error = filterErr.Error()
+		return routeModelPull{rr: rr}
+	}
 	rr.OK = true
 	rr.ModelCount = len(models)
 	return routeModelPull{rr: rr, models: models, src: src, merge: true}
+}
+
+// RouteModelsPreview includes the saved source so the editor can reject a
+// stale preview after its unsaved channel/group selection has changed.
+type RouteModelsPreview struct {
+	Route     storage.GatewayRoute `json:"route"`
+	Available []string             `json:"available"`
+}
+
+// PreviewRouteModels is read-only: it neither creates upstream keys nor alters
+// route eligibility. Ignore this route's allowlist to let the admin expand it;
+// a direct provider's own restrictions still apply.
+func (a *AdminService) PreviewRouteModels(ctx context.Context, groupID, routeID uint) (*RouteModelsPreview, error) {
+	group, err := a.Groups.FindByID(groupID)
+	if err != nil {
+		return nil, err
+	}
+	route, err := a.Routes.FindByID(routeID)
+	if err != nil {
+		return nil, err
+	}
+	if route.GatewayGroupID != groupID {
+		return nil, errors.New("route does not belong to gateway group")
+	}
+	previewRoute := *route
+	previewRoute.Enabled = true
+	previewRoute.RateLimitAutoDisabled = false
+	previewRoute.ModelPolicy = storage.GatewayProviderModelPolicyAll
+	pull := a.pullRouteModels(ctx, group, previewRoute)
+	if pull.rr.Error != "" {
+		return nil, errors.New(pull.rr.Error)
+	}
+	if pull.rr.Skipped {
+		return nil, errors.New(pull.rr.SkipReason)
+	}
+	return &RouteModelsPreview{Route: *route, Available: normalizeProviderModelIDs(pull.models)}, nil
 }
 
 // PreviewGroupModels 预览聚合模型。
@@ -393,11 +435,30 @@ func (a *AdminService) probeRouteModel(
 		UpstreamModel:     upstreamModel,
 	}
 
+	allowed, policyErr := RouteAllowsUpstreamModel(&route, upstreamModel)
+	if policyErr != nil || !allowed {
+		res.Label = fmt.Sprintf("route#%d", route.ID)
+		res.Error = "route model policy rejects model"
+		if policyErr != nil {
+			res.Error = "route model policy: " + policyErr.Error()
+		}
+		return res
+	}
 	target, err := a.resolveUpstreamTarget(&route)
 	if err != nil {
 		res.Error = err.Error()
 		res.Label = fmt.Sprintf("route#%d", route.ID)
 		return res
+	}
+	if target.Provider != nil {
+		allowed, policyErr := ProviderAllowsUpstreamModel(target.Provider, upstreamModel)
+		if policyErr != nil || !allowed {
+			res.Error = "provider model policy rejects model"
+			if policyErr != nil {
+				res.Error = "provider model policy: " + policyErr.Error()
+			}
+			return res
+		}
 	}
 	// 模型测试：组+路由 UA；无客户端，空则用默认 UA（与拉模型一致）
 	a.runtime().applyRouteUserAgentForAdmin(target, group, &route)

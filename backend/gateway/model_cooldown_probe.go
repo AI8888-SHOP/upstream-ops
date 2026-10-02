@@ -87,9 +87,12 @@ func (s *Service) runClaimedModelCooldownProbe(ctx context.Context, cfg config.G
 	var route *storage.GatewayRoute
 	var err error
 	if strings.TrimSpace(claim.SharedScopeKey) != "" {
-		route, err = s.Routes.FindActiveRouteForSharedModelCooldown(claim.SharedScopeKey, claim.RouteID)
+		route, err = s.Routes.FindActiveRouteForSharedModelCooldown(claim.SharedScopeKey, claim.RouteID, func(candidate *storage.GatewayRoute) bool {
+			allowed, policyErr := RouteAllowsUpstreamModel(candidate, claim.Model)
+			return policyErr == nil && allowed
+		})
 		if err == nil && route == nil {
-			s.recordModelProbeFailureCurrentMode(claim, cfg, 0, "no active route uses this shared upstream credential", false, 0)
+			s.recordModelProbeFailureCurrentMode(claim, cfg, 0, "no active route supports this model on the shared upstream credential", false, 0)
 			if s.Log != nil {
 				s.Log.Debug("skip shared model cooldown probe without active route", "scope", claim.SharedScopeKey, "model", claim.Model)
 			}
@@ -256,6 +259,15 @@ func (s *Service) probePersistedRouteModel(parent context.Context, group *storag
 	}
 	if !route.Enabled || route.RateLimitAutoDisabled {
 		result.Error = "route is disabled"
+		result.Permanent = true
+		return result
+	}
+	allowed, policyErr := RouteAllowsUpstreamModel(&route, upstreamModel)
+	if policyErr != nil || !allowed {
+		result.Error = "route model policy rejects model"
+		if policyErr != nil {
+			result.Error = "route model policy: " + policyErr.Error()
+		}
 		result.Permanent = true
 		return result
 	}

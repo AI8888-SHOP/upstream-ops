@@ -253,6 +253,8 @@ type RouteInput struct {
 	RateLimitAutoDisabled       bool    `json:"rate_limit_auto_disabled"`
 	RateLimitAutoDisabledReason string  `json:"rate_limit_auto_disabled_reason"`
 	ModelMappingJSON            string  `json:"model_mapping"`
+	ModelPolicy                 string  `json:"model_policy"`
+	AllowedModelsJSON           string  `json:"allowed_models_json"`
 	UpstreamProtocol            string  `json:"upstream_protocol"`
 	Concurrency                 int     `json:"concurrency"`
 	// UserAgentMode: passthrough | group | custom

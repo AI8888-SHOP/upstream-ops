@@ -1355,6 +1355,8 @@ export function GatewayPage() {
             billing_rate_multiplier: value > 0 ? value : 1,
             enabled: r.enabled !== false,
             model_mapping: r.model_mapping ?? "",
+            model_policy: r.model_policy ?? "all",
+            allowed_models_json: r.allowed_models_json ?? "[]",
             upstream_protocol: r.upstream_protocol ?? "auto",
             concurrency: r.concurrency ?? 10,
             user_agent_mode: uaMode,
@@ -1386,6 +1388,8 @@ export function GatewayPage() {
           billing_rate_multiplier: accountRate > 0 ? accountRate : 1,
           enabled: r.enabled !== false,
           model_mapping: r.model_mapping ?? "",
+          model_policy: r.model_policy ?? "all",
+          allowed_models_json: r.allowed_models_json ?? "[]",
           upstream_protocol: r.upstream_protocol ?? "auto",
           concurrency: r.concurrency ?? 10,
           user_agent_mode: uaMode,
@@ -1980,6 +1984,7 @@ export function GatewayPage() {
 
                     <TabsContent value="routes" className="mt-0 space-y-4">
                       <RoutesPanel
+                        groupID={selectedGroup.id}
                         busy={busy}
                         rateSort={rateSort}
                         onRateSortChange={setRateSort}

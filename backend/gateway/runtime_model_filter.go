@@ -7,8 +7,8 @@ import (
 	"github.com/bejix/upstream-ops/backend/storage"
 )
 
-// filterRoutesForRequestedModel removes direct providers that are unavailable
-// or cannot serve the final upstream model after group and route mappings. The
+// filterRoutesForRequestedModel applies per-route model policies and removes
+// unavailable providers after resolving group and route model mappings. The
 // filtered slice is shared by ordinary failover and coordinated hedge
 // planning. Provider enabled state is checked here, before route sorting, so a
 // disabled direct provider cannot consume a scheduler attempt.
@@ -24,6 +24,26 @@ func (rt *Runtime) filterRoutesForRequestedModel(
 	filtered := make([]storage.GatewayRoute, 0, len(routes))
 	providerCache := make(map[uint]*storage.GatewayProvider)
 	for _, route := range routes {
+		upstreamModel := requestedModel
+		// Legacy/all-model monitor routes need no mapping parse on this hot path.
+		if requestedModel != "" && (route.NormalizeSourceKind() == storage.GatewayRouteSourceProvider ||
+			(route.ModelPolicy != "" && route.ModelPolicy != storage.GatewayProviderModelPolicyAll)) {
+			if resolved, _ := ResolveModel(requestedModel, ParseModelMapping(route.ModelMappingJSON), groupMapping); resolved != "" {
+				upstreamModel = resolved
+			}
+		}
+		// Model discovery and model-less resource requests have no model to
+		// evaluate. Generation requests are filtered before sorting, recovery,
+		// retries or hedging, so none of those paths can bypass an allowlist.
+		if requestedModel != "" {
+			allowed, err := RouteAllowsUpstreamModel(&route, upstreamModel)
+			if err != nil {
+				return nil, fmt.Errorf("route %d model policy: %w", route.ID, err)
+			}
+			if !allowed {
+				continue
+			}
+		}
 		if route.NormalizeSourceKind() != storage.GatewayRouteSourceProvider {
 			filtered = append(filtered, route)
 			continue
@@ -56,14 +76,6 @@ func (rt *Runtime) filterRoutesForRequestedModel(
 		if requestedModel == "" {
 			filtered = append(filtered, route)
 			continue
-		}
-		upstreamModel, _ := ResolveModel(
-			requestedModel,
-			ParseModelMapping(route.ModelMappingJSON),
-			groupMapping,
-		)
-		if upstreamModel == "" {
-			upstreamModel = requestedModel
 		}
 		allowed, err := ProviderAllowsUpstreamModel(provider, upstreamModel)
 		if err != nil {

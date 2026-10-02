@@ -123,6 +123,14 @@ func (a *AdminService) SaveRoutes(groupID uint, inputs []RouteInput) ([]storage.
 	}
 	list := make([]storage.GatewayRoute, 0, len(inputs))
 	for i, in := range inputs {
+		modelPolicy, err := NormalizeProviderModelPolicy(in.ModelPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("route[%d]: %w", i, err)
+		}
+		allowedModelsJSON, err := NormalizeProviderAllowedModelsJSON(in.AllowedModelsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("route[%d]: %w", i, err)
+		}
 		kind := strings.ToLower(strings.TrimSpace(in.SourceKind))
 		if kind == "" {
 			if in.GatewayProviderID > 0 && in.SourceChannelID == 0 {
@@ -150,6 +158,8 @@ func (a *AdminService) SaveRoutes(groupID uint, inputs []RouteInput) ([]storage.
 			BillingRateMultiplier: in.BillingRateMultiplier,
 			Enabled:               in.Enabled,
 			ModelMappingJSON:      strings.TrimSpace(in.ModelMappingJSON),
+			ModelPolicy:           modelPolicy,
+			AllowedModelsJSON:     allowedModelsJSON,
 			UpstreamProtocol:      up,
 			Concurrency:           in.Concurrency,
 			UserAgentMode:         uaMode,

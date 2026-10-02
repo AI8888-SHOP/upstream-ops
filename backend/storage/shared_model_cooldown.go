@@ -273,15 +273,26 @@ func (r *GatewayRoutes) routeAndSharedCooldownScope(id uint) (*GatewayRoute, str
 // still resolves to the claimed shared credential. It lets a probe continue
 // through another gateway group when the route that originally failed was
 // later disabled or removed.
-func (r *GatewayRoutes) FindActiveRouteForSharedModelCooldown(scope string, preferredRouteID uint) (*GatewayRoute, error) {
+func (r *GatewayRoutes) FindActiveRouteForSharedModelCooldown(scope string, preferredRouteID uint, filters ...func(*GatewayRoute) bool) (*GatewayRoute, error) {
 	if r == nil || r.db == nil || strings.TrimSpace(scope) == "" {
 		return nil, nil
+	}
+	// The gateway can add a model-policy predicate without coupling storage to
+	// mapping/policy parsing. A restricted preferred route must not prevent an
+	// eligible sibling in another gateway group from probing a shared failure.
+	accept := func(route *GatewayRoute) bool {
+		for _, filter := range filters {
+			if filter != nil && !filter(route) {
+				return false
+			}
+		}
+		return true
 	}
 	if preferredRouteID > 0 {
 		var preferred GatewayRoute
 		if err := r.db.First(&preferred, preferredRouteID).Error; err == nil &&
 			preferred.Enabled && !preferred.RateLimitAutoDisabled &&
-			GatewaySharedModelCooldownScope(&preferred) == scope {
+			GatewaySharedModelCooldownScope(&preferred) == scope && accept(&preferred) {
 			active, groupErr := r.gatewayGroupIsActiveForSharedCooldown(preferred.GatewayGroupID)
 			if groupErr != nil {
 				return nil, groupErr
@@ -326,7 +337,7 @@ func (r *GatewayRoutes) FindActiveRouteForSharedModelCooldown(scope string, pref
 		if _, active := activeGroups[candidates[i].GatewayGroupID]; !active {
 			continue
 		}
-		if GatewaySharedModelCooldownScope(&candidates[i]) == scope {
+		if GatewaySharedModelCooldownScope(&candidates[i]) == scope && accept(&candidates[i]) {
 			return &candidates[i], nil
 		}
 	}
