@@ -94,6 +94,7 @@ var gatewayMigrationModels = []migrationModelSpec{
 	{table: "gateway_groups", model: &GatewayGroup{}},
 	{table: "gateway_keys", model: &GatewayKey{}},
 	{table: "gateway_routes", model: &GatewayRoute{}},
+	{table: "gateway_route_candy_checks", model: &GatewayRouteCandyCheck{}},
 	{table: "gateway_route_model_cooldowns", model: &GatewayRouteModelCooldown{}},
 	{table: "gateway_shared_model_cooldowns", model: &GatewaySharedModelCooldown{}},
 	{table: "gateway_channel_cache_health", model: &GatewayChannelCacheHealth{}},

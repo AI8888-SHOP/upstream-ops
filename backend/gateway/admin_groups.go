@@ -190,6 +190,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if err := applySchedulingPolicy(&item.GatewaySchedulerPolicy, in.SchedulingPolicyInput); err != nil {
 		return nil, err
 	}
+	item.GatewayCandyCheckPolicy = storage.GatewayCandyCheckPolicy{CandyCheckIntervalMinutes: 5, CandyCheckCooldownMinutes: 10, CandyCheckReasoningEffort: "medium"}
+	if err := applyCandyCheckPolicy(&item.GatewayCandyCheckPolicy, in.CandyCheckPolicyInput); err != nil {
+		return nil, err
+	}
 	if err := a.Groups.Create(item); err != nil {
 		return nil, err
 	}
@@ -275,6 +279,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 		return nil, err
 	}
 	previousCachePolicy := resolveCacheHealthPolicy(a.gatewayRuntime(), item)
+	if err := applyCandyCheckPolicy(&item.GatewayCandyCheckPolicy, in.CandyCheckPolicyInput); err != nil {
+		return nil, err
+	}
 	if err := applySchedulingPolicy(&item.GatewaySchedulerPolicy, in.SchedulingPolicyInput); err != nil {
 		return nil, err
 	}

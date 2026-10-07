@@ -685,6 +685,7 @@ func (r *GatewayGroups) Update(item *GatewayGroup) error {
 	err := r.db.Save(item).Error
 	if err == nil {
 		r.readCaches.gatewayGroups.invalidate(item.ID)
+		r.readCaches.gatewayRoutes.invalidate(item.ID)
 	}
 	return err
 }
@@ -700,6 +701,9 @@ func (r *GatewayGroups) Delete(id uint) error {
 			return err
 		}
 		if len(routeIDs) > 0 {
+			if err := tx.Where("route_id IN ?", routeIDs).Delete(&GatewayRouteCandyCheck{}).Error; err != nil {
+				return err
+			}
 			if err := tx.Where("route_id IN ?", routeIDs).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
 				return err
 			}
@@ -1576,6 +1580,9 @@ func (r *GatewayRoutes) ListByGroupID(groupID uint) ([]GatewayRoute, error) {
 		if err := r.loadCacheHealth(loaded); err != nil {
 			return nil, err
 		}
+		if err := r.loadCandyChecks(loaded); err != nil {
+			return nil, err
+		}
 		return loaded, nil
 	}, nil)
 	if err != nil {
@@ -1597,6 +1604,9 @@ func (r *GatewayRoutes) FindByID(id uint) (*GatewayRoute, error) {
 		return nil, err
 	}
 	if err := r.loadCacheHealth(list); err != nil {
+		return nil, err
+	}
+	if err := r.loadCandyChecks(list); err != nil {
 		return nil, err
 	}
 	item = list[0]
@@ -1913,6 +1923,9 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 
 			if hasPrev {
 				if !sameSource {
+					if err := tx.Where("route_id = ?", list[i].ID).Delete(&GatewayRouteCandyCheck{}).Error; err != nil {
+						return err
+					}
 					if err := tx.Where("route_id = ?", list[i].ID).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
 						return err
 					}
@@ -1934,6 +1947,9 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 		for id := range byID {
 			if _, ok := keep[id]; ok {
 				continue
+			}
+			if err := tx.Where("route_id = ?", id).Delete(&GatewayRouteCandyCheck{}).Error; err != nil {
+				return err
 			}
 			if err := tx.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
 				return err

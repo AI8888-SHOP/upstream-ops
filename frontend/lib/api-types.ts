@@ -683,6 +683,11 @@ export interface GatewayGroup {
   request_max_attempts?: number
   /** 首字超时触发后是否冷却当前网关组内的路由/模型。 */
   first_token_timeout_cooldown_enabled?: boolean
+  candy_check_enabled?: boolean
+  candy_check_model?: string
+  candy_check_interval_minutes?: number
+  candy_check_cooldown_minutes?: number
+  candy_check_reasoning_effort?: "default" | "low" | "medium" | "high"
   /** 超过延迟仍无有效响应时，并发启动其它路由（媒体与 Realtime 请求自动排除） */
   hedge_enabled?: boolean
   /** 并发兜底启动延迟，支持小数秒 */
@@ -715,6 +720,21 @@ export interface GatewayGroup {
   user_agent?: string
   created_at: string
   updated_at: string
+}
+
+export interface GatewayRouteCandyCheck {
+  route_id: number
+  model: string
+  status: "pending" | "correct" | "incorrect" | "error" | "skipped" | "manual"
+  active: boolean
+  answer_preview?: string
+  reason?: string
+  status_code: number
+  latency_ms: number
+  checked_at?: string
+  next_check_at?: string
+  cooldown_until?: string
+  lease_until?: string
 }
 
 export interface GatewayGroupCloneKeyResult {
@@ -898,6 +918,7 @@ export interface GatewayRoute {
   cache_health_blacklist_reason?: string
   cache_health_manual_clear_until?: string | null
   model_cooldowns?: Record<string, GatewayRouteModelCooldown>
+  candy_check?: GatewayRouteCandyCheck
   created_at: string
   updated_at: string
 }

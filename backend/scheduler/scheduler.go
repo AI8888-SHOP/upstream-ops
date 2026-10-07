@@ -31,6 +31,7 @@ type Scheduler struct {
 	upstreamSync  upstreamSyncService
 	gatewayResort gatewayRateResortService
 	gatewayProbe  gatewayModelCooldownProbeService
+	gatewayCandy  interface{ RunCandyChecks(context.Context) }
 	proxy         config.ProxyConfig
 }
 
@@ -96,6 +97,10 @@ func (s *Scheduler) SetGatewayModelCooldownProbe(service gatewayModelCooldownPro
 	s.gatewayProbe = service
 }
 
+func (s *Scheduler) SetGatewayCandyCheck(service interface{ RunCandyChecks(context.Context) }) {
+	s.gatewayCandy = service
+}
+
 // Start 注册 cron 任务并启动。
 func (s *Scheduler) Start() error {
 	if s.cfg.BalanceCron != "" {
@@ -118,6 +123,15 @@ func (s *Scheduler) Start() error {
 		// group cooldowns before their next user request. Per-row NextProbeAt
 		// and the database lease prevent needless upstream calls.
 		if _, err := s.cron.AddFunc("@every 10s", s.runGatewayModelProbes); err != nil {
+			return err
+		}
+	}
+	if s.gatewayCandy != nil {
+		if _, err := s.cron.AddFunc("@every 10s", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			s.gatewayCandy.RunCandyChecks(ctx)
+		}); err != nil {
 			return err
 		}
 	}

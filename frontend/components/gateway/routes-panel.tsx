@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/table"
 import { formatRatio } from "@/lib/format"
 import { RouteModelsSelect, routeModelSourceKey } from "./route-models-select"
+import { RouteCandyCheckStatus } from "./route-candy-check-status"
 import type {
   GatewayProviderOption,
   GatewayRateConvertMode,
@@ -194,6 +195,8 @@ function RouteUserAgentSelect({
 }
 
 type RoutesPanelProps = {
+  candyCheckEnabled: boolean
+  onClearCandyCheck: (routeID: number) => Promise<void>
   groupID: number
   busy: boolean
   rateSort: string
@@ -218,6 +221,8 @@ type RoutesPanelProps = {
 }
 
 export function RoutesPanel({
+  candyCheckEnabled,
+  onClearCandyCheck,
   groupID,
   busy,
   rateSort,
@@ -775,6 +780,7 @@ export function RoutesPanel({
                       ) : null}
                     </div>
                   ) : null}
+                  {r.id ? <RouteCandyCheckStatus enabled={candyCheckEnabled} state={r.candy_check} onClear={() => onClearCandyCheck(r.id as number)} /> : null}
                   {hasRoutePauseError(r) && (
                     <div className="mt-1 flex flex-wrap items-center gap-1">
                       {isRouteTempPaused(r.temp_unschedulable_until) ? (

@@ -587,6 +587,28 @@ export function GatewayPage() {
     }
   }, [])
 
+  // Refresh only runtime test state, preserving any unsaved route edits.
+  useEffect(() => {
+    if (!selectedGroup?.candy_check_enabled) return
+    const groupID = selectedGroup.id
+    let stopped = false
+    let fetching = false
+    const refresh = async () => {
+      if (fetching || document.hidden) return
+      fetching = true
+      try {
+        const res = await apiFetch<{ items: GatewayRoute[] }>(`/gateway/groups/${groupID}/routes`)
+        if (stopped) return
+        const states = new Map((res.items ?? []).map((route) => [route.id, route.candy_check]))
+        setRouteDrafts((drafts) => drafts.map((route) => route.id && states.has(route.id) ? { ...route, candy_check: states.get(route.id) } : route))
+      } catch {
+        // Preserve the last result; the normal refresh action reports errors.
+      } finally { fetching = false }
+    }
+    const timer = window.setInterval(() => void refresh(), 15000)
+    return () => { stopped = true; window.clearInterval(timer) }
+  }, [selectedGroup?.id, selectedGroup?.candy_check_enabled])
+
   useEffect(() => {
     void loadGroups()
     void loadPrices()
@@ -877,6 +899,11 @@ export function GatewayPage() {
       request_max_attempts: String(g.request_max_attempts ?? 0),
       first_token_timeout_cooldown_enabled:
         g.first_token_timeout_cooldown_enabled !== false,
+      candy_check_enabled: !!g.candy_check_enabled,
+      candy_check_model: g.candy_check_model ?? "",
+      candy_check_interval_minutes: String(g.candy_check_interval_minutes ?? 5),
+      candy_check_cooldown_minutes: String(g.candy_check_cooldown_minutes ?? 10),
+      candy_check_reasoning_effort: g.candy_check_reasoning_effort ?? "medium",
       hedge_enabled: !!g.hedge_enabled,
       hedge_delay_seconds: String(g.hedge_delay_seconds ?? 10),
       hedge_max_parallel: String(g.hedge_max_parallel ?? 2),
@@ -918,6 +945,20 @@ export function GatewayPage() {
     if (!name) {
       toast.error("请填写组名称")
       return
+    }
+    if (groupForm.candy_check_enabled && !groupForm.candy_check_model.trim()) {
+      toast.error("开启不降智检测时请填写检测模型")
+      return
+    }
+    for (const field of [
+      { value: groupForm.candy_check_interval_minutes, max: 1440, name: "检测间隔" },
+      { value: groupForm.candy_check_cooldown_minutes, max: 43200, name: "检测失败冷却时长" },
+    ]) {
+      const value = Number(field.value)
+      if (!field.value.trim() || !Number.isInteger(value) || value < 1 || value > field.max) {
+        toast.error(`${field.name}必须是 1 到 ${field.max} 分钟的整数`)
+        return
+      }
     }
     const retryCount = Math.max(0, Math.min(10, Number(groupForm.retry_count) || 0))
     const responseValidationRetryInput = Number(groupForm.response_validation_retry_count)
@@ -1027,6 +1068,11 @@ export function GatewayPage() {
       }
     }
     const policy = {
+      candy_check_enabled: groupForm.candy_check_enabled,
+      candy_check_model: groupForm.candy_check_model.trim(),
+      candy_check_interval_minutes: Number(groupForm.candy_check_interval_minutes),
+      candy_check_cooldown_minutes: Number(groupForm.candy_check_cooldown_minutes),
+      candy_check_reasoning_effort: groupForm.candy_check_reasoning_effort,
       scheduling_mode: groupForm.scheduling_mode,
       scheduling_premium_percent: Number(groupForm.scheduling_premium_percent),
       scheduling_window_minutes: Number(groupForm.scheduling_window_minutes),
@@ -1454,6 +1500,18 @@ export function GatewayPage() {
       setGroupOverviewNonce((value) => value + 1)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "解除冷却失败")
+    }
+  }
+
+  async function clearCandyCheck(routeID: number) {
+    if (!selectedGroup) return
+    try {
+      await apiFetch(`/gateway/routes/${routeID}/candy-check/clear`, { method: "POST" })
+      toast.success("已解除本组内该渠道的不降智检测冷却，下个检测周期再测")
+      await loadRoutes(selectedGroup.id)
+      setGroupOverviewNonce((value) => value + 1)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "解除检测冷却失败")
     }
   }
 
@@ -2001,6 +2059,8 @@ export function GatewayPage() {
                         onSaveRoutes={() => void saveRoutes()}
                         onEnsureKeys={() => void ensureKeys()}
                         onClearRoutePause={(id) => void clearRoutePause(id)}
+                        candyCheckEnabled={!!selectedGroup.candy_check_enabled}
+                        onClearCandyCheck={clearCandyCheck}
                         onProbeModelCooldown={(routeID, model) =>
                           void probeModelCooldown(routeID, model)
                         }

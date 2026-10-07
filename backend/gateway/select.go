@@ -101,6 +101,9 @@ func IsRouteSchedulableForModel(route *storage.GatewayRoute, model string, now t
 	if route == nil || !route.Enabled || route.RateLimitAutoDisabled {
 		return false
 	}
+	if route.CandyCheck.Blocks(now) {
+		return false
+	}
 	// Cache-health blacklists are source-wide and therefore apply regardless
 	// of the requested model. Expired snapshots are harmless until the next
 	// evaluator refreshes them.

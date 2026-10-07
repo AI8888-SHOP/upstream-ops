@@ -66,6 +66,18 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		// route ops
 		gp.POST("/routes/:id/clear-pause", func(c *gin.Context) { clearGatewayRoutePause(c, d) })
 		gp.POST("/routes/:id/probe-model", func(c *gin.Context) { probeGatewayRouteModel(c, d) })
+		gp.POST("/routes/:id/candy-check/clear", func(c *gin.Context) {
+			id, err := parseUintParam(c, "id")
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+				return
+			}
+			if err := d.Gateway.Routes.ClearCandyCheck(id, time.Now()); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
 
 		// providers（直连渠道）— options 须在 :id 之前注册
 		gp.GET("/providers/options", func(c *gin.Context) { listGatewayProviderOptions(c, d) })

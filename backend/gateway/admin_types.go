@@ -57,6 +57,7 @@ type AuthResult struct {
 // CreateGroupInput 创建网关分组。
 type CreateGroupInput struct {
 	SchedulingPolicyInput
+	CandyCheckPolicyInput
 	Name                                  string   `json:"name"`
 	Description                           string   `json:"description"`
 	RateSortDirection                     string   `json:"rate_sort_direction"`
@@ -99,6 +100,7 @@ type CreateGroupInput struct {
 // UpdateGroupInput 更新网关分组（指针字段：nil 表示不改）。
 type UpdateGroupInput struct {
 	SchedulingPolicyInput
+	CandyCheckPolicyInput
 	Name                                  *string         `json:"name"`
 	Description                           *string         `json:"description"`
 	Status                                *string         `json:"status"`

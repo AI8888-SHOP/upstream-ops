@@ -541,6 +541,7 @@ func (GatewayProvider) TableName() string { return "gateway_providers" }
 // GatewayGroup 是网关配置单元：路由、模型映射、模型列表归属组；组内可有多把密钥。
 type GatewayGroup struct {
 	GatewaySchedulerPolicy `gorm:"embedded"`
+	GatewayCandyCheckPolicy `gorm:"embedded"`
 	ID          uint   `gorm:"primaryKey" json:"id"`
 	Name        string `gorm:"size:128;not null;uniqueIndex" json:"name"`
 	Description string `gorm:"size:512;not null;default:''" json:"description,omitempty"`
@@ -645,6 +646,7 @@ func (GatewayKey) TableName() string { return "gateway_keys" }
 
 // GatewayRoute 是网关组绑定的一条上游路由（监控渠道或直连 Provider）。
 type GatewayRoute struct {
+	CandyCheck *GatewayRouteCandyCheck `gorm:"-" json:"candy_check,omitempty"`
 	// Request-local provider identity; populated by the availability filter.
 	SchedulerCredential string `gorm:"-" json:"-"`
 	SchedulerConcurrencyLimit int `gorm:"-" json:"-"`

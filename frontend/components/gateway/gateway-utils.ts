@@ -45,6 +45,11 @@ export type GroupFormState = {
   request_first_token_timeout_sec: string
   request_max_attempts: string
   first_token_timeout_cooldown_enabled: boolean
+  candy_check_enabled: boolean
+  candy_check_model: string
+  candy_check_interval_minutes: string
+  candy_check_cooldown_minutes: string
+  candy_check_reasoning_effort: "default" | "low" | "medium" | "high"
   hedge_enabled: boolean
   hedge_delay_seconds: string
   hedge_max_parallel: string
@@ -633,6 +638,11 @@ export const emptyGroupForm = (): GroupFormState => ({
   request_first_token_timeout_sec: "0",
   request_max_attempts: "0",
   first_token_timeout_cooldown_enabled: true,
+  candy_check_enabled: false,
+  candy_check_model: "",
+  candy_check_interval_minutes: "5",
+  candy_check_cooldown_minutes: "10",
+  candy_check_reasoning_effort: "medium",
   hedge_enabled: false,
   hedge_delay_seconds: "10",
   hedge_max_parallel: "2",

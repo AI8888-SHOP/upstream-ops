@@ -312,6 +312,14 @@ func cloneGatewayRoutes(items []GatewayRoute) []GatewayRoute {
 }
 
 func cloneGatewayRoute(item GatewayRoute) GatewayRoute {
+	if item.CandyCheck != nil {
+		state := *item.CandyCheck
+		state.CheckedAt = clonePointer(state.CheckedAt)
+		state.NextCheckAt = clonePointer(state.NextCheckAt)
+		state.CooldownUntil = clonePointer(state.CooldownUntil)
+		state.LeaseUntil = clonePointer(state.LeaseUntil)
+		item.CandyCheck = &state
+	}
 	item.SourceGroupID = clonePointer(item.SourceGroupID)
 	item.TempUnschedulableUntil = clonePointer(item.TempUnschedulableUntil)
 	item.TempUnschedulableAt = clonePointer(item.TempUnschedulableAt)

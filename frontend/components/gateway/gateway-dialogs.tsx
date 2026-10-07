@@ -1,4 +1,5 @@
 import { toast } from "sonner"
+import { CandyCheckSettings } from "./candy-check-settings"
 import {
   CheckCircle2,
   Copy,
@@ -861,6 +862,7 @@ export function GroupFormDialog({
             </div>
           )}
 
+          <CandyCheckSettings form={groupForm} onChange={setGroupForm} />
           <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 p-3">
             <div className="min-w-0 flex-1">
               <Label>渠道分组价格倍率重排</Label>

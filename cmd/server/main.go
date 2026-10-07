@@ -161,6 +161,7 @@ func main() {
 	schedulerFactory := func(scfg config.SchedulerConfig, pcfg config.ProxyConfig) *scheduler.Scheduler {
 		svc := scheduler.New(scfg, monitorSvc, monLogs, gatewayUsage, syncLogs, rates, notifies, announcements, captchas, cipher, syncSvc, gatewaySvc, pcfg, log)
 		svc.SetGatewayModelCooldownProbe(gatewaySvc)
+		svc.SetGatewayCandyCheck(gatewaySvc)
 		return svc
 	}
 	sch := schedulerFactory(cfg.Scheduler, cfg.Proxy)
