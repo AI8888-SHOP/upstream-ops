@@ -44,9 +44,13 @@ func TestCandyCheckLeaseManualClearAndConfigChange(t *testing.T) {
 		t.Fatalf("reprobed while cooling: %v %v", second, err)
 	}
 	// Returned snapshots must not mutate the cache shared by other requests.
-	loaded.CandyCheck.Active = false
-	loadedAgain, _ := routes.FindByID(route.ID)
-	if !loadedAgain.CandyCheck.Blocks(now) {
+	cached, err := routes.ListByGroupID(group.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached[0].CandyCheck.Active = false
+	loadedAgain, err := routes.ListByGroupID(group.ID)
+	if err != nil || !loadedAgain[0].CandyCheck.Blocks(now) {
 		t.Fatal("snapshot mutation leaked")
 	}
 	if err := routes.ClearCandyCheck(route.ID, now); err != nil {
@@ -70,8 +74,18 @@ func TestCandyCheckLeaseManualClearAndConfigChange(t *testing.T) {
 		t.Fatalf("disabled policy accepted result: %v %v", ok, err)
 	}
 	loaded, err = routes.FindByID(route.ID)
-	if err != nil || loaded.CandyCheck.Active || loaded.CandyCheck.Blocks(now) {
+	if err != nil || loaded.CandyCheck != nil {
 		t.Fatalf("disabled still blocks: %+v %v", loaded, err)
+	}
+	group.CandyCheckEnabled = true
+	if err := groups.Update(group); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := routes.FinishCandyCheck(*claim, GatewayRouteCandyCheck{Status: "incorrect"}, now.Add(3*time.Minute)); err != nil || ok {
+		t.Fatalf("off/on resurrected old lease: %v %v", ok, err)
+	}
+	if fresh, err := routes.ClaimCandyCheck(route.ID, key, "model-a", now.Add(3*time.Minute), time.Minute); err != nil || fresh == nil {
+		t.Fatalf("new cycle after off/on: %+v %v", fresh, err)
 	}
 }
 

@@ -33,6 +33,8 @@ func TestCandyCheckParseCompleteResponses(t *testing.T) {
 		{"empty", `{"status":"completed","output":[]}`, "", true},
 		{"responses stream", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"21\"}\n\ndata: {\"type\":\"response.output_text.done\",\"text\":\"21\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"21\"}}\n\n", "21", false},
 		{"missing terminal", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"21\"}\n\n", "21", true},
+		{"conflicting snapshot", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"22\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"21\"}}\n\n", "22", true},
+		{"multiple chat choices", "data: {\"choices\":[{\"delta\":{\"content\":\"2\"},\"finish_reason\":\"stop\"},{\"delta\":{\"content\":\"1\"},\"finish_reason\":\"stop\"}]}\n\n", "", true},
 		{"stream error after answer", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"21\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n", "21", true},
 		{"chat stream", "data: {\"choices\":[{\"delta\":{\"content\":\"21\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", "21", false},
 		{"anthropic stream", "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"21\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", "21", false},

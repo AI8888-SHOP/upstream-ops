@@ -682,7 +682,21 @@ func (r *GatewayGroups) Create(item *GatewayGroup) error {
 
 // Update 全量保存。
 func (r *GatewayGroups) Update(item *GatewayGroup) error {
-	err := r.db.Save(item).Error
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var previous GatewayGroup
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&previous, item.ID).Error; err != nil {
+			return err
+		}
+		if err := tx.Save(item).Error; err != nil {
+			return err
+		}
+		// Removing the lease generation also prevents off/on or A/B/A edits
+		// from resurrecting a result produced under an earlier configuration.
+		if previous.GatewayCandyCheckPolicy != item.GatewayCandyCheckPolicy || previous.ModelMappingJSON != item.ModelMappingJSON || previous.UserAgent != item.UserAgent {
+			return tx.Where("route_id IN (?)", tx.Model(&GatewayRoute{}).Select("id").Where("gateway_group_id = ?", item.ID)).Delete(&GatewayRouteCandyCheck{}).Error
+		}
+		return nil
+	})
 	if err == nil {
 		r.readCaches.gatewayGroups.invalidate(item.ID)
 		r.readCaches.gatewayRoutes.invalidate(item.ID)
@@ -1922,10 +1936,12 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 			}
 
 			if hasPrev {
-				if !sameSource {
+				if GatewayCandyCheckConfigKey(&GatewayGroup{}, &prev, nil) != GatewayCandyCheckConfigKey(&GatewayGroup{}, &list[i], nil) {
 					if err := tx.Where("route_id = ?", list[i].ID).Delete(&GatewayRouteCandyCheck{}).Error; err != nil {
 						return err
 					}
+				}
+				if !sameSource {
 					if err := tx.Where("route_id = ?", list[i].ID).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
 						return err
 					}

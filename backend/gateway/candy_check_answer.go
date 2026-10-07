@@ -60,7 +60,7 @@ func parseCandyCheckAnswer(body []byte, headers http.Header) (string, error) {
 		}
 		typ, _ := obj["type"].(string)
 		switch typ {
-		case "response.completed":
+		case "response.completed", "response.done":
 			snapshot, _ = obj["response"].(map[string]any)
 			completed = true
 		case "response.incomplete":
@@ -90,8 +90,14 @@ func parseCandyCheckAnswer(body []byte, headers http.Header) (string, error) {
 			completed = true
 		default:
 			if choices, ok := obj["choices"].([]any); ok {
+				if len(choices) > 1 {
+					return out.String(), invalid
+				}
 				for _, value := range choices {
 					choice, _ := value.(map[string]any)
+					if index, ok := choice["index"].(float64); ok && index != 0 {
+						return out.String(), invalid
+					}
 					if reason, _ := choice["finish_reason"].(string); reason != "" {
 						if reason != "stop" {
 							return out.String(), invalid
@@ -106,6 +112,9 @@ func parseCandyCheckAnswer(body []byte, headers http.Header) (string, error) {
 	if snapshot != nil {
 		answer, err := candyJSONAnswer(snapshot)
 		if err == nil {
+			if out.Len() > 0 && strings.TrimSpace(out.String()) != answer {
+				return out.String(), invalid
+			}
 			return answer, nil
 		}
 		// A completed event may omit output after sending deltas, but its
@@ -123,6 +132,9 @@ func parseCandyCheckAnswer(body []byte, headers http.Header) (string, error) {
 
 func candyJSONAnswer(obj map[string]any) (string, error) {
 	invalid := errors.New("检测响应格式无效、未正常结束或没有最终答案")
+	if obj == nil || obj["error"] != nil {
+		return "", invalid
+	}
 	if nested, ok := obj["response"].(map[string]any); ok {
 		obj = nested
 	}
