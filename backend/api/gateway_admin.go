@@ -85,6 +85,25 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		// route ops
 		gp.POST("/routes/:id/clear-pause", func(c *gin.Context) { clearGatewayRoutePause(c, d) })
 		gp.POST("/routes/:id/probe-model", func(c *gin.Context) { probeGatewayRouteModel(c, d) })
+		gp.POST("/routes/:id/candy-check/run", func(c *gin.Context) {
+			id, err := parseUintParam(c, "id")
+			if err != nil || id == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+				return
+			}
+			result, err := d.Gateway.RunCandyCheckNow(c.Request.Context(), id)
+			if err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					status = http.StatusNotFound
+				} else if errors.Is(err, gateway.ErrCandyCheckBusy) || errors.Is(err, gateway.ErrCandyCheckChanged) {
+					status = http.StatusConflict
+				}
+				c.JSON(status, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"result": result})
+		})
 		gp.POST("/routes/:id/candy-check/clear", func(c *gin.Context) {
 			id, err := parseUintParam(c, "id")
 			if err != nil {

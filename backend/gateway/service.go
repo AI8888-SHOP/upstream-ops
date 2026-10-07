@@ -108,8 +108,10 @@ type Service struct {
 
 	// modelProbeMu serializes a scheduler tick inside one process. Database
 	// leases still protect multiple processes/instances.
-	modelProbeMu sync.Mutex
-	candyCheckMu sync.Mutex
+	modelProbeMu        sync.Mutex
+	candyCheckMu        sync.Mutex
+	candyCheckSlotsOnce sync.Once
+	candyCheckSlots     chan struct{}
 
 	// ensureKeyLocks serializes creation of a managed upstream key by its
 	// stable channel/group name. It lives on Service rather than one admin

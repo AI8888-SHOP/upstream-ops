@@ -589,7 +589,7 @@ export function GatewayPage() {
 
   // Refresh only runtime test state, preserving any unsaved route edits.
   useEffect(() => {
-    if (!selectedGroup?.candy_check_enabled) return
+    if (!selectedGroup || (!selectedGroup.candy_check_enabled && !selectedGroup.candy_check_model)) return
     const groupID = selectedGroup.id
     let stopped = false
     let fetching = false
@@ -607,7 +607,7 @@ export function GatewayPage() {
     }
     const timer = window.setInterval(() => void refresh(), 15000)
     return () => { stopped = true; window.clearInterval(timer) }
-  }, [selectedGroup?.id, selectedGroup?.candy_check_enabled])
+  }, [selectedGroup?.id, selectedGroup?.candy_check_enabled, selectedGroup?.candy_check_model])
 
   useEffect(() => {
     void loadGroups()
@@ -1508,10 +1508,37 @@ export function GatewayPage() {
     try {
       await apiFetch(`/gateway/routes/${routeID}/candy-check/clear`, { method: "POST" })
       toast.success("已解除本组内该渠道的不降智检测冷却，下个检测周期再测")
-      await loadRoutes(selectedGroup.id)
+      await refreshRouteCandyCheck(routeID, selectedGroup.id)
       setGroupOverviewNonce((value) => value + 1)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "解除检测冷却失败")
+    }
+  }
+
+  async function refreshRouteCandyCheck(routeID: number, groupID: number) {
+    const res = await apiFetch<{ items: { route_id: number; candy_check?: GatewayRoute["candy_check"] | null }[] }>(`/gateway/groups/${groupID}/candy-checks`)
+    const state = res.items.find((item) => item.route_id === routeID)?.candy_check ?? undefined
+    setRouteDrafts((drafts) => drafts.map((route) => route.id === routeID ? { ...route, candy_check: state } : route))
+  }
+
+  async function runCandyCheck(routeID: number) {
+    if (!selectedGroup) return
+    const groupID = selectedGroup.id
+    try {
+      const response = await apiFetch<{ result: GatewayRoute["candy_check"] }>(`/gateway/routes/${routeID}/candy-check/run`, { method: "POST" })
+      const result = response.result
+      setRouteDrafts((drafts) => drafts.map((route) => route.id === routeID ? { ...route, candy_check: result } : route))
+      if (result?.status === "correct") {
+        toast.success("智商测试通过，糖果题答案正确")
+      } else if (result?.status === "skipped") {
+        toast.warning(result.reason || "该渠道未执行智商测试")
+      } else {
+        toast.error(result?.reason || "智商测试未通过")
+      }
+      setGroupOverviewNonce((value) => value + 1)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "智商测试失败")
+      try { await refreshRouteCandyCheck(routeID, groupID) } catch { /* 保留下次轮询重试 */ }
     }
   }
 
@@ -2060,6 +2087,9 @@ export function GatewayPage() {
                         onEnsureKeys={() => void ensureKeys()}
                         onClearRoutePause={(id) => void clearRoutePause(id)}
                         candyCheckEnabled={!!selectedGroup.candy_check_enabled}
+                        candyCheckModel={selectedGroup.candy_check_model ?? ""}
+                        candyCheckDisabledReason={selectedGroup.status !== "active" ? "请先启用网关组" : undefined}
+                        onRunCandyCheck={runCandyCheck}
                         onClearCandyCheck={clearCandyCheck}
                         onProbeModelCooldown={(routeID, model) =>
                           void probeModelCooldown(routeID, model)

@@ -138,7 +138,7 @@ func (r *GatewayRoutes) loadCandyChecks(routes []GatewayRoute) error {
 				continue
 			}
 		}
-		state.Active = group.CandyCheckEnabled && group.Status == GatewayGroupStatusActive && state.ConfigKey == GatewayCandyCheckConfigKey(group, route, provider)
+		state.Active = group.Status == GatewayGroupStatusActive && state.ConfigKey == GatewayCandyCheckConfigKey(group, route, provider)
 		route.CandyCheck = &state
 	}
 	return nil
@@ -183,13 +183,23 @@ func lockCandyContext(tx *gorm.DB, routeID uint) (*GatewayGroup, *GatewayRoute, 
 }
 
 func (r *GatewayRoutes) ClaimCandyCheck(routeID uint, configKey, model string, now time.Time, lease time.Duration) (*GatewayRouteCandyCheck, error) {
+	return r.claimCandyCheck(routeID, configKey, model, now, lease, false)
+}
+
+// Manual probes may run before the next scheduled check, including during a
+// cooldown, but must share the same lease with scheduled probes.
+func (r *GatewayRoutes) ClaimManualCandyCheck(routeID uint, configKey, model string, now time.Time, lease time.Duration) (*GatewayRouteCandyCheck, error) {
+	return r.claimCandyCheck(routeID, configKey, model, now, lease, true)
+}
+
+func (r *GatewayRoutes) claimCandyCheck(routeID uint, configKey, model string, now time.Time, lease time.Duration, manual bool) (*GatewayRouteCandyCheck, error) {
 	var claimed *GatewayRouteCandyCheck
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		group, route, provider, err := lockCandyContext(tx, routeID)
 		if err != nil {
 			return err
 		}
-		if !group.CandyCheckEnabled || group.Status != GatewayGroupStatusActive || !route.Enabled || route.RateLimitAutoDisabled || configKey != GatewayCandyCheckConfigKey(group, route, provider) {
+		if (!manual && !group.CandyCheckEnabled) || group.Status != GatewayGroupStatusActive || !route.Enabled || route.RateLimitAutoDisabled || configKey != GatewayCandyCheckConfigKey(group, route, provider) {
 			return nil
 		}
 		if provider != nil && !provider.Enabled {
@@ -203,7 +213,7 @@ func (r *GatewayRoutes) ClaimCandyCheck(routeID uint, configKey, model string, n
 		if state.LeaseUntil != nil && state.LeaseUntil.After(now) {
 			return nil
 		}
-		if state.ConfigKey == configKey && state.NextCheckAt != nil && state.NextCheckAt.After(now) {
+		if !manual && state.ConfigKey == configKey && state.NextCheckAt != nil && state.NextCheckAt.After(now) {
 			return nil
 		}
 		if state.ConfigKey != configKey {
@@ -228,18 +238,26 @@ func (r *GatewayRoutes) ClaimCandyCheck(routeID uint, configKey, model string, n
 }
 
 func (r *GatewayRoutes) FinishCandyCheck(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time) (bool, error) {
+	return r.finishCandyCheck(claim, result, now, false)
+}
+
+func (r *GatewayRoutes) FinishManualCandyCheck(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time) (bool, error) {
+	return r.finishCandyCheck(claim, result, now, true)
+}
+
+func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time, manual bool) (bool, error) {
 	updated := false
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		group, route, provider, err := lockCandyContext(tx, claim.RouteID)
 		if err != nil {
 			return err
 		}
-		if !group.CandyCheckEnabled || group.Status != GatewayGroupStatusActive || claim.ConfigKey != GatewayCandyCheckConfigKey(group, route, provider) {
+		if (!manual && !group.CandyCheckEnabled) || group.Status != GatewayGroupStatusActive || claim.ConfigKey != GatewayCandyCheckConfigKey(group, route, provider) {
 			return nil
 		}
 		next := now.Add(time.Duration(group.CandyCheckIntervalMinutes) * time.Minute)
 		var until *time.Time
-		if result.Status == "incorrect" || result.Status == "error" {
+		if group.CandyCheckEnabled && (result.Status == "incorrect" || result.Status == "error") {
 			end := now.Add(time.Duration(group.CandyCheckCooldownMinutes) * time.Minute)
 			until = &end
 			if end.After(next) {
@@ -248,9 +266,19 @@ func (r *GatewayRoutes) FinishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 		}
 		// Busy or locally cancelled probes do not alter the previous verdict or
 		// clear an existing cooldown; retry later without penalizing the upstream.
+		if (result.Status == "deferred" || result.Status == "skipped") && claim.CooldownUntil != nil && claim.CooldownUntil.After(next) {
+			next = *claim.CooldownUntil
+		}
 		updates := map[string]any{"lease_until": nil, "lease_token": "", "next_check_at": next}
+		if !group.CandyCheckEnabled {
+			updates["next_check_at"] = nil
+		}
 		if result.Status != "deferred" {
-			updates["checked_at"], updates["cooldown_until"] = now, until
+			updates["checked_at"] = now
+			// Skipping an unsupported/unavailable route is not proof of recovery.
+			if result.Status != "skipped" {
+				updates["cooldown_until"] = until
+			}
 			updates["status"], updates["answer_preview"], updates["reason"] = result.Status, result.AnswerPreview, result.Reason
 			updates["status_code"], updates["latency_ms"] = result.StatusCode, result.LatencyMS
 		}

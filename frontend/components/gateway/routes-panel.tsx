@@ -196,6 +196,9 @@ function RouteUserAgentSelect({
 
 type RoutesPanelProps = {
   candyCheckEnabled: boolean
+  candyCheckModel: string
+  candyCheckDisabledReason?: string
+  onRunCandyCheck: (routeID: number) => Promise<void>
   onClearCandyCheck: (routeID: number) => Promise<void>
   groupID: number
   busy: boolean
@@ -222,6 +225,9 @@ type RoutesPanelProps = {
 
 export function RoutesPanel({
   candyCheckEnabled,
+  candyCheckModel,
+  candyCheckDisabledReason,
+  onRunCandyCheck,
   onClearCandyCheck,
   groupID,
   busy,
@@ -780,7 +786,13 @@ export function RoutesPanel({
                       ) : null}
                     </div>
                   ) : null}
-                  {r.id ? <RouteCandyCheckStatus enabled={candyCheckEnabled} state={r.candy_check} onClear={() => onClearCandyCheck(r.id as number)} /> : null}
+                  <RouteCandyCheckStatus
+                    enabled={candyCheckEnabled}
+                    state={r.candy_check}
+                    disabledReason={!r.id ? "请先保存渠道路由" : candyCheckDisabledReason || (!r.enabled || r.rate_limit_auto_disabled ? "请先启用并保存渠道路由" : !candyCheckModel.trim() ? "请在编辑组中填写并保存检测模型" : busy ? "请等待当前操作完成" : undefined)}
+                    onRun={() => onRunCandyCheck(r.id as number)}
+                    onClear={() => onClearCandyCheck(r.id as number)}
+                  />
                   {hasRoutePauseError(r) && (
                     <div className="mt-1 flex flex-wrap items-center gap-1">
                       {isRouteTempPaused(r.temp_unschedulable_until) ? (

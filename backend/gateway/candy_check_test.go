@@ -3,10 +3,12 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -126,6 +128,94 @@ func TestCandyCheckWorkerScopeMappingAndRecovery(t *testing.T) {
 	list, _ = routes.ListByGroupID(group.ID)
 	if calls.Load() != 2 || list[0].CandyCheck.Status != "skipped" {
 		t.Fatalf("allowlist ignored: calls=%d state=%+v", calls.Load(), list[0].CandyCheck)
+	}
+}
+
+func TestManualAndScheduledCandyChecksShareConcurrencyLimit(t *testing.T) {
+	started := make(chan struct{}, 3)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	resume := func() { releaseOnce.Do(func() { close(release) }) }
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"21"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+	defer resume()
+	db := openGatewayTestDB(t)
+	groups, routes, providers := storage.NewGatewayGroups(db), storage.NewGatewayRoutes(db), storage.NewGatewayProviders(db)
+	cipher, err := crypto.NewCipher("manual-concurrency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := cipher.Encrypt("test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &storage.GatewayProvider{Name: "manual-concurrency", BaseURL: upstream.URL, APIKeyCipher: secret, Enabled: true}
+	if err := providers.Create(provider); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(groups, nil, routes, nil, nil, nil, nil, cipher, nil)
+	svc.SetProviders(providers)
+	var routeIDs []uint
+	for i := 0; i < 3; i++ {
+		group := &storage.GatewayGroup{Name: fmt.Sprintf("manual-limit-%d", i), GatewayCandyCheckPolicy: storage.GatewayCandyCheckPolicy{CandyCheckEnabled: i == 1, CandyCheckModel: "test-model"}}
+		if err := groups.Create(group); err != nil {
+			t.Fatal(err)
+		}
+		if err := routes.SaveForGroup(group.ID, []storage.GatewayRoute{{Enabled: true, SourceKind: "provider", GatewayProviderID: provider.ID}}); err != nil {
+			t.Fatal(err)
+		}
+		list, err := routes.ListByGroupID(group.ID)
+		if err != nil || len(list) != 1 {
+			t.Fatalf("routes: %v", err)
+		}
+		routeIDs = append(routeIDs, list[0].ID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 2)
+	waitStarted := func() {
+		t.Helper()
+		select {
+		case <-started:
+		case err := <-done:
+			t.Fatalf("probe exited before reaching upstream: %v", err)
+		case <-ctx.Done():
+			t.Fatal("probe did not reach upstream")
+		}
+	}
+	go func() { _, err := svc.RunCandyCheckNow(ctx, routeIDs[0]); done <- err }()
+	waitStarted()
+	go func() { svc.RunCandyChecks(ctx); done <- nil }()
+	waitStarted()
+	if _, err := svc.RunCandyCheckNow(ctx, routeIDs[2]); !errors.Is(err, ErrCandyCheckBusy) {
+		t.Fatalf("third concurrent probe accepted: %v", err)
+	}
+	loaded, err := routes.FindByID(routeIDs[2])
+	if err != nil || loaded.CandyCheck != nil {
+		t.Fatalf("rejected probe claimed lease: %+v %v", loaded, err)
+	}
+	resume()
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal("probe did not finish")
+		}
+	}
+	if result, err := svc.RunCandyCheckNow(ctx, routeIDs[2]); err != nil || result == nil || result.Status != "correct" {
+		t.Fatalf("slot not released: %+v %v", result, err)
 	}
 }
 

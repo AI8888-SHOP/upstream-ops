@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,9 @@ const candyCheckPrompt = `在一个黑色的袋子里放有三种口味的糖果
 
 const candyCheckTimeout = 90 * time.Second
 const candyCheckBodyLimit = 2 << 20
+
+var ErrCandyCheckBusy = errors.New("该渠道已在检测或检测任务繁忙，请稍后重试")
+var ErrCandyCheckChanged = errors.New("检测期间配置或冷却状态已变更，本次结果未应用，请刷新后重试")
 
 // Two workers bound cost and resource usage. Leases also exclude duplicate
 // probes across instances; TryLock prevents overlapping cron ticks locally.
@@ -80,41 +84,101 @@ func (s *Service) logCandyCheckError(message string, routeID uint, err error) {
 }
 
 func (s *Service) runRouteCandyCheck(ctx context.Context, route storage.GatewayRoute) {
+	if _, err := s.runCandyCheck(ctx, route, false); err != nil && !errors.Is(err, ErrCandyCheckBusy) {
+		s.logCandyCheckError("run candy check", route.ID, err)
+	}
+}
+
+// RunCandyCheckNow uses the saved route and policy, without waiting for a
+// scheduled interval or cooldown. Disabled automatic checks remain disabled.
+func (s *Service) RunCandyCheckNow(ctx context.Context, routeID uint) (*storage.GatewayRouteCandyCheck, error) {
+	if s == nil || s.Routes == nil || s.Groups == nil || routeID == 0 {
+		return nil, errors.New("智商测试服务不可用")
+	}
+	route, err := s.Routes.FindByID(routeID)
+	if err != nil {
+		return nil, err
+	}
+	return s.runCandyCheck(ctx, *route, true)
+}
+
+func (s *Service) runCandyCheck(ctx context.Context, route storage.GatewayRoute, manual bool) (*storage.GatewayRouteCandyCheck, error) {
+	// Scheduled and manual requests share the same process-wide budget.
+	s.candyCheckSlotsOnce.Do(func() { s.candyCheckSlots = make(chan struct{}, 2) })
+	select {
+	case s.candyCheckSlots <- struct{}{}:
+		defer func() { <-s.candyCheckSlots }()
+	default:
+		return nil, ErrCandyCheckBusy
+	}
 	group, err := s.Groups.FindByID(route.GatewayGroupID)
 	if err != nil {
-		s.logCandyCheckError("load candy check group", route.ID, err)
-		return
+		return nil, err
 	}
-	if !group.CandyCheckEnabled || group.Status != storage.GatewayGroupStatusActive {
-		return
+	if (!manual && !group.CandyCheckEnabled) || group.Status != storage.GatewayGroupStatusActive || !route.Enabled || route.RateLimitAutoDisabled {
+		if !manual {
+			return nil, nil
+		}
+		return nil, errors.New("请先启用网关组及该渠道路由")
+	}
+	if strings.TrimSpace(group.CandyCheckModel) == "" {
+		return nil, errors.New("请先在编辑网关组的不降智检测中填写并保存检测模型")
 	}
 	model, _ := ResolveModel(group.CandyCheckModel, ParseModelMapping(route.ModelMappingJSON), ParseModelMapping(group.ModelMappingJSON))
 	var provider *storage.GatewayProvider
 	if route.NormalizeSourceKind() == storage.GatewayRouteSourceProvider {
 		if s.Providers == nil {
-			return
+			return nil, errors.New("直连渠道服务不可用")
 		}
 		provider, err = s.Providers.FindByID(route.GatewayProviderID)
 		if err != nil || !provider.Enabled {
-			return
+			if !manual {
+				return nil, nil
+			}
+			return nil, errors.New("请先启用直连渠道")
 		}
 	}
 	key := storage.GatewayCandyCheckConfigKey(group, &route, provider)
-	claim, err := s.Routes.ClaimCandyCheck(route.ID, key, model, time.Now(), candyCheckTimeout+30*time.Second)
+	claimCheck := s.Routes.ClaimCandyCheck
+	finishCheck := s.Routes.FinishCandyCheck
+	if manual {
+		claimCheck, finishCheck = s.Routes.ClaimManualCandyCheck, s.Routes.FinishManualCandyCheck
+	}
+	claim, err := claimCheck(route.ID, key, model, time.Now(), candyCheckTimeout+30*time.Second)
 	if err != nil {
-		s.logCandyCheckError("claim candy check", route.ID, err)
-		return
+		return nil, err
 	}
 	if claim == nil {
-		return
+		return nil, ErrCandyCheckBusy
 	}
 	result := s.probeCandyRoute(ctx, group, route, model)
 	if ctx.Err() != nil {
 		result.Status = "deferred"
 	}
-	if _, err := s.Routes.FinishCandyCheck(*claim, result, time.Now()); err != nil {
-		s.logCandyCheckError("finish candy check", route.ID, err)
+	updated, err := finishCheck(*claim, result, time.Now())
+	if err != nil {
+		return nil, err
 	}
+	if !updated {
+		return nil, ErrCandyCheckChanged
+	}
+	if !manual {
+		return nil, nil
+	}
+	if result.Status == "deferred" {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New(result.Reason)
+	}
+	loaded, err := s.Routes.FindByID(route.ID)
+	if err != nil {
+		return nil, err
+	}
+	if loaded.CandyCheck == nil || !loaded.CandyCheck.Active || loaded.CandyCheck.Status != result.Status {
+		return nil, ErrCandyCheckChanged
+	}
+	return loaded.CandyCheck, nil
 }
 
 func (s *Service) probeCandyRoute(parent context.Context, group *storage.GatewayGroup, route storage.GatewayRoute, model string) (result storage.GatewayRouteCandyCheck) {

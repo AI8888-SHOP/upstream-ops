@@ -73,11 +73,16 @@ func TestCandyCheckPostgresExclusiveLease(t *testing.T) {
 	claims := make(chan *GatewayRouteCandyCheck, 8)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
+		manual := i%2 == 0
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			claim, err := NewGatewayRoutes(db).ClaimCandyCheck(list[0].ID, key, "model", time.Now(), time.Minute)
+			claimCheck := NewGatewayRoutes(db).ClaimCandyCheck
+			if manual {
+				claimCheck = NewGatewayRoutes(db).ClaimManualCandyCheck
+			}
+			claim, err := claimCheck(list[0].ID, key, "model", time.Now(), time.Minute)
 			if err != nil {
 				t.Error(err)
 			}
