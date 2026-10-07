@@ -28,4 +28,4 @@
 
 组创建/更新接口新增 `candy_check_enabled`、`candy_check_model`、`candy_check_interval_minutes`、`candy_check_cooldown_minutes`、`candy_check_reasoning_effort`。推理强度取 `default`、`low`、`medium`、`high`。
 
-路由列表的 `candy_check` 返回最近状态；`active=false` 表示当前配置已不再使用该历史结果。`POST /api/gateway/routes/:id/candy-check/clear` 仅解除该路由的糖果题限制，不改变其他冷却。
+路由列表的 `candy_check` 返回最近状态；`active=false` 表示当前配置已不再使用该历史结果。`GET /api/gateway/groups/:id/candy-checks` 提供轻量状态刷新，不向上游发请求。`POST /api/gateway/routes/:id/candy-check/clear` 仅解除该路由的糖果题限制，不改变其他冷却。

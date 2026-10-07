@@ -40,6 +40,25 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 
 		// routes under group
 		gp.GET("/groups/:id/routes", func(c *gin.Context) { listGatewayGroupRoutes(c, d) })
+		gp.GET("/groups/:id/candy-checks", func(c *gin.Context) {
+			id, err := parseUintParam(c, "id")
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+				return
+			}
+			// Runtime status polling must not fetch upstream source groups or
+			// replace the operator's unsaved route settings.
+			routes, err := d.Gateway.Routes.ListByGroupID(id)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			items := make([]gin.H, 0, len(routes))
+			for _, route := range routes {
+				items = append(items, gin.H{"route_id": route.ID, "candy_check": route.CandyCheck})
+			}
+			c.JSON(http.StatusOK, gin.H{"items": items})
+		})
 		gp.PUT("/groups/:id/routes", func(c *gin.Context) { saveGatewayGroupRoutes(c, d) })
 		gp.GET("/groups/:id/routes/:route_id/models/preview", func(c *gin.Context) { previewGatewayRouteModels(c, d) })
 		gp.POST("/groups/:id/routes/ensure-keys", func(c *gin.Context) { ensureGatewayGroupRouteKeys(c, d) })

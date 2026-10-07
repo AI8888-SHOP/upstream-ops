@@ -597,9 +597,9 @@ export function GatewayPage() {
       if (fetching || document.hidden) return
       fetching = true
       try {
-        const res = await apiFetch<{ items: GatewayRoute[] }>(`/gateway/groups/${groupID}/routes`)
+        const res = await apiFetch<{ items: { route_id: number; candy_check?: GatewayRoute["candy_check"] | null }[] }>(`/gateway/groups/${groupID}/candy-checks`)
         if (stopped) return
-        const states = new Map((res.items ?? []).map((route) => [route.id, route.candy_check]))
+        const states = new Map((res.items ?? []).map((route) => [route.route_id, route.candy_check ?? undefined]))
         setRouteDrafts((drafts) => drafts.map((route) => route.id && states.has(route.id) ? { ...route, candy_check: states.get(route.id) } : route))
       } catch {
         // Preserve the last result; the normal refresh action reports errors.

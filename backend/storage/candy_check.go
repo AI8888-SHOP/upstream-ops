@@ -85,37 +85,57 @@ func (r *GatewayRoutes) loadCandyChecks(routes []GatewayRoute) error {
 	}
 	groups := make(map[uint]*GatewayGroup)
 	providers := make(map[uint]*GatewayProvider)
+	groupIDs, providerIDs := make(map[uint]struct{}), make(map[uint]struct{})
+	for _, route := range routes {
+		if _, exists := states[route.ID]; !exists {
+			continue
+		}
+		groupIDs[route.GatewayGroupID] = struct{}{}
+		if route.NormalizeSourceKind() == GatewayRouteSourceProvider {
+			providerIDs[route.GatewayProviderID] = struct{}{}
+		}
+	}
+	ids = ids[:0]
+	for id := range groupIDs {
+		ids = append(ids, id)
+	}
+	var groupRows []GatewayGroup
+	if len(ids) > 0 {
+		if err := r.db.Where("id IN ?", ids).Find(&groupRows).Error; err != nil {
+			return err
+		}
+	}
+	for i := range groupRows {
+		groups[groupRows[i].ID] = &groupRows[i]
+	}
+	ids = ids[:0]
+	for id := range providerIDs {
+		ids = append(ids, id)
+	}
+	var providerRows []GatewayProvider
+	if len(ids) > 0 {
+		if err := r.db.Where("id IN ?", ids).Find(&providerRows).Error; err != nil {
+			return err
+		}
+	}
+	for i := range providerRows {
+		providers[providerRows[i].ID] = &providerRows[i]
+	}
 	for i := range routes {
 		route := &routes[i]
 		state, ok := states[route.ID]
 		if !ok {
 			continue
 		}
-		group, ok := groups[route.GatewayGroupID]
-		if !ok {
-			var loaded GatewayGroup
-			if err := r.db.First(&loaded, route.GatewayGroupID).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					continue
-				}
-				return err
-			}
-			group = &loaded
-			groups[group.ID] = group
+		group := groups[route.GatewayGroupID]
+		if group == nil {
+			continue
 		}
 		var provider *GatewayProvider
 		if route.NormalizeSourceKind() == GatewayRouteSourceProvider {
-			provider, ok = providers[route.GatewayProviderID]
-			if !ok {
-				var loaded GatewayProvider
-				if err := r.db.First(&loaded, route.GatewayProviderID).Error; err != nil {
-					if errors.Is(err, gorm.ErrRecordNotFound) {
-						continue
-					}
-					return err
-				}
-				provider = &loaded
-				providers[provider.ID] = provider
+			provider = providers[route.GatewayProviderID]
+			if provider == nil {
+				continue
 			}
 		}
 		state.Active = group.CandyCheckEnabled && group.Status == GatewayGroupStatusActive && state.ConfigKey == GatewayCandyCheckConfigKey(group, route, provider)

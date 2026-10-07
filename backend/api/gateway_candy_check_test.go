@@ -73,6 +73,16 @@ func TestGatewayCandyCheckAPI(t *testing.T) {
 	if strings.Contains(w.Body.String(), "lease_token") || strings.Contains(w.Body.String(), "config_key") || strings.Contains(w.Body.String(), "cipher") {
 		t.Fatalf("private probe state exposed: %s", w.Body.String())
 	}
+	w = request(http.MethodGet, fmt.Sprintf("/api/gateway/groups/%d/candy-checks", group.ID), "")
+	var states struct {
+		Items []struct {
+			RouteID    uint                            `json:"route_id"`
+			CandyCheck *storage.GatewayRouteCandyCheck `json:"candy_check"`
+		} `json:"items"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &states) != nil || len(states.Items) != 1 || states.Items[0].RouteID != route.ID || states.Items[0].CandyCheck.Status != "incorrect" {
+		t.Fatalf("runtime state endpoint: %s", w.Body.String())
+	}
 	w = request(http.MethodPost, fmt.Sprintf("/api/gateway/routes/%d/candy-check/clear", route.ID), "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear: %s", w.Body.String())
