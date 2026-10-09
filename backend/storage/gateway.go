@@ -718,6 +718,9 @@ func (r *GatewayGroups) Delete(id uint) error {
 			if err := tx.Where("route_id IN ?", routeIDs).Delete(&GatewayRouteCandyCheck{}).Error; err != nil {
 				return err
 			}
+			if err := tx.Where("route_id IN ?", routeIDs).Delete(&GatewayCandyCheckEvent{}).Error; err != nil {
+				return err
+			}
 			if err := tx.Where("route_id IN ?", routeIDs).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {
 				return err
 			}
@@ -1965,6 +1968,9 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 				continue
 			}
 			if err := tx.Where("route_id = ?", id).Delete(&GatewayRouteCandyCheck{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("route_id = ?", id).Delete(&GatewayCandyCheckEvent{}).Error; err != nil {
 				return err
 			}
 			if err := tx.Where("route_id = ?", id).Delete(&GatewayRouteModelCooldown{}).Error; err != nil {

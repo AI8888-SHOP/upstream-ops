@@ -776,6 +776,8 @@ async function copyText(label: string, text: string) {
 
 function attemptKindLabel(kind?: string) {
   switch (kind) {
+    case "scheduling":
+      return "无可用渠道（未请求上游）"
     case "recovery":
       return "冷却恢复"
     case "retry":
@@ -805,6 +807,7 @@ function AttemptBadge({
 }) {
   const attempt = u.attempt && u.attempt > 0 ? u.attempt : 1
   const kind = (u.attempt_kind || "").trim()
+  if (kind === "scheduling") return <span className="text-[10px] text-muted-foreground">未请求上游 · 无可用渠道</span>
   const multi = (chainTotal ?? 0) > 1
   const isRetryish =
     kind === "retry" ||

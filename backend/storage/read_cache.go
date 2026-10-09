@@ -314,6 +314,7 @@ func cloneGatewayRoutes(items []GatewayRoute) []GatewayRoute {
 func cloneGatewayRoute(item GatewayRoute) GatewayRoute {
 	if item.CandyCheck != nil {
 		state := *item.CandyCheck
+		state.BackoffUntil = clonePointer(state.BackoffUntil)
 		state.CheckedAt = clonePointer(state.CheckedAt)
 		state.NextCheckAt = clonePointer(state.NextCheckAt)
 		state.CooldownUntil = clonePointer(state.CooldownUntil)

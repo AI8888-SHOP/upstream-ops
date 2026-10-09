@@ -766,34 +766,3 @@ func TestCoordinatedModelErrorRejectionSuppressesSameSourceRetries(t *testing.T)
 		t.Fatal("ordinary caller error should retain explicit validation semantics")
 	}
 }
-
-func TestCoordinatedAttemptFirstTokenTimeoutFollowsTransportRoutes(t *testing.T) {
-	plan := []coordinatedRoutePlan{
-		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 1}}, TryOnRoute: 0, MaxTries: 2},
-		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 1}}, TryOnRoute: 1, MaxTries: 2},
-		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 2}}, TryOnRoute: 0, MaxTries: 2},
-		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 2}}, TryOnRoute: 1, MaxTries: 2},
-	}
-	configured := 7 * time.Second
-	transportGroup := &storage.GatewayGroup{RetryEnabled: true, FailoverEnabled: true, FailoverMax: 1}
-	for _, number := range []int{1, 2} {
-		if got := coordinatedAttemptFirstTokenTimeout(configured, transportGroup, false, plan, number, 1); got != configured {
-			t.Fatalf("route 1 attempt %d timeout=%s, want %s", number, got, configured)
-		}
-	}
-	for _, number := range []int{3, 4} {
-		if got := coordinatedAttemptFirstTokenTimeout(configured, transportGroup, false, plan, number, 2); got != 0 {
-			t.Fatalf("last route attempt %d timeout=%s, want disabled", number, got)
-		}
-	}
-	noTransportFailover := &storage.GatewayGroup{RetryEnabled: true, FailoverEnabled: false, FailoverMax: 0}
-	if got := coordinatedAttemptFirstTokenTimeout(configured, noTransportFailover, false, plan, 1, 1); got != 0 {
-		t.Fatalf("validation-only timeout=%s, want disabled", got)
-	}
-	if got := coordinatedAttemptFirstTokenTimeout(configured, transportGroup, true, plan, 1, 1); got != configured {
-		t.Fatalf("hedge primary timeout=%s, want %s", got, configured)
-	}
-	if got := coordinatedAttemptFirstTokenTimeout(configured, transportGroup, true, plan, len(plan), 2); got != 0 {
-		t.Fatalf("last hedge timeout=%s, want disabled", got)
-	}
-}

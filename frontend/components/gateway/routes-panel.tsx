@@ -722,6 +722,11 @@ export function RoutesPanel({
                         倍率超限
                       </Badge>
                     ) : null}
+                    <label className="flex items-center gap-1 text-[11px] text-muted-foreground" title="普通渠道无候选或失败后使用；对冲开启时可作为后续备选。仍遵守组倍率上限、支持模型及质量限制，不受普通渠道相对溢价限制。保存后生效。">
+                      <Switch checked={r.fallback_only === true} aria-label="保底渠道"
+                        onCheckedChange={(v) => setRouteDrafts((prev) => prev.map((route, i) => i === idx ? { ...route, fallback_only: v } : route))} />
+                      保底
+                    </label>
                   </div>
                 </TableCell>
                 <TableCell className="text-xs max-w-36">
@@ -787,6 +792,7 @@ export function RoutesPanel({
                     </div>
                   ) : null}
                   <RouteCandyCheckStatus
+                    routeID={r.id}
                     enabled={candyCheckEnabled}
                     state={r.candy_check}
                     disabledReason={!r.id ? "请先保存渠道路由" : candyCheckDisabledReason || (!r.enabled || r.rate_limit_auto_disabled ? "请先启用并保存渠道路由" : !candyCheckModel.trim() ? "请在编辑组中填写并保存检测模型" : busy ? "请等待当前操作完成" : undefined)}

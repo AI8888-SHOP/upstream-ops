@@ -37,12 +37,12 @@ func TestIsSourceGroupIDPlaceholder(t *testing.T) {
 
 func TestIsFailoverStatus(t *testing.T) {
 	// 默认：仅 0 / 429 / 5xx
-	for _, code := range []int{0, 429, 500, 502, 503} {
+	for _, code := range []int{0, 408, 429, 500, 502, 503, 504, 524} {
 		if !(*Service)(nil).isFailoverStatus(code, false) {
 			t.Fatalf("default: status %d should failover", code)
 		}
 	}
-	for _, code := range []int{200, 400, 401, 403, 404, 408, 422} {
+	for _, code := range []int{200, 400, 401, 403, 404, 422} {
 		if (*Service)(nil).isFailoverStatus(code, false) {
 			t.Fatalf("default: status %d should NOT failover", code)
 		}
@@ -488,44 +488,5 @@ func TestClampFirstTokenTimeoutSec(t *testing.T) {
 	}
 	if (*Service)(nil).clampFirstTokenTimeoutSec(999) != 300 {
 		t.Fatal("cap 300")
-	}
-}
-
-func TestEffectiveFirstTokenTimeout(t *testing.T) {
-	cfg := 30 * time.Second
-
-	// 未配置：始终关闭
-	if got := (*Service)(nil).effectiveFirstTokenTimeout(0, true, true, 0, 8, true); got != 0 {
-		t.Fatalf("configured 0 => 0, got %s", got)
-	}
-
-	// 中间渠道且还能顺延：启用
-	if got := (*Service)(nil).effectiveFirstTokenTimeout(cfg, true, true, 0, 8, true); got != cfg {
-		t.Fatalf("mid route with failover => configured, got %s", got)
-	}
-
-	// 最后一条可试路由（无更多路由）：关闭
-	if got := (*Service)(nil).effectiveFirstTokenTimeout(cfg, true, true, 0, 8, false); got != 0 {
-		t.Fatalf("last route (no more) => 0, got %s", got)
-	}
-
-	// 顺延次数已用尽：关闭
-	if got := (*Service)(nil).effectiveFirstTokenTimeout(cfg, true, true, 1, 1, true); got != 0 {
-		t.Fatalf("failover max exhausted => 0, got %s", got)
-	}
-
-	// 顺延关闭：关闭
-	if got := (*Service)(nil).effectiveFirstTokenTimeout(cfg, true, false, 0, 8, true); got != 0 {
-		t.Fatalf("failover disabled => 0, got %s", got)
-	}
-
-	// 重试总开关关闭：关闭
-	if got := (*Service)(nil).effectiveFirstTokenTimeout(cfg, false, true, 0, 8, true); got != 0 {
-		t.Fatalf("retry disabled => 0, got %s", got)
-	}
-
-	// 首条失败后 failoversDone 仍为 0、且还有下家：仍启用
-	if got := (*Service)(nil).effectiveFirstTokenTimeout(cfg, true, true, 0, 1, true); got != cfg {
-		t.Fatalf("first of two with max=1 => configured, got %s", got)
 	}
 }

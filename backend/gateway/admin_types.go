@@ -241,6 +241,7 @@ type ProviderModelsPreview struct {
 
 // RouteInput 保存路由时的单条输入。
 type RouteInput struct {
+	FallbackOnly                bool    `json:"fallback_only"`
 	ID                          uint    `json:"id"`
 	SourceKind                  string  `json:"source_kind"`
 	SourceChannelID             uint    `json:"source_channel_id"`

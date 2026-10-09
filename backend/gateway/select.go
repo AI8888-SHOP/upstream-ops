@@ -104,6 +104,9 @@ func IsRouteSchedulableForModel(route *storage.GatewayRoute, model string, now t
 	if route.CandyCheck.Blocks(now) {
 		return false
 	}
+	if route.CandyCheck.BackingOff(now) {
+		return false
+	}
 	// Cache-health blacklists are source-wide and therefore apply regardless
 	// of the requested model. Expired snapshots are harmless until the next
 	// evaluator refreshes them.
@@ -310,6 +313,11 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 		withoutRestrictions.TempUnschedulableUntil = nil
 		withoutRestrictions.ModelCooldowns = nil
 		withoutRestrictions.CacheHealthBlacklistedUntil = nil
+		if withoutRestrictions.CandyCheck != nil {
+			state := *withoutRestrictions.CandyCheck
+			state.BackoffUntil = nil
+			withoutRestrictions.CandyCheck = &state
+		}
 		if !IsRouteSchedulableForModel(&withoutRestrictions, requestedModel, now) {
 			continue
 		}
@@ -323,7 +331,8 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 			((cooldown.ProbeStatus == storage.GatewayModelProbeStatusProbing) ||
 				(cooldown.NextProbeAt != nil && !cooldown.NextProbeAt.After(now)))
 		cacheBlocked := route.CacheHealthBlacklistedUntil != nil && route.CacheHealthBlacklistedUntil.After(now)
-		if !modelCooling && !probePending && !cacheBlocked {
+		probeBackoff := route.CandyCheck.BackingOff(now)
+		if !modelCooling && !probePending && !cacheBlocked && !probeBackoff {
 			// A healthy route means automatic restrictions did not empty the pool.
 			// Keep every cooldown/blacklist intact on the normal hot path.
 			return routes
@@ -482,6 +491,11 @@ func (rt *Runtime) recoverWhenAllRoutesRestricted(
 		if candidate.cacheBlocked {
 			recovered[candidate.index].CacheHealthBlacklistedUntil = nil
 		}
+		if recovered[candidate.index].CandyCheck != nil {
+			state := *recovered[candidate.index].CandyCheck
+			state.BackoffUntil = nil
+			recovered[candidate.index].CandyCheck = &state
+		}
 		if rt.Log != nil {
 			rt.Log.Info(
 				"emergency gateway restriction recovery",
@@ -527,6 +541,17 @@ func (rt *Runtime) sortRoutesWithAffinity(
 	normal := SortRoutesForModel(routes, groupsByChannel, direction, now, exclude, model)
 	if rt == nil || affinity == nil || affinity.PreferredRouteID == 0 || affinity.LookupKey.Fingerprint == "" {
 		return normal
+	}
+	// A previous reserve winner must not pin new requests to the reserve while
+	// normal routes are healthy, or start an unnecessary reserve recovery probe.
+	for _, route := range routes {
+		if route.ID == affinity.PreferredRouteID && route.FallbackOnly {
+			for _, candidate := range normal {
+				if !candidate.Route.FallbackOnly {
+					return normal
+				}
+			}
+		}
 	}
 	if exclude != nil {
 		if _, excluded := exclude[affinity.PreferredRouteID]; excluded {

@@ -146,6 +146,7 @@ func (a *AdminService) SaveRoutes(groupID uint, inputs []RouteInput) ([]storage.
 			uaCustom = ""
 		}
 		route := storage.GatewayRoute{
+			FallbackOnly:          in.FallbackOnly,
 			ID:                    in.ID,
 			SourceKind:            kind,
 			SourceChannelID:       in.SourceChannelID,

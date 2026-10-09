@@ -83,6 +83,23 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.POST("/keys/:id/reveal", func(c *gin.Context) { revealGatewayKey(c, d) })
 
 		// route ops
+		gp.GET("/routes/:id/candy-check/history", func(c *gin.Context) {
+			id, err := parseUintParam(c, "id")
+			if err != nil || id == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+				return
+			}
+			if _, err := d.Gateway.Routes.FindByID(id); err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "route not found"})
+				return
+			}
+			events, err := d.Gateway.Routes.CandyCheckHistory(id)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load history"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"items": events})
+		})
 		gp.POST("/routes/:id/clear-pause", func(c *gin.Context) { clearGatewayRoutePause(c, d) })
 		gp.POST("/routes/:id/probe-model", func(c *gin.Context) { probeGatewayRouteModel(c, d) })
 		gp.POST("/routes/:id/candy-check/run", func(c *gin.Context) {

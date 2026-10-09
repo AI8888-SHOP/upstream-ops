@@ -93,28 +93,6 @@ func TestRemainingAttemptsNeverResetsOrExtendsBudget(t *testing.T) {
 	}
 }
 
-func TestFirstTokenTimeoutIgnoresSuppressedAlternatives(t *testing.T) {
-	group := &storage.GatewayGroup{RetryEnabled: true, FailoverEnabled: true, FailoverMax: 2}
-	plan := []coordinatedRoutePlan{
-		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 1}}},
-		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 2}}},
-		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 1}}, TryOnRoute: 1},
-		{Candidate: ScoredRoute{Route: storage.GatewayRoute{ID: 2}}, TryOnRoute: 1},
-	}
-	eligible := func(entry coordinatedRoutePlan) bool { return entry.Candidate.Route.ID != 1 }
-	if got := coordinatedAttemptFirstTokenTimeout(time.Second, group, false, plan, 2, 2, eligible); got != 0 {
-		t.Fatalf("suppressed route armed a pointless failover timer: %s", got)
-	}
-	// A retry on the last source is not an alternative transport route, but
-	// remains an available attempt under the explicit hedge policy.
-	if got := coordinatedAttemptFirstTokenTimeout(time.Second, group, true, plan, 2, 2, eligible); got != time.Second {
-		t.Fatalf("eligible hedge retry lost its timer: %s", got)
-	}
-	if got := coordinatedAttemptFirstTokenTimeout(time.Second, group, true, plan, 2, 2, func(coordinatedRoutePlan) bool { return false }); got != 0 {
-		t.Fatalf("exhausted hedge plan armed a pointless timer: %s", got)
-	}
-}
-
 func TestAvailabilityPublishesHealthWithoutWaitingForUnusableRetries(t *testing.T) {
 	for _, alternative := range []bool{false, true} {
 		t.Run(fmt.Sprintf("alternative=%v", alternative), func(t *testing.T) {
@@ -236,6 +214,7 @@ func TestAvailabilityFailoverThroughBothGatewayPaths(t *testing.T) {
 			}{
 				{"bad-gateway", 502, `{"error":{"message":"bad gateway"}}`},
 				{"busy", 503, `{"error":{"message":"busy"}}`},
+				{"timeout-524-reserve", 524, `<html>upstream timed out</html>`},
 				{"model-400", 400, `{"error":{"code":"model_not_found","message":"The requested model is unavailable"}}`},
 				{"model-404", 404, `{"error":{"message":"Model gpt-test is not supported by any configured account in this group"}}`},
 				{"balance", 403, `{"error":{"message":"Insufficient account balance"}}`},
@@ -295,7 +274,11 @@ func TestAvailabilityFailoverThroughBothGatewayPaths(t *testing.T) {
 							t.Fatal(err)
 						}
 						rate := float64(index+1) / 10
-						inputs = append(inputs, storage.GatewayRoute{GatewayGroupID: group.ID, Position: index, SourceKind: storage.GatewayRouteSourceProvider, GatewayProviderID: provider.ID, Enabled: true, UpstreamProtocol: storage.GatewayUpstreamProtocolOpenAIResponses, RateConvertMode: "custom", RateConvertValue: rate, BillingRateMultiplier: rate})
+						reserve := tc.name == "timeout-524-reserve" && index == 1
+						if reserve {
+							rate = 0.05
+						}
+						inputs = append(inputs, storage.GatewayRoute{FallbackOnly: reserve, GatewayGroupID: group.ID, Position: index, SourceKind: storage.GatewayRouteSourceProvider, GatewayProviderID: provider.ID, Enabled: true, UpstreamProtocol: storage.GatewayUpstreamProtocolOpenAIResponses, RateConvertMode: "custom", RateConvertValue: rate, BillingRateMultiplier: rate})
 					}
 					if err := routes.SaveForGroup(group.ID, inputs); err != nil {
 						t.Fatal(err)

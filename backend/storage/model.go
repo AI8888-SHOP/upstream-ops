@@ -646,6 +646,9 @@ func (GatewayKey) TableName() string { return "gateway_keys" }
 
 // GatewayRoute 是网关组绑定的一条上游路由（监控渠道或直连 Provider）。
 type GatewayRoute struct {
+	// Reserve routes are tried after normal candidates, within the same group
+	// price ceiling, model policy and health/quality restrictions.
+	FallbackOnly bool `gorm:"not null;default:false" json:"fallback_only"`
 	CandyCheck *GatewayRouteCandyCheck `gorm:"-" json:"candy_check,omitempty"`
 	// Request-local provider identity; populated by the availability filter.
 	SchedulerCredential string `gorm:"-" json:"-"`

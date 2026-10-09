@@ -723,6 +723,8 @@ export interface GatewayGroup {
 }
 
 export interface GatewayRouteCandyCheck {
+  error_streak?: number
+  backoff_until?: string
   route_id: number
   model: string
   status: "pending" | "correct" | "incorrect" | "error" | "skipped" | "manual"
@@ -735,6 +737,17 @@ export interface GatewayRouteCandyCheck {
   next_check_at?: string
   cooldown_until?: string
   lease_until?: string
+}
+
+export interface GatewayCandyCheckEvent {
+  backoff_until?: string
+  id: number
+  status: string
+  reason: string
+  model: string
+  manual: boolean
+  created_at: string
+  cooldown_until?: string
 }
 
 export interface GatewayGroupCloneKeyResult {
@@ -878,6 +891,7 @@ export interface GatewayRouteModelCooldown {
 }
 
 export interface GatewayRoute {
+  fallback_only?: boolean
   id: number
   gateway_group_id: number
   position: number

@@ -48,11 +48,16 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	_ = rt.Keys.TouchLastUsed(key.ID, time.Now())
 
 	routes, err := rt.Routes.ListByGroupID(group.ID)
-	if err != nil || len(routes) == 0 {
+	if err != nil {
 		rt.finalizeUsageFailure(reqID, key)
-		rt.writeGatewayError(c, kind, http.StatusServiceUnavailable, "api_error", "no routes configured")
+		rt.writeGatewayError(c, kind, http.StatusServiceUnavailable, "api_error", "failed to load routes")
 		return
 	}
+	if len(routes) == 0 {
+		rt.failNoRoutes(c, key, group, routes, requestedModel, path, kind, stream, "no routes configured", nil)
+		return
+	}
+	diagnosticRoutes := routes
 
 	groupMapping := ParseModelMapping(group.ModelMappingJSON)
 	filteredRoutes, modelFilterErr := rt.filterRoutesForRequestedModel(routes, requestedModel, groupMapping)
@@ -62,9 +67,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	if strings.TrimSpace(requestedModel) != "" && len(filteredRoutes) == 0 {
-		rt.finalizeUsageFailure(reqID, key)
-		rt.writeGatewayError(c, kind, http.StatusServiceUnavailable, "model_not_found",
-			fmt.Sprintf("no available channel for model %s", requestedModel))
+		rt.failNoRoutes(c, key, group, diagnosticRoutes, requestedModel, path, kind, stream,
+			fmt.Sprintf("no available channel for model %s", requestedModel), nil)
 		return
 	}
 	routes = filteredRoutes
@@ -108,7 +112,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			requestedModel: requestedModel, stream: stream, serviceTier: serviceTier,
 			reasoningEffort: reasoningEffort, thinkingEnabled: thinkingEnabled,
 			routes: routes, validator: validator, requestID: reqID, affinity: affinity,
-			firstToken: firstTokenTimeout, hedgeActive: hedgeActive,
+			diagnosticRoutes: diagnosticRoutes,
+			firstToken:       firstTokenTimeout, hedgeActive: hedgeActive,
 			hedgeEligibilityKnown: true, virtualCacheEligible: virtualCacheEligible,
 			prepareCache: &upstreamRequestPrepareCache{}, targetCache: &upstreamTargetRequestCache{},
 		})
@@ -168,6 +173,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity, requestedModel)
 		candidates = rt.orderAdaptiveCandidates(candidates, adaptive, &affinity, routesTried == 0, time.Now())
 		if len(candidates) == 0 {
+			if routesTried == 0 {
+				rt.failNoRoutes(c, key, group, diagnosticRoutes, requestedModel, path, kind, stream, "no schedulable routes", adaptive)
+				return
+			}
 			break
 		}
 		// 非首条路由 = 顺延；超过顺延次数则停止
@@ -196,16 +205,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			reasoningEffort, thinkingEnabled, upstreamModel, requestedModel,
 		)
 
-		// 当前路由已进 exclude：失败后是否还有可顺延的其它路由。
-		// 没有下家时关闭首字超时，最后一枪老实等上游，而不是再掐 30s 直接 502。
+		// Remaining candidates guide failover, never relax the attempt deadline.
 		remainingAfter := SortRoutesForModel(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, requestedModel)
-		remainingAfter = adaptive.filter(remainingAfter, &affinity)
-		attemptFTTimeout := rt.effectiveFirstTokenTimeout(
-			firstTokenTimeout,
-			retryEnabled, failoverEnabled,
-			failoversDone, failoverMax,
-			len(remainingAfter) > 0,
-		)
+		remainingAfter = rt.orderAdaptiveCandidates(remainingAfter, adaptive, &affinity, false, time.Now())
+		attemptFTTimeout := firstTokenTimeout
 
 		// 同一路由：1 次首次 + sameRouteRetries 次重试
 		maxTriesOnRoute := 1 + sameRouteRetries
@@ -221,11 +224,6 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				goto finishError
 			}
 			attemptNo++
-			if requestAttemptsRemaining(c.Request.Context(), group.RequestMaxAttempts) == 0 {
-				// No launch budget remains for a fallback. The final attempt keeps
-				// the total request deadline, not an earlier failover-only timer.
-				attemptFTTimeout = 0
-			}
 			attemptStarted := time.Now()
 			attemptKind := attemptKindPrimary
 			if tryOnRoute > 0 {

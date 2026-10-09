@@ -1400,6 +1400,7 @@ export function GatewayPage() {
             rate_convert_value: isCustom ? value : 1,
             billing_rate_multiplier: value > 0 ? value : 1,
             enabled: r.enabled !== false,
+            fallback_only: r.fallback_only === true,
             model_mapping: r.model_mapping ?? "",
             model_policy: r.model_policy ?? "all",
             allowed_models_json: r.allowed_models_json ?? "[]",
@@ -1433,6 +1434,7 @@ export function GatewayPage() {
           // 与上游同步一致：持久化换算后的账号计费倍率（原值=源 ratio）
           billing_rate_multiplier: accountRate > 0 ? accountRate : 1,
           enabled: r.enabled !== false,
+          fallback_only: r.fallback_only === true,
           model_mapping: r.model_mapping ?? "",
           model_policy: r.model_policy ?? "all",
           allowed_models_json: r.allowed_models_json ?? "[]",

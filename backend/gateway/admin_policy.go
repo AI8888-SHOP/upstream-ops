@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"time"
 
 	"github.com/bejix/upstream-ops/backend/config"
 )
@@ -131,26 +130,6 @@ func (svc *Service) clampGroupResponseValidationPolicy(streamMode string, prefix
 		PrefixTimeoutMS: prefixTimeoutMS,
 	}).WithDefaults()
 	return cfg.StreamMode, cfg.PrefixBytes, cfg.PrefixTimeoutMS
-}
-
-// effectiveFirstTokenTimeout 决定本 attempt 实际使用的首字超时。
-// 首字超时按渠道/路由独立计时，仅用于「失败后还能顺延到其它路由」时的快失败；
-// 已是本请求最后一条可试路由时关闭（返回 0），让最后一枪老实等上游，避免无意义掐断。
-func (svc *Service) effectiveFirstTokenTimeout(
-	configured time.Duration,
-	retryEnabled, failoverEnabled bool,
-	failoversDone, failoverMax int,
-	hasMoreRoutesAfterCurrent bool,
-) time.Duration {
-	if configured <= 0 {
-		return 0
-	}
-	canFailoverToOther := retryEnabled && failoverEnabled &&
-		failoversDone < failoverMax && hasMoreRoutesAfterCurrent
-	if !canFailoverToOther {
-		return 0
-	}
-	return configured
 }
 
 func clampRequestFirstTokenTimeout(sec int) int {

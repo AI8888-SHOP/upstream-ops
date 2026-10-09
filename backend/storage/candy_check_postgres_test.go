@@ -102,8 +102,8 @@ func TestCandyCheckPostgresExclusiveLease(t *testing.T) {
 		t.Fatalf("finish: %v %v", ok, err)
 	}
 	loaded, err := routes.FindByID(list[0].ID)
-	if err != nil || !loaded.CandyCheck.Blocks(time.Now()) {
-		t.Fatalf("cooldown missing: %+v %v", loaded, err)
+	if err != nil || loaded.CandyCheck.Blocks(time.Now()) || !loaded.CandyCheck.BackingOff(time.Now()) {
+		t.Fatalf("transport backoff missing or mistaken for quality cooldown: %+v %v", loaded, err)
 	}
 	if err := routes.ClearCandyCheck(list[0].ID, time.Now()); err != nil {
 		t.Fatal(err)

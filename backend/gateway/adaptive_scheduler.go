@@ -145,6 +145,49 @@ type adaptiveCandidate struct {
 }
 
 func (rt *Runtime) orderAdaptiveCandidates(candidates []ScoredRoute, r *adaptiveRequest, affinity *routeAffinityContext, initial bool, now time.Time) []ScoredRoute {
+	hasReserve := false
+	for _, candidate := range candidates {
+		if candidate.Route.FallbackOnly {
+			hasReserve = true
+			break
+		}
+	}
+	if !hasReserve {
+		return rt.orderCandidateTier(candidates, r, affinity, initial, now)
+	}
+	var normal, reserve []ScoredRoute
+	for _, candidate := range candidates {
+		if candidate.Route.FallbackOnly {
+			reserve = append(reserve, candidate)
+		} else {
+			normal = append(normal, candidate)
+		}
+	}
+	if len(normal) > 0 {
+		normal = rt.orderCandidateTier(normal, r, affinity, initial, now)
+	}
+	if len(reserve) == 0 {
+		return normal
+	}
+	// Explicit reserves may exceed the normal pool's relative price premium,
+	// but never the group's absolute ceiling. Rank speed/load within each tier.
+	backup := *r
+	backup.priced = true
+	backup.ceiling = math.MaxFloat64
+	if r.group != nil && r.group.MaxBillingRateMultiplier > 0 {
+		backup.ceiling = normalizeMaxBillingRateMultiplier(r.group.MaxBillingRateMultiplier)
+	}
+	filtered := reserve[:0]
+	for _, candidate := range reserve {
+		if validSchedulingRate(candidate.EffectiveRate) && candidate.EffectiveRate <= backup.ceiling {
+			filtered = append(filtered, candidate)
+		}
+	}
+	reserve = rt.orderCandidateTier(filtered, &backup, affinity, initial && len(normal) == 0, now)
+	return append(normal, reserve...)
+}
+
+func (rt *Runtime) orderCandidateTier(candidates []ScoredRoute, r *adaptiveRequest, affinity *routeAffinityContext, initial bool, now time.Time) []ScoredRoute {
 	if !r.enabled {
 		if initial {
 			return rt.orderLoadBalancedCandidates(candidates, r.group, affinity)

@@ -32,6 +32,7 @@ type coordinatedForwardRequest struct {
 	reasoningEffort       string
 	thinkingEnabled       bool
 	routes                []storage.GatewayRoute
+	diagnosticRoutes      []storage.GatewayRoute
 	validator             *responseValidator
 	requestID             string
 	firstToken            time.Duration
@@ -277,8 +278,11 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		req.hedgeActive = false
 	}
 	if len(candidates) == 0 {
-		rt.finalizeUsageFailure(req.requestID, req.key)
-		rt.writeGatewayError(req.c, req.kind, http.StatusServiceUnavailable, "api_error", "no schedulable routes")
+		snapshot := req.diagnosticRoutes
+		if snapshot == nil {
+			snapshot = req.routes
+		}
+		rt.failNoRoutes(req.c, req.key, req.group, snapshot, req.requestedModel, req.path, req.kind, req.stream, "no schedulable routes", adaptive)
 		return
 	}
 	plan := buildCoordinatedRoutePlan(candidates, req.group, req.hedgeActive, req.validator != nil && req.validator.Enabled())
@@ -377,26 +381,8 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 			}
 			return attempt, err
 		}
-		attemptTimeout := coordinatedAttemptFirstTokenTimeout(
-			req.firstToken, req.group, req.hedgeActive, planScheduler.snapshot(), info.Number, attempt.Route.ID,
-			func(entry coordinatedRoutePlan) bool {
-				if _, excluded := excludedRoutes.Load(entry.Candidate.Route.ID); excluded {
-					return false
-				}
-				if entry.TryOnRoute > 0 {
-					if _, suppressed := retrySuppressedRoutes.Load(entry.Candidate.Route.ID); suppressed {
-						return false
-					}
-				}
-				if _, rejected := responseRejectedRoutes.Load(entry.Candidate.Route.ID); rejected {
-					return entry.TryOnRoute > 0 && entry.TryOnRoute < entry.responseMaxTries()
-				}
-				return true
-			},
-		)
-		if requestAttemptsRemaining(ctx, req.group.RequestMaxAttempts) == 0 {
-			attemptTimeout = 0
-		}
+		// Final candidates and exhausted launch budgets retain the same deadline.
+		attemptTimeout := req.firstToken
 		var runErr error
 		if req.stream {
 			_, runErr = rt.runCoordinatedStreamAttempt(ctx, &req, attempt, attemptTimeout)
@@ -624,36 +610,6 @@ func effectiveResponseValidationRetryCount(group *storage.GatewayGroup) int {
 		return 10
 	}
 	return retries
-}
-
-// coordinatedAttemptFirstTokenTimeout keeps the legacy timeout contract when
-// response validation has expanded the route plan: a first-token timeout is a
-// transport failover trigger, not a reason to switch routes solely for regex
-// validation. Hedge attempts retain their independent timeout ladder.
-func coordinatedAttemptFirstTokenTimeout(
-	configured time.Duration,
-	group *storage.GatewayGroup,
-	hedgeActive bool,
-	plan []coordinatedRoutePlan,
-	number int,
-	routeID uint,
-	eligible ...func(coordinatedRoutePlan) bool,
-) time.Duration {
-	if configured <= 0 {
-		return 0
-	}
-	if number <= 0 || (!hedgeActive && !coordinatedTransportFailoverEnabled(group)) {
-		return 0
-	}
-	for index := number; index < len(plan); index++ {
-		if len(eligible) > 0 && eligible[0] != nil && !eligible[0](plan[index]) {
-			continue
-		}
-		if hedgeActive || plan[index].Candidate.Route.ID != routeID {
-			return configured
-		}
-	}
-	return 0
 }
 
 func validateCoordinatedAttempt(attempt *coordinatedForwardAttempt, excludedRoutes, responseRejectedRoutes *sync.Map) (bool, error) {

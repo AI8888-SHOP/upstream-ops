@@ -23,6 +23,10 @@ type GatewayCandyCheckPolicy struct {
 }
 
 type GatewayRouteCandyCheck struct {
+	// Probe errors are not evidence of a wrong answer. They get a short
+	// independent backoff, while a prior wrong-answer cooldown is preserved.
+	ErrorStreak   int        `gorm:"not null;default:0" json:"error_streak"`
+	BackoffUntil  *time.Time `json:"backoff_until,omitempty"`
 	RouteID       uint       `gorm:"primaryKey;autoIncrement:false" json:"route_id"`
 	ConfigKey     string     `gorm:"size:64;not null" json:"-"`
 	Model         string     `gorm:"size:256;not null;default:''" json:"model"`
@@ -43,6 +47,10 @@ func (GatewayRouteCandyCheck) TableName() string { return "gateway_route_candy_c
 
 func (c *GatewayRouteCandyCheck) Blocks(now time.Time) bool {
 	return c != nil && c.Active && c.CooldownUntil != nil && c.CooldownUntil.After(now)
+}
+
+func (c *GatewayRouteCandyCheck) BackingOff(now time.Time) bool {
+	return c != nil && c.Active && c.BackoffUntil != nil && c.BackoffUntil.After(now)
 }
 
 // A changed policy, credential, model mapping or source must invalidate an old
@@ -257,7 +265,7 @@ func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 		}
 		next := now.Add(time.Duration(group.CandyCheckIntervalMinutes) * time.Minute)
 		var until *time.Time
-		if group.CandyCheckEnabled && (result.Status == "incorrect" || result.Status == "error") {
+		if group.CandyCheckEnabled && result.Status == "incorrect" {
 			end := now.Add(time.Duration(group.CandyCheckCooldownMinutes) * time.Minute)
 			until = &end
 			if end.After(next) {
@@ -270,6 +278,25 @@ func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 			next = *claim.CooldownUntil
 		}
 		updates := map[string]any{"lease_until": nil, "lease_token": "", "next_check_at": next}
+		var backoffUntil *time.Time
+		if result.Status == "error" {
+			// 15/30/60s transport backoff instead of minutes of quality rejection.
+			// Errors never erase or extend a previous wrong-answer verdict.
+			streak := min(claim.ErrorStreak+1, 3)
+			backoff := now.Add(time.Duration(15<<(streak-1)) * time.Second)
+			updates["error_streak"] = streak
+			if group.CandyCheckEnabled {
+				backoffUntil = &backoff
+				updates["backoff_until"] = backoff
+				updates["next_check_at"] = backoff
+			}
+			until = claim.CooldownUntil
+		} else if result.Status == "skipped" || result.Status == "deferred" {
+			until = claim.CooldownUntil
+			backoffUntil = claim.BackoffUntil
+		} else if result.Status == "correct" || result.Status == "incorrect" {
+			updates["error_streak"], updates["backoff_until"] = 0, nil
+		}
 		if !group.CandyCheckEnabled {
 			updates["next_check_at"] = nil
 		}
@@ -284,7 +311,12 @@ func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 		}
 		q := tx.Model(&GatewayRouteCandyCheck{}).Where("route_id = ? AND config_key = ? AND lease_token = ?", claim.RouteID, claim.ConfigKey, claim.LeaseToken).Updates(updates)
 		updated = q.RowsAffected > 0
-		return q.Error
+		if q.Error != nil || !updated {
+			return q.Error
+		}
+		return appendCandyCheckEvent(tx, GatewayCandyCheckEvent{RouteID: claim.RouteID, Model: claim.Model,
+			Status: result.Status, Reason: result.Reason, StatusCode: result.StatusCode, LatencyMS: result.LatencyMS,
+			Manual: manual, CooldownUntil: until, BackoffUntil: backoffUntil, CreatedAt: now})
 	})
 	if err == nil && updated {
 		r.readCaches.invalidateGatewayRoute(claim.RouteID)
@@ -302,10 +334,14 @@ func (r *GatewayRoutes) ClearCandyCheck(routeID uint, now time.Time) error {
 		if interval < 1 {
 			interval = 5
 		}
-		return tx.Model(&GatewayRouteCandyCheck{}).Where("route_id = ?", routeID).Updates(map[string]any{
+		if err := tx.Model(&GatewayRouteCandyCheck{}).Where("route_id = ?", routeID).Updates(map[string]any{
 			"cooldown_until": nil, "lease_until": nil, "lease_token": "", "status": "manual",
+			"error_streak": 0, "backoff_until": nil,
 			"next_check_at": now.Add(time.Duration(interval) * time.Minute),
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		return appendCandyCheckEvent(tx, GatewayCandyCheckEvent{RouteID: routeID, Status: "manual", Manual: true, CreatedAt: now})
 	})
 	if err == nil {
 		r.readCaches.invalidateGatewayRoute(routeID)

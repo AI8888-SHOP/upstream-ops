@@ -1234,9 +1234,8 @@ export function GroupFormDialog({
                   不算）超过该秒数则主动断开，并按上方策略顺延下一条。
                 </p>
                 <p>
-                  这里是单次尝试的超时，仅在「失败后还能换到其它渠道」时生效；
-                  <strong className="text-foreground/80">本请求最后一条可试渠道不会套用首字超时</strong>
-                  ，但仍受下方「请求首字总预算」约束。超时后直接换源，不重试同一路由。
+                  每次尝试都受此限制，包含最后一条候选、保底渠道和关闭重试的请求；
+                  同时受下方「请求首字总预算」约束。超时后跳过同渠道重试，按策略换源。
                 </p>
                 <p className="rounded-md border border-amber-200/80 bg-amber-50/80 px-2 py-1.5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
                   注意：中间渠道超时断开后仍会顺延，上游可能已对中断请求计费，

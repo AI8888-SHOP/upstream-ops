@@ -17,7 +17,7 @@ func (svc *Service) isFailoverStatus(code int, failoverOn4xx bool) bool {
 	if code == 0 {
 		return true
 	}
-	if code == http.StatusTooManyRequests {
+	if code == http.StatusTooManyRequests || code == http.StatusRequestTimeout {
 		return true
 	}
 	if code >= 500 {
@@ -112,7 +112,8 @@ func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
 	}
 	// Retrying a saturated source immediately amplifies its queue. Fail over
 	// instead; other transient transport/HTTP failures retain their retry policy.
-	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
+	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable ||
+		status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout || status == 524 {
 		return false
 	}
 	if status == 0 || status >= 500 {

@@ -14,7 +14,7 @@ export function CandyCheckSettings({ form, onChange }: { form: GroupFormState; o
         <Switch id="candy-check-enabled" checked={form.candy_check_enabled} onCheckedChange={(v) => onChange({ ...form, candy_check_enabled: v })} />
       </div>
       <p className="text-xs leading-5 text-muted-foreground">
-        开启后定时检测本组每条启用的渠道路由。答错、空答、请求失败或超时，会冷却该路由在本组的全部模型；其他网关组不受影响。关闭时仍可手动测试，只记录结果，不自动冷却。
+        开启后定时检测本组每条启用的渠道路由。答错或空答会按配置冷却本组内该渠道的全部模型。请求失败或超时单独退避 15／30／60 秒后复测，不延长已有答错冷却；全部渠道仅因网络检测异常受限时允许应急尝试。关闭时手动测试只记录结果。
       </p>
       <div className="space-y-1">
         <Label htmlFor="candy-check-model">检测模型</Label>
@@ -28,7 +28,7 @@ export function CandyCheckSettings({ form, onChange }: { form: GroupFormState; o
             <Input id="candy-check-interval" type="number" min={1} max={1440} step={1} value={form.candy_check_interval_minutes} onChange={(e) => onChange({ ...form, candy_check_interval_minutes: e.target.value })} />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="candy-check-cooldown">失败冷却（分钟）</Label>
+            <Label htmlFor="candy-check-cooldown">答题未通过冷却（分钟）</Label>
             <Input id="candy-check-cooldown" type="number" min={1} max={43200} step={1} value={form.candy_check_cooldown_minutes} onChange={(e) => onChange({ ...form, candy_check_cooldown_minutes: e.target.value })} />
           </div>
         </div>
@@ -44,7 +44,7 @@ export function CandyCheckSettings({ form, onChange }: { form: GroupFormState; o
         <p className="text-xs text-muted-foreground">仅 OpenAI Chat / Responses 发送此参数；不支持推理强度的模型请选择“上游默认”。</p>
       </div>
       <p className="text-xs leading-5 text-muted-foreground">
-        检测会消耗上游 Token，不计入客户使用量。单次最长 90 秒。冷却期间暂停定时检测，可手动复测；开启定时检测时复测通过会解除糖果题冷却，失败会重新计时。全部路由都被检测冷却时将暂无可用渠道。测试通过只代表本题回答正确。
+        检测会消耗上游 Token，不计入客户使用量，单次最长 90 秒。可手动复测，通过会解除糖果题冷却，答错重新计时。全部渠道都在答错冷却时仍不可用，保底渠道也须通过质量限制。每条渠道保留最近 100 条检测及人工解除记录。测试通过只代表本题回答正确。
       </p>
     </div>
   )
