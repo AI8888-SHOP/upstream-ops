@@ -27,7 +27,7 @@ func TestCandyCheckWorkerScopeMappingAndRecovery(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		if r.URL.Path != "/v1/chat/completions" || body["model"] != "upstream-model" || body["stream"] != false || r.Header.Get("Authorization") != "Bearer candy-test-key" {
+		if r.URL.Path != "/v1/chat/completions" || body["model"] != "upstream-model" || body["stream"] != true || r.Header.Get("Accept") != "text/event-stream" || r.Header.Get("Authorization") != "Bearer candy-test-key" {
 			t.Errorf("bad probe: path=%s body=%v", r.URL.Path, body)
 		}
 		if !strings.Contains(fmt.Sprint(body["messages"]), "圆形 7 9 8") {
@@ -221,20 +221,42 @@ func TestManualAndScheduledCandyChecksShareConcurrencyLimit(t *testing.T) {
 
 func TestCandyCheckProbeProtocolsAndTerminalWithoutEOF(t *testing.T) {
 	for _, tc := range []struct {
-		kind                    protocol.Kind
-		setting, path, response string
+		name, setting, path, response string
+		sse, holdOpen, bad            bool
 	}{
-		{protocol.KindOpenAIChat, "openai", "/v1/chat/completions", `{"choices":[{"message":{"content":"21"},"finish_reason":"stop"}]}`},
-		{protocol.KindAnthropic, "anthropic", "/v1/messages", `{"content":[{"type":"text","text":"21"}],"stop_reason":"end_turn"}`},
-		{protocol.KindOpenAIResponses, "responses", "/v1/responses", "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"21\"}}\n\n"},
+		{"chat JSON fallback", "openai", "/v1/chat/completions", `{"choices":[{"message":{"content":"21"},"finish_reason":"stop"}]}`, false, false, false},
+		{"anthropic JSON fallback", "anthropic", "/v1/messages", `{"content":[{"type":"text","text":"21"}],"stop_reason":"end_turn"}`, false, false, false},
+		{"responses JSON fallback", "responses", "/v1/responses", `{"object":"response","status":"completed","output_text":"21"}`, false, false, false},
+		{"chat streaming only", "openai", "/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"21\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n", true, true, false},
+		{"anthropic streaming only", "anthropic", "/v1/messages", "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"21\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", true, true, false},
+		{"responses streaming only", "responses", "/v1/responses", "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"21\"}}\n\n", true, true, false},
+		{"chat truncated", "openai", "/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"21\"},\"finish_reason\":\"length\"}]}\n\n", true, true, true},
+		{"chat missing terminal", "openai", "/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"21\"}}]}\n\n", true, false, true},
+		{"responses failed after answer", "responses", "/v1/responses", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"21\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n", true, true, true},
 	} {
-		t.Run(tc.setting, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != tc.path {
 					t.Errorf("path=%s want=%s", r.URL.Path, tc.path)
 				}
-				if tc.kind == protocol.KindOpenAIResponses {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				// Reproduce the real upstream: the small synchronous puzzle is
+				// rejected with 413, whereas the identical streaming call works.
+				if body["stream"] != true || r.Header.Get("Accept") != "text/event-stream" {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusRequestEntityTooLarge)
+					_, _ = fmt.Fprint(w, `{"error":{"message":"同步请求内容超过允许的最大字符数，请缩短输入后重试","type":"content_policy_violation"}}`)
+					return
+				}
+				if tc.sse {
 					w.Header().Set("Content-Type", "text/event-stream")
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+				}
+				if tc.holdOpen {
 					_, _ = fmt.Fprint(w, tc.response)
 					w.(http.Flusher).Flush()
 					select {
@@ -244,7 +266,6 @@ func TestCandyCheckProbeProtocolsAndTerminalWithoutEOF(t *testing.T) {
 					}
 					return
 				}
-				w.Header().Set("Content-Type", "application/json")
 				_, _ = fmt.Fprint(w, tc.response)
 			}))
 			defer upstream.Close()
@@ -268,9 +289,48 @@ func TestCandyCheckProbeProtocolsAndTerminalWithoutEOF(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			result := svc.probeCandyRoute(ctx, &storage.GatewayGroup{}, route, "test-model")
+			if result.StatusCode != http.StatusOK {
+				t.Fatalf("streaming probe rejected: %+v", result)
+			}
+			if tc.bad {
+				if result.Status != "error" {
+					t.Fatalf("incomplete/error response was graded: %+v", result)
+				}
+				return
+			}
 			if result.Status != "correct" || result.AnswerPreview != "21" {
 				t.Fatalf("result=%+v", result)
 			}
 		})
+	}
+}
+
+func TestCandyCheckRequestsUseStreaming(t *testing.T) {
+	for _, kind := range []protocol.Kind{protocol.KindOpenAIChat, protocol.KindOpenAIResponses, protocol.KindAnthropic} {
+		body, _ := candyCheckRequest(kind, "test-model", "medium")
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["stream"] != true || payload["model"] != "test-model" {
+			t.Fatalf("non-streaming probe: %s", body)
+		}
+		limit := "max_completion_tokens"
+		switch kind {
+		case protocol.KindAnthropic:
+			limit = "max_tokens"
+		case protocol.KindOpenAIResponses:
+			limit = "max_output_tokens"
+			if payload["reasoning"].(map[string]any)["effort"] != "medium" {
+				t.Fatal("lost responses reasoning effort")
+			}
+		default:
+			if payload["reasoning_effort"] != "medium" {
+				t.Fatal("lost chat reasoning effort")
+			}
+		}
+		if payload[limit] != float64(4096) {
+			t.Fatalf("lost generation limit: %s", body)
+		}
 	}
 }

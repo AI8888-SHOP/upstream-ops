@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -219,7 +218,7 @@ func (s *Service) probeCandyRoute(parent context.Context, group *storage.Gateway
 		return
 	}
 	defer release()
-	req, err := s.buildUpstreamHTTPRequest(ctx, target, path, http.MethodPost, http.Header{"Accept": {"application/json"}}, body, kind, false)
+	req, err := s.buildUpstreamHTTPRequest(ctx, target, path, http.MethodPost, http.Header{"Accept": {"text/event-stream"}}, body, kind, true)
 	if err != nil {
 		result.Reason = "无法创建检测请求"
 		return
@@ -232,16 +231,16 @@ func (s *Service) probeCandyRoute(parent context.Context, group *storage.Gateway
 	defer resp.Body.Close()
 	result.StatusCode = resp.StatusCode
 	data, err := s.runtime().readCandyCheckBody(resp.Body, resp.Header)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.Reason = s.candyCheckHTTPError(resp.StatusCode, data, target, req.Header)
+		return
+	}
 	if err != nil {
 		result.Reason = "检测响应未完整接收或超时"
 		return
 	}
 	if len(data) > candyCheckBodyLimit {
 		result.Reason = "检测响应超过 2 MiB 限制"
-		return
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		result.Reason = fmt.Sprintf("检测上游返回 HTTP %d", resp.StatusCode)
 		return
 	}
 	answer, err := parseCandyCheckAnswer(data, resp.Header)
@@ -312,7 +311,9 @@ func candyCheckFrameTerminal(frame []byte) bool {
 }
 
 func candyCheckRequest(kind protocol.Kind, model, effort string) ([]byte, string) {
-	payload := map[string]any{"model": model, "stream": false}
+	// Some upstreams apply stricter limits to synchronous requests, even for
+	// this short puzzle. Use the same streaming path as normal gateway traffic.
+	payload := map[string]any{"model": model, "stream": true}
 	path := "/v1/chat/completions"
 	switch kind {
 	case protocol.KindAnthropic:

@@ -279,7 +279,16 @@ func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 		}
 		updates := map[string]any{"lease_until": nil, "lease_token": "", "next_check_at": next}
 		var backoffUntil *time.Time
-		if result.Status == "error" {
+		if result.Status == "error" && candyCheckRequestRejected(result.StatusCode) {
+			// A fixed probe's endpoint, payload or model incompatibility says
+			// nothing about the quality/availability of normal streaming traffic.
+			// Retry at the configured interval, without restricting the route.
+			updates["error_streak"], updates["backoff_until"] = 0, nil
+			until = claim.CooldownUntil
+			if until != nil && until.After(next) {
+				updates["next_check_at"] = *until
+			}
+		} else if result.Status == "error" {
 			// 15/30/60s transport backoff instead of minutes of quality rejection.
 			// Errors never erase or extend a previous wrong-answer verdict.
 			streak := min(claim.ErrorStreak+1, 3)
@@ -322,6 +331,17 @@ func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 		r.readCaches.invalidateGatewayRoute(claim.RouteID)
 	}
 	return updated, err
+}
+
+func candyCheckRequestRejected(status int) bool {
+	switch status {
+	case 400, 404, 405, 413, 415, 422:
+		return true
+	default:
+		// Authentication failures, timeouts, rate limits and server errors
+		// retain the existing bounded transport backoff.
+		return false
+	}
 }
 
 func (r *GatewayRoutes) ClearCandyCheck(routeID uint, now time.Time) error {
