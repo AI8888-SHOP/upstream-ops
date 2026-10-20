@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -299,6 +300,15 @@ func (s *Service) runPriceRepricing(ctx context.Context) {
 	if s.Prices == nil || s.Usage == nil || s.Pricing == nil {
 		return
 	}
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, 10*time.Second)
+	err := s.Prices.EnsureReferenceSalesRepricing(ensureCtx)
+	ensureCancel()
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("historical revenue backfill scheduling failed; retrying", "err", err)
+		}
+		return
+	}
 	status, statusErr := s.Prices.RepricingStatus(ctx)
 	if statusErr != nil || (status.Status != "pending" && status.Status != "running") {
 		return
@@ -316,24 +326,7 @@ func (s *Service) runPriceRepricing(ctx context.Context) {
 			// repricing transaction owns a connection.
 			base := &PricingCatalog{defaults: s.Pricing.defaults, fallbacks: s.Pricing.fallbacks, snapshot: overrides}
 			return func(row storage.GatewayUsageLog) map[string]any {
-				if row.BillingMode != "" && row.BillingMode != "token" && row.BillingMode != "image" {
-					return nil
-				}
-				model := strings.TrimSpace(row.UpstreamModel)
-				if model == "" {
-					model = row.RequestedModel
-				}
-				price, ok := base.resolveKnown(model)
-				if !ok {
-					return nil
-				}
-				tokens := UsageTokens{InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, CacheReadTokens: row.CacheReadTokens, CacheCreationTokens: row.CacheCreationTokens, CacheCreation5mTokens: row.CacheCreation5mTokens, CacheCreation1hTokens: row.CacheCreation1hTokens, ImageOutputTokens: row.ImageOutputTokens}
-				cost := CalculateCost(price, tokens, row.RateMultiplier, row.BillingRateMultiplier)
-				extra := cost.ActualCost
-				if row.Winner {
-					extra = 0
-				}
-				return map[string]any{"input_cost": cost.InputCost, "output_cost": cost.OutputCost, "cache_creation_cost": cost.CacheCreationCost, "cache_read_cost": cost.CacheReadCost, "image_output_cost": cost.ImageOutputCost, "total_cost": cost.TotalCost, "actual_cost": cost.ActualCost, "estimated_cost": cost.ActualCost, "estimated_extra_cost": extra, "account_stats_cost": cost.TotalCost}
+				return historicalReferencePrices(base, row)
 			}
 		})
 		cancel()
@@ -358,4 +351,54 @@ func (s *Service) runPriceRepricing(ctx context.Context) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// Historical reports use current prices, not the old debit. Reuse the live
+// bucket/tier/TTL calculator, but keep the original virtual token count: today's
+// group settings must not rewrite what was presented to the client yesterday.
+func historicalReferencePrices(catalog *PricingCatalog, row storage.GatewayUsageLog) map[string]any {
+	if row.BillingMode != "" && row.BillingMode != "token" && row.BillingMode != "image" {
+		return nil
+	}
+	unknown := map[string]any{"reference_sales_base": nil, "reference_pricing_version": storage.ReferencePricingVersion}
+	tokens := UsageTokens{InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, CacheReadTokens: row.CacheReadTokens, CacheCreationTokens: row.CacheCreationTokens, CacheCreation5mTokens: row.CacheCreation5mTokens, CacheCreation1hTokens: row.CacheCreation1hTokens, ImageOutputTokens: row.ImageOutputTokens, ReasoningTokens: row.ReasoningTokens}
+	zero := tokens.InputTokens == 0 && tokens.OutputTokens == 0 && tokens.CacheReadTokens == 0 && tokens.CacheCreationTokens == 0 && tokens.CacheCreation5mTokens == 0 && tokens.CacheCreation1hTokens == 0 && tokens.ImageOutputTokens == 0
+	if zero && (row.TotalCost > 0 || row.ActualCost > 0 || row.BilledCost > 0 || row.BillingMode == "image") {
+		// Missing usage must not erase an existing known charge.
+		return nil
+	}
+	if zero && tokens.ReasoningTokens != 0 {
+		// Reasoning is normally included in output; without output we cannot
+		// reconstruct its billable count.
+		return unknown
+	}
+	for _, count := range []int{tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens, tokens.CacheCreation5mTokens, tokens.CacheCreation1hTokens, tokens.ImageOutputTokens, tokens.ReasoningTokens} {
+		if count < 0 {
+			return unknown
+		}
+	}
+	model := strings.TrimSpace(row.UpstreamModel)
+	if model == "" {
+		model = row.RequestedModel
+	}
+	price, known := catalog.resolveKnown(model)
+	if !known {
+		// Invalidate an obsolete reference basis after price deletion; do not
+		// silently fall back to its old settlement or invent a free model.
+		return unknown
+	}
+	cost := CalculateCost(price, tokens, row.RateMultiplier, row.BillingRateMultiplier)
+	virtualized := tokens
+	virtualTokens := min(max(0, row.VirtualCacheReadTokens), max(0, tokens.InputTokens))
+	virtualized.InputTokens -= virtualTokens
+	virtualized.CacheReadTokens += virtualTokens
+	salesBase := min(cost.TotalCost, CalculateCost(price, virtualized, 1, 1).TotalCost)
+	if math.IsNaN(salesBase) || math.IsInf(salesBase, 0) || salesBase < 0 || math.IsNaN(cost.ActualCost) || math.IsInf(cost.ActualCost, 0) || cost.ActualCost < 0 {
+		return unknown
+	}
+	extra := cost.ActualCost
+	if row.Winner {
+		extra = 0
+	}
+	return map[string]any{"input_cost": cost.InputCost, "output_cost": cost.OutputCost, "cache_creation_cost": cost.CacheCreationCost, "cache_read_cost": cost.CacheReadCost, "image_output_cost": cost.ImageOutputCost, "total_cost": cost.TotalCost, "actual_cost": cost.ActualCost, "estimated_cost": cost.ActualCost, "estimated_extra_cost": extra, "account_stats_cost": cost.TotalCost, "reference_sales_base": salesBase, "reference_pricing_version": storage.ReferencePricingVersion}
 }

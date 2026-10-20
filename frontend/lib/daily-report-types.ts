@@ -9,6 +9,7 @@ export interface DailyReportMetrics {
   profit: number | null
   profit_margin: number | null
   unpriced_requests: number
+  zero_usage_requests: number
   tokens: number
   cache_hit_rate: number | null
 }

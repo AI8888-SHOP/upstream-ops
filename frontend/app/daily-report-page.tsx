@@ -31,7 +31,11 @@ function sourceKey(source: DailyReportSource) {
 
 function ProfitValue({ metrics }: { metrics: DailyReportMetrics }) {
   const color = metrics.profit == null ? "text-muted-foreground" : metrics.profit < 0 ? "text-destructive" : metrics.profit > 0 ? "text-emerald-600 dark:text-emerald-400" : ""
-  return <span className={color}>{money(metrics.profit, { precise: true })}{metrics.unpriced_requests > 0 ? <span className="ml-1 text-[10px] text-amber-700 dark:text-amber-400" title="成功交付的请求缺少网关组卖出倍率或可靠计价依据，收入和利润暂不展示">{metrics.unpriced_requests.toLocaleString()} 笔待计价</span> : null}</span>
+  return <span className={color}>
+    {money(metrics.profit, { precise: true })}
+    {metrics.unpriced_requests > 0 ? <span className="ml-1 text-[10px] text-amber-700 dark:text-amber-400" title="成功交付的请求缺少网关组卖出倍率或可靠计价依据，收入和利润暂不展示">{metrics.unpriced_requests.toLocaleString()} 笔待计价</span> : null}
+    {metrics.zero_usage_requests > 0 ? <span className="ml-1 text-[10px] text-amber-700 dark:text-amber-400" title="按 Request ID 去重的成功交付零用量请求；Token 计费且全部用量和已记录费用为 0 时，参考收入按 0 元计，不阻塞利润。已有费用仍保留，不代表上游实际未扣款。">零用量异常 {metrics.zero_usage_requests.toLocaleString()} 笔</span> : null}
+  </span>
 }
 
 function ProfitMargin({ metrics }: { metrics: DailyReportMetrics }) {
@@ -57,7 +61,8 @@ function DailySummary({ title, day }: { title: string; day: DailyReportDay }) {
       <div><div className="text-xs text-muted-foreground">总 Token</div><div className="mt-1 text-sm font-medium tabular-nums">{formatTokens(day.tokens)}</div></div>
       <div><div className="text-xs text-muted-foreground">真实缓存命中率</div><div className="mt-1 text-sm font-medium tabular-nums">{cacheRate(day.cache_hit_rate)}</div></div>
     </div>
-    {day.unpriced_requests > 0 ? <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">{day.unpriced_requests.toLocaleString()} 笔成功交付请求缺少卖出倍率或可靠计价依据，暂不展示总收入及总利润，避免把未知收入算成亏损。可先在“网关组 → 编辑组”填写卖出倍率，再刷新报表；已完整计价的渠道仍可查看利润。</p> : null}
+    {day.unpriced_requests > 0 ? <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">{day.unpriced_requests.toLocaleString()} 笔成功交付请求缺少卖出倍率或可靠计价依据，暂不展示总收入及总利润。请检查“网关组 → 编辑组”的卖出倍率及“价格覆盖”中的模型单价；补价后历史成本、收入和利润会一起重算，请等待“价格覆盖”的重算任务完成后刷新。已完整计价的渠道仍可查看利润。</p> : null}
+    {day.zero_usage_requests > 0 ? <p className="rounded-md bg-muted/50 px-3 py-2 text-xs leading-5 text-muted-foreground">零用量记录已单独标记：Token 计费且全部用量、已记录费用均为 0 的请求按 0 元计入参考利润，不再因其零结算待计价。其他尝试和已有费用仍正常计入；这不代表上游实际没有扣款。</p> : null}
     <div className="rounded-md bg-muted/50 px-3 py-2 text-xs leading-5">
       {top ? <><span className="text-muted-foreground">消费最高渠道：</span><span className="font-medium">{top.channel_name}</span><span className="ml-2 font-medium tabular-nums">{money(top.cost, { precise: true })}</span><br /><span className="text-muted-foreground">该渠道最高消费分组：</span><span className="font-medium">{group?.source_group_name ?? "—"}</span>{group ? <span className="ml-2 tabular-nums">{money(group.cost, { precise: true })}</span> : null}<br /><span className="text-muted-foreground">该渠道最高消费模型：</span><span className="font-medium">{top.top_cost_model?.model ?? "—"}</span></> : <span className="text-muted-foreground">本日暂无使用记录</span>}
     </div>
@@ -144,8 +149,9 @@ export default function DailyReportPage() {
     <div className="space-y-1 rounded-md border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
       <p>参考利润 = 成功交付的预估收入 − 全部上游尝试成本（含失败、重试、并发尝试）。金额均为 USD 参考估算，不代表实际扣账或实收。</p>
       <details><summary className="cursor-pointer text-foreground">收入、历史价格及统计口径</summary><div className="mt-1 space-y-1">
-        <p>收入 = 成功交付请求的结算计价基数 × 网关组当前卖出倍率。优先使用历史结算快照，按实际上游模型价格及虚拟缓存调整，并去除上游倍率；虚拟缓存不减少上游真实成本。修改卖出倍率会重新估算历史报表，不修改网关 Key 余额或已有结算。价格覆盖不重写历史结算快照；少数无快照的旧格式记录回退使用参考金额，其收入基数可能随历史价格重算更新。</p>
+        <p>收入 = 成功交付请求按最新模型价格重算的销售基数 × 网关组当前卖出倍率。保存、删除或同步价格会重算历史成本、收入和利润，原先为 0 的结算不会阻止补价。保留当时真实用量及虚拟缓存 Token，按对应上下文档位、5m/1h 缓存价格计算；虚拟缓存不减少上游真实成本。升级后自动后台补算旧记录，完成前可能暂时混合新旧口径。实际 Key 扣款、余额和结算凭据不变，不追扣差价。</p>
         <p>卖出倍率留空不等于 0：有待计价请求时，对应汇总收入、利润显示“—”；明确填写 0 则按免费销售计算。请求数按 Request ID 去重，跨渠道/分组重试会分别出现在对应行，分项请求数不能直接相加。真实缓存命中率只统计成功 attempt 的真实缓存读取，不含虚拟缓存；缓存“—”表示无有效输入样本。</p>
+        <p>零用量例外：Token 计费且输入、输出、真实缓存、推理、图片 Token 及已记录费用全部为 0 时，参考收入按 0 元计入，即使未设置卖出倍率也不阻塞利润；另列“零用量异常”笔数。已记录的正数费用及其他失败、重试成本不归零。有 Token 但缺价格的记录仍待计价；按次、图片或时长计费不套用此例外。该口径自动适用于历史报表，不修改使用记录、结算或余额。</p>
       </div></details>
     </div>
     {error ? <div role="alert" className="rounded-md border border-destructive/40 p-4 text-sm text-destructive">{error}</div> : null}

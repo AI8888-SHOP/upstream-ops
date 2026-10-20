@@ -68,6 +68,9 @@ func openPriceRepricingPostgres(t *testing.T) *gorm.DB {
 }
 
 func TestPriceRepricingPostgres(t *testing.T) {
+	t.Run("reference_revenue_backfill", func(t *testing.T) {
+		assertReferenceRevenueBackfillSchedulesOnce(t, openPriceRepricingPostgres(t))
+	})
 	t.Run("cache_ttl_field_mapping", func(t *testing.T) {
 		assertPriceRepricingCacheTTLFieldMapping(t, openPriceRepricingPostgres(t))
 	})
@@ -169,7 +172,7 @@ func TestPriceRepricingPostgres(t *testing.T) {
 				if err := writer.Model(&GatewayUsageLog{}).Where("id = ?", row.ID).Update("winner", true).Error; err != nil {
 					return err
 				}
-				return writer.Create(&GatewayRequestFinalization{RequestID: row.RequestID, Delivered: true, WinnerUsageLogID: row.ID, ActualCost: 1, BilledCost: 0.75, CreatedAt: time.Now()}).Error
+				return writer.Create(&GatewayRequestFinalization{RequestID: row.RequestID, GatewayKeyID: row.GatewayKeyID, Delivered: true, WinnerUsageLogID: row.ID, ActualCost: 1, BilledCost: 0.75, VirtualCacheReadTokens: 7, CreatedAt: time.Now()}).Error
 			})
 			if err != nil {
 				tx.AddError(err)
@@ -183,6 +186,9 @@ func TestPriceRepricingPostgres(t *testing.T) {
 		done, err := repo.RepriceBatch(ctx, func(_ []ModelPriceOverride) func(GatewayUsageLog) map[string]any {
 			return func(row GatewayUsageLog) map[string]any {
 				sawWinner = row.Winner
+				if row.VirtualCacheReadTokens != 7 {
+					t.Errorf("late finalization lost virtual tokens: %+v", row)
+				}
 				extra := 2
 				if row.Winner {
 					extra = 0

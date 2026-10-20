@@ -194,3 +194,62 @@ func TestPriceRepricingInvalidatesStatsImmediately(t *testing.T) {
 		t.Fatal("stale aggregate survived price update")
 	}
 }
+
+func TestReferenceRevenueBackfillSchedulesOnce(t *testing.T) {
+	assertReferenceRevenueBackfillSchedulesOnce(t, openTestDB(t))
+}
+
+func assertReferenceRevenueBackfillSchedulesOnce(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	ctx := context.Background()
+	repo := NewModelPriceOverrides(db)
+	row := GatewayUsageLog{RequestID: "upgrade-price-history", InputTokens: 10, ActualCost: 1, BilledCost: .5}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	old := ModelPriceRepricingJob{ID: 1, Generation: 7, Status: "completed", LastID: row.ID, UpperID: row.ID}
+	if err := db.Create(&old).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.EnsureReferenceSalesRepricing(ctx); err != nil {
+		t.Fatal(err)
+	}
+	job, err := repo.RepricingStatus(ctx)
+	if err != nil || job.Status != "pending" || job.Generation != 8 || job.LastID != 0 || job.UpperID != row.ID || job.ReferencePricingVersion != ReferencePricingVersion {
+		t.Fatalf("job=%+v err=%v", job, err)
+	}
+	done, err := repo.RepriceBatch(ctx, func(_ []ModelPriceOverride) func(GatewayUsageLog) map[string]any {
+		return func(GatewayUsageLog) map[string]any {
+			return map[string]any{"actual_cost": 2.0, "reference_sales_base": 3.0, "reference_pricing_version": ReferencePricingVersion, "billed_cost": 99.0}
+		}
+	})
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	if err := db.First(&row, row.ID).Error; err != nil || row.ReferenceSalesBase == nil || *row.ReferenceSalesBase != 3 || row.ReferencePricingVersion != ReferencePricingVersion || row.BilledCost != .5 {
+		t.Fatalf("row=%+v err=%v", row, err)
+	}
+	if err := repo.EnsureReferenceSalesRepricing(ctx); err != nil {
+		t.Fatal(err)
+	}
+	job, err = repo.RepricingStatus(ctx)
+	if err != nil || job.Generation != 8 || job.Status != "completed" {
+		t.Fatalf("backfill restarted: %+v %v", job, err)
+	}
+	// Price edits explicitly restart the full history even after backfill.
+	if _, _, err := repo.ApplyWithRepricing(ctx, nil, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	done, err = repo.RepriceBatch(ctx, func(_ []ModelPriceOverride) func(GatewayUsageLog) map[string]any {
+		return func(GatewayUsageLog) map[string]any {
+			return map[string]any{"reference_sales_base": nil, "reference_pricing_version": ReferencePricingVersion}
+		}
+	})
+	if err != nil || !done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	var cleared GatewayUsageLog
+	if err := db.First(&cleared, row.ID).Error; err != nil || cleared.ReferenceSalesBase != nil || cleared.ActualCost != 2 || cleared.BilledCost != .5 {
+		t.Fatalf("clear=%+v err=%v", cleared, err)
+	}
+}

@@ -78,6 +78,7 @@ func TestDailyReportGatewayUsageProfitHTTPNullAndZero(t *testing.T) {
 		name            string
 		sellRate        *float64
 		missingGroup    bool
+		zeroUsage       bool
 		revenue, profit *float64
 		margin          *float64
 		unpriced        int64
@@ -87,6 +88,9 @@ func TestDailyReportGatewayUsageProfitHTTPNullAndZero(t *testing.T) {
 		{name: "break even emits zero profit and margin", sellRate: rate(.25), revenue: rate(.25), profit: rate(0), margin: rate(0)},
 		{name: "unset rate emits null", unpriced: 1},
 		{name: "missing group emits null", missingGroup: true, unpriced: 1},
+		{name: "zero usage emits numeric zero", sellRate: rate(.5), zeroUsage: true, revenue: rate(0), profit: rate(0)},
+		{name: "zero usage without rate emits zero", zeroUsage: true, revenue: rate(0), profit: rate(0)},
+		{name: "zero usage without group emits zero", missingGroup: true, zeroUsage: true, revenue: rate(0), profit: rate(0)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openTestDB(t)
@@ -105,7 +109,11 @@ func TestDailyReportGatewayUsageProfitHTTPNullAndZero(t *testing.T) {
 				RequestID: "profit-http", GatewayGroupID: groupID, ChannelID: 1,
 				SourceGroupName: "source", RequestedModel: "model", BillingMode: "token",
 				ActualCost: .25, BilledCost: .5, BillingRateMultiplier: .5,
-				Winner: true, Success: true, CreatedAt: time.Date(2026, 10, 20, 17, 0, 0, 0, time.UTC),
+				InputTokens: 10,
+				Winner:      true, Success: true, CreatedAt: time.Date(2026, 10, 20, 17, 0, 0, 0, time.UTC),
+			}
+			if tc.zeroUsage {
+				row.InputTokens, row.ActualCost, row.BilledCost = 0, 0, 0
 			}
 			if err := usage.Create(&row); err != nil {
 				t.Fatal(err)
@@ -147,6 +155,14 @@ func TestDailyReportGatewayUsageProfitHTTPNullAndZero(t *testing.T) {
 				raw, present := object["unpriced_requests"]
 				if !present || string(raw) == "null" || json.Unmarshal(raw, &unpriced) != nil || unpriced != tc.unpriced {
 					t.Fatalf("%s.unpriced_requests = %s, want %d", where, raw, tc.unpriced)
+				}
+				var zeroUsage, wantZeroUsage int64
+				if tc.zeroUsage {
+					wantZeroUsage = 1
+				}
+				raw, present = object["zero_usage_requests"]
+				if !present || string(raw) == "null" || json.Unmarshal(raw, &zeroUsage) != nil || zeroUsage != wantZeroUsage {
+					t.Fatalf("%s.zero_usage_requests = %s, want %d", where, raw, wantZeroUsage)
 				}
 			}
 			assertMetrics("today", payload.Today)

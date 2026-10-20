@@ -874,6 +874,12 @@ func (GatewayResponseRule) TableName() string { return "gateway_response_rules" 
 // GatewayUsageLog 记录每一次网关转发请求的用量与费用参考。
 // Source* 字段为请求当时的路由快照：路由保存会换 id 时，历史记录仍可展示上游密钥/源分组。
 type GatewayUsageLog struct {
+	// Mutable report-only sales basis, before the gateway group's sell rate.
+	// Version > 0 with a nil basis means the latest price could not be resolved.
+	// Never use these fields to debit a key or replay a historical settlement.
+	ReferenceSalesBase       *float64 `json:"reference_sales_base"`
+	ReferencePricingVersion int      `gorm:"not null;default:0" json:"reference_pricing_version"`
+
 	// Nullable additions preserve unknown audit state for historical records.
 	UpstreamResponseModel string `gorm:"size:256" json:"upstream_response_model,omitempty"`
 	UpstreamModelMismatch *bool  `json:"upstream_model_mismatch"`

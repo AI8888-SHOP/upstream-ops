@@ -207,6 +207,9 @@ func TestHistoricalRepricingChangesReferencesOnly(t *testing.T) {
 	if row.BilledCost != 0.7 || row.VirtualCacheReadTokens != 5 || row.VirtualCacheReadCost != 0.2 {
 		t.Fatalf("settlement fields changed: %+v", row)
 	}
+	if row.ReferenceSalesBase == nil || math.Abs(*row.ReferenceSalesBase-(999995*2e-6+0.0004)) > 1e-12 || row.ReferencePricingVersion != storage.ReferencePricingVersion {
+		t.Fatalf("historical revenue basis was not repriced: %+v", row)
+	}
 	if err := db.First(&key, key.ID).Error; err != nil || key.QuotaUsed != 9 {
 		t.Fatalf("key=%+v err=%v", key, err)
 	}

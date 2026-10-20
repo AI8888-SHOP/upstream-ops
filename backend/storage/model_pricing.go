@@ -86,20 +86,59 @@ func NormalizePriceCacheCreation(total, fiveMinute, oneHour int) (int, int) {
 }
 
 type ModelPriceRepricingJob struct {
-	ID          uint       `gorm:"primaryKey" json:"id"`
-	Generation  uint64     `gorm:"not null;default:0" json:"generation"`
-	Status      string     `gorm:"size:16;not null;default:'idle'" json:"status"`
-	LastID      uint       `gorm:"not null;default:0" json:"last_id"`
-	UpperID     uint       `gorm:"not null;default:0" json:"upper_id"`
-	UpdatedRows int64      `gorm:"not null;default:0" json:"updated_rows"`
-	SkippedRows int64      `gorm:"not null;default:0" json:"skipped_rows"`
-	Error       string     `gorm:"type:text" json:"error,omitempty"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ReferencePricingVersion int        `gorm:"not null;default:0" json:"reference_pricing_version"`
+	ID                      uint       `gorm:"primaryKey" json:"id"`
+	Generation              uint64     `gorm:"not null;default:0" json:"generation"`
+	Status                  string     `gorm:"size:16;not null;default:'idle'" json:"status"`
+	LastID                  uint       `gorm:"not null;default:0" json:"last_id"`
+	UpperID                 uint       `gorm:"not null;default:0" json:"upper_id"`
+	UpdatedRows             int64      `gorm:"not null;default:0" json:"updated_rows"`
+	SkippedRows             int64      `gorm:"not null;default:0" json:"skipped_rows"`
+	Error                   string     `gorm:"type:text" json:"error,omitempty"`
+	StartedAt               *time.Time `json:"started_at,omitempty"`
+	CompletedAt             *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt               time.Time  `json:"updated_at"`
 }
 
 func (ModelPriceRepricingJob) TableName() string { return "model_price_repricing_jobs" }
+
+const ReferencePricingVersion = 1
+
+// EnsureReferenceSalesRepricing schedules a one-time, resumable historical
+// backfill after upgrade. It only locks the small job row; the scan remains in
+// the normal background batches and never blocks startup on the usage table.
+func (r *ModelPriceOverrides) EnsureReferenceSalesRepricing(ctx context.Context) error {
+	job, err := r.RepricingStatus(ctx)
+	if err != nil || job.ReferencePricingVersion >= ReferencePricingVersion {
+		return err
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&ModelPriceRepricingJob{ID: 1}).Error; err != nil {
+			return err
+		}
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(job, 1).Error; err != nil {
+			return err
+		}
+		if job.ReferencePricingVersion >= ReferencePricingVersion {
+			return nil
+		}
+		return resetReferenceRepricingJob(tx, job)
+	})
+}
+
+func resetReferenceRepricingJob(tx *gorm.DB, job *ModelPriceRepricingJob) error {
+	var upper uint
+	if err := tx.Model(&GatewayUsageLog{}).Select("COALESCE(MAX(id),0)").Scan(&upper).Error; err != nil {
+		return err
+	}
+	now := time.Now()
+	job.ReferencePricingVersion = ReferencePricingVersion
+	job.Generation++
+	job.Status, job.LastID, job.UpperID = "pending", 0, upper
+	job.UpdatedRows, job.SkippedRows = 0, 0
+	job.Error, job.StartedAt, job.CompletedAt = "", &now, nil
+	return tx.Save(job).Error
+}
 
 // ApplyWithRepricing updates prices and starts/restarts a durable high-watermark
 // scan in the same transaction. Existing manual overrides survive source sync.
@@ -179,21 +218,7 @@ func (r *ModelPriceOverrides) ApplyWithRepricing(ctx context.Context, items []Mo
 				changed++
 			}
 		}
-		var upper uint
-		if err := tx.Model(&GatewayUsageLog{}).Select("COALESCE(MAX(id),0)").Scan(&upper).Error; err != nil {
-			return err
-		}
-		now := time.Now()
-		job.Generation++
-		job.Status = "pending"
-		job.LastID = 0
-		job.UpperID = upper
-		job.UpdatedRows = 0
-		job.SkippedRows = 0
-		job.Error = ""
-		job.StartedAt = &now
-		job.CompletedAt = nil
-		return tx.Save(&job).Error
+		return resetReferenceRepricingJob(tx, &job)
 	})
 	if err == nil {
 		r.invalidateCache()
@@ -263,30 +288,28 @@ func (r *ModelPriceOverrides) RepriceBatch(ctx context.Context, calculator func(
 		var rows []GatewayUsageLog
 		// Select resolves Go field names through the model schema; JSON names
 		// such as cache_creation_5m_tokens are not database column names.
-		if err := tx.Select("ID", "RequestID", "AttemptStatus", "Winner", "BillingMode", "UpstreamModel", "RequestedModel", "InputTokens", "OutputTokens", "CacheReadTokens", "CacheCreationTokens", "CacheCreation5mTokens", "CacheCreation1hTokens", "ImageOutputTokens", "RateMultiplier", "BillingRateMultiplier").Where("id > ? AND id <= ?", job.LastID, job.UpperID).Order("id ASC").Limit(200).Find(&rows).Error; err != nil {
+		if err := tx.Select("ID", "RequestID", "GatewayKeyID", "AttemptStatus", "Winner", "BillingMode", "UpstreamModel", "RequestedModel", "InputTokens", "OutputTokens", "CacheReadTokens", "CacheCreationTokens", "CacheCreation5mTokens", "CacheCreation1hTokens", "ImageOutputTokens", "ReasoningTokens", "RateMultiplier", "BillingRateMultiplier", "VirtualCacheReadTokens", "ActualCost", "TotalCost", "BilledCost").Where("id > ? AND id <= ?", job.LastID, job.UpperID).Order("id ASC").Limit(200).Find(&rows).Error; err != nil {
 			return err
 		}
 		requestIDs := make([]string, 0, len(rows))
 		for _, row := range rows {
-			if row.AttemptStatus != "" {
-				requestIDs = append(requestIDs, row.RequestID)
-			}
+			requestIDs = append(requestIDs, row.RequestID)
 		}
-		finalized := map[string]bool{}
+		finalized := map[string]GatewayRequestFinalization{}
 		if len(requestIDs) > 0 {
-			var ids []string
-			if err := tx.Model(&GatewayRequestFinalization{}).Where("request_id IN ?", requestIDs).Pluck("request_id", &ids).Error; err != nil {
+			var finals []GatewayRequestFinalization
+			if err := tx.Select("RequestID", "GatewayKeyID", "Delivered", "WinnerUsageLogID", "VirtualCacheReadTokens", "ActualCost", "BilledCost").Where("request_id IN ?", requestIDs).Find(&finals).Error; err != nil {
 				return err
 			}
-			for _, id := range ids {
-				finalized[id] = true
+			for _, final := range finals {
+				finalized[final.RequestID] = final
 			}
 		}
 		// Finalization can commit after the page read. Reload classifications in
 		// one batch after observing terminal markers, avoiding per-row queries.
 		finalizedRowIDs := make([]uint, 0, len(rows))
 		for _, row := range rows {
-			if row.AttemptStatus != "" && finalized[row.RequestID] {
+			if _, ok := finalized[row.RequestID]; row.AttemptStatus != "" && ok {
 				finalizedRowIDs = append(finalizedRowIDs, row.ID)
 			}
 		}
@@ -306,13 +329,24 @@ func (r *ModelPriceOverrides) RepriceBatch(ctx context.Context, calculator func(
 		for _, row := range rows {
 			// FinalizeRequest still reads actual_cost when debiting the key. Never
 			// reprice a new-format attempt until its immutable finalization exists.
-			if row.AttemptStatus != "" && !finalized[row.RequestID] {
+			final, hasFinal := finalized[row.RequestID]
+			if row.AttemptStatus != "" && !hasFinal {
 				job.SkippedRows++
 				job.LastID = row.ID
 				continue
 			}
 			if row.AttemptStatus != "" {
 				row.Winner = winners[row.ID]
+			}
+			// Read virtual usage from the same immutable winner marker, including
+			// when finalization committed after the page was loaded. Never apply
+			// the winner's discount to a losing retry or hedge.
+			if hasFinal && row.Winner && final.Delivered && final.WinnerUsageLogID == row.ID && final.GatewayKeyID == row.GatewayKeyID {
+				row.VirtualCacheReadTokens = final.VirtualCacheReadTokens
+				// Preserve evidence of a known charge when usage is missing. These
+				// local guards are never written back as settlement amounts.
+				row.ActualCost = max(row.ActualCost, final.ActualCost)
+				row.BilledCost = max(row.BilledCost, final.BilledCost)
 			}
 			values := calculate(row)
 			if values == nil {
@@ -321,7 +355,7 @@ func (r *ModelPriceOverrides) RepriceBatch(ctx context.Context, calculator func(
 				// Allowlist protects immutable billed_cost and raw usage even if a caller
 				// accidentally returns extra fields.
 				allowed := map[string]any{}
-				for _, key := range []string{"input_cost", "output_cost", "cache_creation_cost", "cache_read_cost", "image_output_cost", "total_cost", "actual_cost", "estimated_cost", "estimated_extra_cost", "account_stats_cost"} {
+				for _, key := range []string{"input_cost", "output_cost", "cache_creation_cost", "cache_read_cost", "image_output_cost", "total_cost", "actual_cost", "estimated_cost", "estimated_extra_cost", "account_stats_cost", "reference_sales_base", "reference_pricing_version"} {
 					if v, ok := values[key]; ok {
 						allowed[key] = v
 					}
@@ -329,7 +363,11 @@ func (r *ModelPriceOverrides) RepriceBatch(ctx context.Context, calculator func(
 				if err := tx.Model(&GatewayUsageLog{}).Where("id = ?", row.ID).Updates(allowed).Error; err != nil {
 					return err
 				}
-				job.UpdatedRows++
+				if _, priced := allowed["actual_cost"]; priced {
+					job.UpdatedRows++
+				} else {
+					job.SkippedRows++
+				}
 			}
 			job.LastID = row.ID
 		}

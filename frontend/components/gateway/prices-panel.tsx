@@ -65,7 +65,7 @@ export function PricesPanel({
     try {
       const result = await apiFetch<{ updated: number; repricing: ModelPriceRepricingJob }>("/gateway/prices/sync", { method: "POST" })
       setJob(result.repricing)
-      toast.success(`已同步 ${result.updated} 个模型，保留手动覆盖，历史参考费用后台重算中`)
+      toast.success(`已同步 ${result.updated} 个模型，保留手动覆盖，历史成本、收入和利润后台重算中`)
       await onLoadPrices()
     } catch (error) { toast.error(error instanceof Error ? error.message : "价格同步失败") }
     finally { setSyncing(false) }
@@ -74,7 +74,7 @@ export function PricesPanel({
     setSyncing(true)
     try {
       setJob(await apiFetch<ModelPriceRepricingJob>("/gateway/prices/repricing", { method: "POST" }))
-      toast.success("已启动历史参考费用重算")
+      toast.success("已启动历史成本、收入和利润重算")
     } catch (error) { toast.error(error instanceof Error ? error.message : "启动失败") }
     finally { setSyncing(false) }
   }
@@ -92,11 +92,11 @@ export function PricesPanel({
   <CardContent className="space-y-4 p-4 sm:p-5">
     <p className="text-sm leading-6 text-muted-foreground">
       覆盖表优先于系统内置价。输入单位为 <strong>$/MTok</strong>
-      （每百万 token 美元），保存时自动换算为 per-token 存储。同步读取 sub2api 官方仓库最新价目，不覆盖手动价格。保存、删除或同步后自动重算历史参考费用，不重扣 Key 余额、不改已结算实收。
+      （每百万 token 美元），保存时自动换算为 per-token 存储。同步读取 sub2api 官方仓库最新价目，不覆盖手动价格。保存、删除或同步后自动重算历史成本、收入和利润，包含过去为 0 的计价记录；不重扣 Key 余额、不改实际扣款凭据。
     </p>
           <div className="flex flex-wrap items-center gap-2">
             <Button disabled={busy || syncing} onClick={() => void syncPrices()}>{syncing ? "处理中…" : "一键同步 sub2api 最新价格"}</Button>
-            <Button variant="outline" disabled={busy || syncing || job?.status === "pending" || job?.status === "running"} onClick={() => void recalculate()}>重算历史参考费用</Button>
+            <Button variant="outline" disabled={busy || syncing || job?.status === "pending" || job?.status === "running"} onClick={() => void recalculate()}>重算历史费用与利润</Button>
             <a className="text-xs text-primary underline" href="https://github.com/Wei-Shaw/sub2api/blob/main/backend/resources/model-pricing/model_prices_and_context_window.json" target="_blank" rel="noreferrer">查看价格源</a>
           </div>
           {progressUnavailable && <p className="text-xs text-destructive" role="status">重算进度暂不可用，正在重试；下方为上次读取结果。</p>}

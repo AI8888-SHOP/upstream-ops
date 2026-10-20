@@ -31,6 +31,7 @@ type GatewayDailyReportMetrics struct {
 	Profit             *float64 `json:"profit"`
 	ProfitMargin       *float64 `json:"profit_margin"`
 	UnpricedRequests   int64    `json:"unpriced_requests"`
+	ZeroUsageRequests  int64    `json:"zero_usage_requests"`
 	Tokens             int64    `json:"tokens"`
 	CacheHitRate       *float64 `json:"cache_hit_rate"`
 }
@@ -76,6 +77,7 @@ type gatewayDailyReportRow struct {
 	Cost                                           float64
 	Revenue                                        float64
 	UnpricedRequests                               int64
+	ZeroUsageRequests                              int64
 	CacheInput, CacheRead, CacheCreation           int64
 }
 
@@ -88,7 +90,7 @@ func (row gatewayDailyReportRow) metrics() GatewayDailyReportMetrics {
 	metrics := GatewayDailyReportMetrics{
 		Requests: row.Requests, Attempts: row.Attempts, SuccessfulRequests: row.SuccessfulRequests,
 		Cost: row.Cost, Tokens: row.Tokens, CacheHitRate: hitRate,
-		UnpricedRequests: row.UnpricedRequests,
+		UnpricedRequests: row.UnpricedRequests, ZeroUsageRequests: row.ZeroUsageRequests,
 	}
 	// Unknown selling prices are not free sales. Withhold the total rather
 	// than presenting a partial sum as the channel's complete gross profit.
@@ -182,10 +184,17 @@ func (r *GatewayUsageLogs) DailyReport(ctx context.Context, date time.Time) (*Ga
 	return result, err
 }
 
-// A shared CTE also keeps the rollups consistent while usage is being appended.
-// The day discriminator uses explicit UTC boundaries, not the database session
-// timezone. Known source-group IDs win over names; old name-only snapshots
-// remain separate, rather than being guessed into a possibly wrong group.
+// Only token-priced attempts can use the zero-usage convention. Image/request/
+// duration billing may have valid non-token charges. Check each usage bucket so
+// cache-only, reasoning-only and image usage cannot be mistaken for zero usage.
+const gatewayDailyReportZeroUsageSQL = `COALESCE(u.billing_mode,'') IN ('','token')
+	AND COALESCE(u.input_tokens,0) = 0 AND COALESCE(u.output_tokens,0) = 0
+	AND COALESCE(u.cache_creation_tokens,0) = 0 AND COALESCE(u.cache_read_tokens,0) = 0
+	AND COALESCE(u.cache_creation5m_tokens,0) = 0 AND COALESCE(u.cache_creation1h_tokens,0) = 0
+	AND COALESCE(u.image_output_tokens,0) = 0 AND COALESCE(u.reasoning_tokens,0) = 0`
+
+// A shared CTE keeps the rollups consistent while usage is being appended.
+// Explicit UTC boundaries and source-group IDs preserve existing identities.
 const gatewayDailyReportSQL = `WITH report_base AS (
 	SELECT CASE WHEN u.created_at >= ? THEN 1 ELSE 0 END AS day_index,
 		CASE WHEN u.gateway_provider_id > 0 THEN 'provider' ELSE 'monitor' END AS source_kind,
@@ -195,8 +204,12 @@ const gatewayDailyReportSQL = `WITH report_base AS (
 		COALESCE(u.requested_model,'') AS requested_model, u.id, u.request_id, u.winner, u.success,
 		u.actual_cost, u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens,
 		g.sell_rate_multiplier,
+		(` + gatewayDailyReportZeroUsageSQL + `) AS zero_usage,
+		(COALESCE(u.total_cost,0) = 0 AND COALESCE(u.actual_cost,0) = 0 AND COALESCE(u.billed_cost,0) = 0
+			AND COALESCE(f.actual_cost,0) = 0 AND COALESCE(f.billed_cost,0) = 0) AS zero_recorded_cost,
 		CASE
 			WHEN COALESCE(u.billing_mode,'') NOT IN ('','token','image') THEN NULL
+			WHEN u.reference_pricing_version > 0 THEN u.reference_sales_base
 			WHEN f.request_id IS NOT NULL THEN
 				CASE WHEN f.billed_cost > 0 OR (f.billed_cost = 0 AND f.actual_cost > 0 AND f.virtual_cache_read_tokens > 0)
 					THEN f.billed_cost / (` + gatewayDailyReportOriginalRateSQL + `) ELSE NULL END
@@ -214,6 +227,7 @@ const gatewayDailyReportSQL = `WITH report_base AS (
 ), report_usage AS (
 	SELECT report_base.*,
 		CASE WHEN NOT winner THEN 0
+			WHEN zero_usage AND zero_recorded_cost THEN 0
 			WHEN sell_rate_multiplier = 0 THEN 0
 			WHEN sell_rate_multiplier > 0 AND sales_base >= 0 THEN sales_base * sell_rate_multiplier
 			ELSE NULL END AS sales_revenue
@@ -242,8 +256,11 @@ SELECT * FROM report_rollups ORDER BY level, day_index, source_kind, source_id, 
 // CalculateCost applies exactly one upstream rate. Log rates are immutable
 // even after reference repricing; never divide settlement by actual/total_cost.
 // Finalization has a request_id primary key, so joining it cannot multiply rows.
-// A zero snapshot without a known positive pre-credit cost may be missing model
-// pricing, not free usage. Only an explicit selling rate of zero bypasses this.
+// Repricing writes a separate sales basis using current model prices and the
+// original virtual-cache token counts. It takes precedence over old settlements,
+// including zero snapshots. A processed but unknown price remains NULL rather
+// than falling back to stale charges. Unprocessed rows retain the legacy basis
+// while the bounded background backfill catches up.
 const gatewayDailyReportOriginalRateSQL = `CASE
 	WHEN u.billing_rate_multiplier > 0 THEN u.billing_rate_multiplier
 	WHEN u.rate_multiplier > 0 THEN u.rate_multiplier ELSE 1.0 END`
@@ -256,6 +273,7 @@ const gatewayDailyReportAggregateSQL = `
 	COALESCE(SUM(actual_cost),0) AS cost,
 	COALESCE(SUM(sales_revenue),0) AS revenue,
 	COUNT(DISTINCT CASE WHEN winner AND sales_revenue IS NULL THEN request_id END) AS unpriced_requests,
+	COUNT(DISTINCT CASE WHEN winner AND zero_usage THEN request_id END) AS zero_usage_requests,
 	COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) AS tokens,
 	COALESCE(SUM(CASE WHEN success THEN input_tokens ELSE 0 END),0) AS cache_input,
 	COALESCE(SUM(CASE WHEN success THEN cache_read_tokens ELSE 0 END),0) AS cache_read,

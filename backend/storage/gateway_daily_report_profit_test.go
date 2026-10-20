@@ -30,6 +30,8 @@ func TestGatewayDailyReportProfitExtremeNumbersRemainJSONSafe(t *testing.T) {
 // snapshot joins and the five rollups cannot silently diverge by SQL dialect.
 func runGatewayDailyReportProfitRegression(t *testing.T, db *gorm.DB) {
 	t.Helper()
+	runGatewayDailyReportZeroUsageRegression(t, db)
+	runGatewayDailyReportRepricedRevenueRegression(t, db)
 	date := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
 	newTx := func(t *testing.T) *gorm.DB {
 		t.Helper()
