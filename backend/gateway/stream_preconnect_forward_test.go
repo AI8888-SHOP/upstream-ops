@@ -54,20 +54,29 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 			upstreamError                            int
 			sub2api                                  bool
 			corrupt                                  string
+			multihop                                 bool
 		}{
-			{"keepalive-then-failover-success", true, true, true, false, http.StatusServiceUnavailable, false, ""},
-			{"keepalive-then-validation-failover", true, true, true, true, http.StatusServiceUnavailable, false, ""},
-			{"keepalive-then-all-failed", true, true, false, false, http.StatusServiceUnavailable, false, ""},
-			{"disabled-retains-503", false, true, false, false, http.StatusServiceUnavailable, false, ""},
-			{"disabled-retains-502", false, true, false, false, http.StatusBadGateway, false, ""},
-			{"nonstream-retains-503", true, false, false, false, http.StatusServiceUnavailable, false, ""},
-			{"sub2api-then-failover-success", true, true, true, false, http.StatusServiceUnavailable, true, ""},
-			{"sub2api-then-validation-failover", true, true, true, true, http.StatusServiceUnavailable, true, ""},
-			{"sub2api-then-all-failed", true, true, false, false, http.StatusServiceUnavailable, true, ""},
-			{"sub2api-parent-disabled-retains-503", false, true, false, false, http.StatusServiceUnavailable, true, ""},
-			{"sub2api-nonstream-retains-503", true, false, false, false, http.StatusServiceUnavailable, true, ""},
-			{"sub2api-postcommit-eof-not-billed", true, true, true, false, http.StatusServiceUnavailable, true, "eof"},
-			{"sub2api-postcommit-bad-terminal-not-billed", true, true, true, false, http.StatusServiceUnavailable, true, "identity"},
+			{"keepalive-then-failover-success", true, true, true, false, http.StatusServiceUnavailable, false, "", false},
+			{"keepalive-then-validation-failover", true, true, true, true, http.StatusServiceUnavailable, false, "", false},
+			{"keepalive-then-all-failed", true, true, false, false, http.StatusServiceUnavailable, false, "", false},
+			{"disabled-retains-503", false, true, false, false, http.StatusServiceUnavailable, false, "", false},
+			{"disabled-retains-502", false, true, false, false, http.StatusBadGateway, false, "", false},
+			{"nonstream-retains-503", true, false, false, false, http.StatusServiceUnavailable, false, "", false},
+			{"sub2api-then-failover-success", true, true, true, false, http.StatusServiceUnavailable, true, "", false},
+			{"sub2api-then-validation-failover", true, true, true, true, http.StatusServiceUnavailable, true, "", false},
+			{"sub2api-then-all-failed", true, true, false, false, http.StatusServiceUnavailable, true, "", false},
+			{"sub2api-parent-disabled-retains-503", false, true, false, false, http.StatusServiceUnavailable, true, "", false},
+			{"sub2api-nonstream-retains-503", true, false, false, false, http.StatusServiceUnavailable, true, "", false},
+			{"sub2api-postcommit-eof-not-billed", true, true, true, false, http.StatusServiceUnavailable, true, "eof", false},
+			{"sub2api-postcommit-bad-terminal-not-billed", true, true, true, false, http.StatusServiceUnavailable, true, "identity", false},
+			{"multihop-then-failover-success", true, true, true, false, http.StatusServiceUnavailable, true, "", true},
+			{"multihop-then-validation-failover", true, true, true, true, http.StatusServiceUnavailable, true, "", true},
+			{"multihop-then-all-failed", true, true, false, false, http.StatusServiceUnavailable, true, "", true},
+			{"multihop-parent-disabled-retains-503", false, true, false, false, http.StatusServiceUnavailable, true, "", true},
+			{"multihop-semantic-parent-disabled-comment-only", true, true, false, false, http.StatusServiceUnavailable, false, "", true},
+			{"multihop-nonstream-retains-503", true, false, false, false, http.StatusServiceUnavailable, true, "", true},
+			{"multihop-postcommit-eof-not-billed", true, true, true, false, http.StatusServiceUnavailable, true, "eof", true},
+			{"multihop-postcommit-bad-terminal-not-billed", true, true, true, false, http.StatusServiceUnavailable, true, "identity", true},
 		} {
 			if tc.rejectFirst && !coordinated {
 				continue
@@ -84,7 +93,7 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 				}
 				groups, keys, routes := storage.NewGatewayGroups(db), storage.NewGatewayKeys(db), storage.NewGatewayRoutes(db)
 				group := &storage.GatewayGroup{
-					GatewayStreamPreconnectPolicy: storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: tc.enabled, StreamPreconnectSub2apiEnabled: tc.sub2api},
+					GatewayStreamPreconnectPolicy: storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: tc.enabled, StreamPreconnectSub2apiEnabled: tc.sub2api, StreamPreconnectMultihopEnabled: tc.multihop},
 					Name:                          "preconnect-forward", Status: storage.GatewayGroupStatusActive, RateSortDirection: "asc",
 					RetryEnabled: true, RetryCount: 0, FailoverEnabled: true, FailoverMax: 1,
 					RequestFirstTokenTimeoutSec: 10, ResponseValidationEnabled: coordinated,
@@ -227,7 +236,10 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 						}
 						prefix.WriteString(line)
 						if strings.TrimSpace(line) == "" {
-							break
+							if !tc.multihop || !tc.sub2api || strings.Contains(prefix.String(), "event: response.reasoning_summary_text.delta\n") {
+								break
+							}
+							continue
 						}
 						if !tc.sub2api && !strings.HasPrefix(line, ":") {
 							t.Fatalf("model output fabricated before upstream responded: %q", line)
@@ -239,6 +251,16 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 						}
 					} else if !strings.Contains(prefix.String(), "keepalive") {
 						t.Fatalf("missing SSE comment: %q", prefix.String())
+					}
+					if tc.multihop && tc.sub2api {
+						events := parsePreconnectResponsesTestEvents(t, []byte(prefix.String()))
+						if len(events) != 5 {
+							t.Fatalf("multihop preamble event count=%d: %s", len(events), prefix.String())
+						}
+						last := events[len(events)-1]
+						if last.name != "response.reasoning_summary_text.delta" || preconnectResponsesTestString(t, last.root["delta"]) != " " {
+							t.Fatalf("multihop did not reach client before real upstream output: %s", prefix.String())
+						}
 					}
 					release()
 				}
@@ -267,6 +289,13 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 				} else if strings.Contains(body, "uops_preconnect_") {
 					t.Fatalf("excluded request acquired synthetic lifecycle: %s", body)
 				}
+				wantSyntheticDelta := 0
+				if wantPreconnect && tc.sub2api && tc.multihop {
+					wantSyntheticDelta = 1
+				}
+				if count := strings.Count(body, "event: response.reasoning_summary_text.delta\n"); count != wantSyntheticDelta {
+					t.Fatalf("synthetic delta count=%d want=%d: %s", count, wantSyntheticDelta, body)
+				}
 				select {
 				case <-handlerDone:
 				case <-ctx.Done():
@@ -288,6 +317,9 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 				}
 				if logs[0].Success || logs[0].Winner || logs[0].BilledCost != 0 || logs[0].AttemptStatus != wantFirstStatus || logs[0].RequestFirstTokenMS != nil {
 					t.Fatalf("keepalive recorded as successful model output: %+v", logs[0])
+				}
+				if !tc.rejectFirst && (logs[0].InputTokens != 0 || logs[0].OutputTokens != 0) {
+					t.Fatalf("synthetic preamble manufactured usage before upstream output: %+v", logs[0])
 				}
 				var finalization storage.GatewayRequestFinalization
 				if err := db.Where("request_id = ?", logs[0].RequestID).First(&finalization).Error; err != nil {
@@ -317,6 +349,9 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 					}
 					if tc.corrupt != "" && logs[1].RequestFirstTokenMS == nil {
 						t.Fatalf("real output before failure lost true TTFT: %+v", logs[1])
+					}
+					if tc.corrupt == "" && (logs[1].InputTokens != 0 || logs[1].OutputTokens != 0) {
+						t.Fatalf("all-failed synthetic stream manufactured usage: %+v", logs[1])
 					}
 					var settlements int64
 					if err := db.Model(&storage.GatewayWinnerSettlement{}).Count(&settlements).Error; err != nil || settlements != 0 {

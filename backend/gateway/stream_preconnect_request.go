@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const streamPreconnectReplayIDPrefix = "rs_uops_preconnect_"
+const streamPreconnectReplayIDPrefix = streamPreconnectReasoningPrefix
 
 // A synthetic Responses output item cannot be persisted by the upstream. Only
 // explicitly stateless requests can safely receive it: omitting store must not
@@ -33,10 +33,12 @@ func streamPreconnectStatelessEligible(body []byte) bool {
 }
 
 // Clients may replay prior Responses output as the next request's input. Strip
-// only our exact, empty synthetic item (or its exact item_reference), even if
+// only our exact synthetic item (or its exact item_reference), even if
 // preconnect has since been disabled. Real reasoning, unknown shapes, and all
 // unrelated request fields remain untouched. RawMessage preserves number
-// precision instead of converting the request through float64.
+// precision instead of converting the request through float64. The multihop
+// namespace additionally requires exactly one ASCII-space summary, never real
+// reasoning or arbitrary whitespace carried under a similar-looking ID.
 func stripStreamPreconnectReplay(body []byte) []byte {
 	// The normal path has no synthetic ID. A Unicode-escaped ID still needs to
 	// be decoded, so do not take this shortcut when any Unicode escape exists.
@@ -100,7 +102,9 @@ func streamPreconnectIsReplayItem(raw []byte) bool {
 				return false
 			}
 		}
-		if !streamPreconnectEmptyArray(item["summary"]) {
+		spaceItem := strings.HasPrefix(id, streamPreconnectSpaceReasoningPrefix)
+		if (spaceItem && !streamPreconnectSpaceSummary(item["summary"])) ||
+			(!spaceItem && !streamPreconnectEmptyArray(item["summary"])) {
 			return false
 		}
 		if content, exists := item["content"]; exists && !streamPreconnectRawEquals(content, "null") && !streamPreconnectEmptyArray(content) {
@@ -125,15 +129,33 @@ func streamPreconnectIsReplayItem(raw []byte) bool {
 }
 
 func streamPreconnectIsReplayID(id string) bool {
-	if len(id) != len(streamPreconnectReplayIDPrefix)+32 || !strings.HasPrefix(id, streamPreconnectReplayIDPrefix) {
+	prefix := streamPreconnectReplayIDPrefix
+	if strings.HasPrefix(id, streamPreconnectSpaceReasoningPrefix) {
+		prefix = streamPreconnectSpaceReasoningPrefix
+	}
+	if len(id) != len(prefix)+32 || !strings.HasPrefix(id, prefix) {
 		return false
 	}
-	for _, ch := range id[len(streamPreconnectReplayIDPrefix):] {
+	for _, ch := range id[len(prefix):] {
 		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
 			return false
 		}
 	}
 	return true
+}
+
+func streamPreconnectSpaceSummary(raw []byte) bool {
+	var parts []json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil || len(parts) != 1 {
+		return false
+	}
+	part, ok := streamPreconnectRequestObject(parts[0])
+	if !ok || len(part) != 2 {
+		return false
+	}
+	kind, kindOK := streamPreconnectRequestString(part["type"])
+	text, textOK := streamPreconnectRequestString(part["text"])
+	return kindOK && textOK && kind == "summary_text" && text == " "
 }
 
 func streamPreconnectEmptyArray(raw []byte) bool {

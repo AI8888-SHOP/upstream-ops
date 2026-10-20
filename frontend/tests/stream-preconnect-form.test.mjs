@@ -4,7 +4,7 @@ import test from "node:test"
 import ts from "typescript"
 
 // Structural regressions run in CI alongside the full frontend typecheck.
-const fields = ["stream_preconnect_enabled", "stream_preconnect_min_delay_ms", "stream_preconnect_max_delay_ms"]
+const fields = ["stream_preconnect_enabled", "stream_preconnect_sub2api_enabled", "stream_preconnect_multihop_enabled", "stream_preconnect_min_delay_ms", "stream_preconnect_max_delay_ms"]
 
 test("group preconnect policy survives type, form, defaults, load and save wiring", async () => {
   const [types, utils, page, dialog] = await Promise.all([
@@ -17,6 +17,8 @@ test("group preconnect policy survives type, form, defaults, load and save wirin
     for (const field of fields) assert.ok(source.includes(field), `missing ${field}`)
   }
   assert.ok(utils.includes("stream_preconnect_enabled: false"))
+  assert.ok(utils.includes("stream_preconnect_sub2api_enabled: false"))
+  assert.ok(utils.includes("stream_preconnect_multihop_enabled: false"))
   assert.ok(utils.includes('stream_preconnect_min_delay_ms: "0"'))
   assert.ok(utils.includes('stream_preconnect_max_delay_ms: "0"'))
   for (const field of fields) {
@@ -30,6 +32,10 @@ test("group preconnect policy survives type, form, defaults, load and save wirin
   assert.ok(dialog.includes("提前建立流并保活（非真实首字）"))
   assert.ok(dialog.includes("不代表请求成功"))
   assert.ok(dialog.includes("不会延长首字超时或请求总预算"))
+  assert.ok(dialog.includes("合成首响应（多层 sub2api 兼容）"))
+  assert.ok(dialog.includes("disabled={!groupForm.stream_preconnect_enabled || !groupForm.stream_preconnect_sub2api_enabled}"))
+  assert.ok(dialog.includes("解除各层首输出超时保护"))
+  assert.ok(dialog.includes("可能影响失败换源"))
   for (const [name, source] of [["gateway-page.tsx", page], ["gateway-dialogs.tsx", dialog]]) {
     const parsed = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
     assert.deepEqual(parsed.parseDiagnostics.map((d) => ts.flattenDiagnosticMessageText(d.messageText, " ").trim()), [], name)

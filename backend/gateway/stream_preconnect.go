@@ -21,7 +21,7 @@ const streamPreconnectWriteTimeout = 5 * time.Second
 type streamPreconnectKey struct{}
 
 // The raw writer is below requestTimingWriter: transport comments and the
-// opt-in empty Responses preamble cannot mark our real TTFT, stop its budget,
+// opt-in synthetic Responses preamble cannot mark our real TTFT, stop its budget,
 // select a hedge winner or commit an unvalidated upstream attempt.
 type streamPreconnectWriter struct {
 	gin.ResponseWriter
@@ -98,7 +98,7 @@ func beginStreamPreconnect(c *gin.Context, group *storage.GatewayGroup, kind pro
 	if group.StreamPreconnectSub2apiEnabled && path == "/v1/responses" && protocol.NormalizeKind(kind) == protocol.KindOpenAIResponses && len(requestBody) == 1 && streamPreconnectStatelessEligible(requestBody[0]) {
 		// On entropy failure retain the ordinary transport-only mode. Never
 		// substitute a predictable response ID or alter stateful requests.
-		w.responses, _ = newPreconnectResponsesStream()
+		w.responses, _ = newPreconnectResponsesStream(group.StreamPreconnectMultihopEnabled)
 	}
 	c.Request = c.Request.WithContext(context.WithValue(ctx, streamPreconnectKey{}, w))
 	if hasTiming {
@@ -212,8 +212,9 @@ func (w *streamPreconnectWriter) keepalive() bool {
 		replaceResponseHeaders(w.ResponseWriter.Header(), w.earlyHeader)
 		w.ResponseWriter.WriteHeader(http.StatusOK)
 	}
-	// Ordinary mode remains transport-only. The opt-in Responses mode emits
-	// an empty, coherent lifecycle, never text, usage or a success terminal.
+	// Ordinary mode remains transport-only. Responses compatibility adds a
+	// coherent lifecycle; multihop mode adds a single synthetic summary space.
+	// Both bypass our real TTFT/commit tracking and never invent model usage.
 	payload := []byte(": upstream-ops keepalive\n\n")
 	if w.responses != nil && !w.preconnected {
 		payload = w.responses.preamble()
@@ -468,8 +469,8 @@ func (w *streamPreconnectWriter) writeFinalError(status int, body []byte) error 
 	}
 	if w.responses != nil && w.preconnected {
 		// Discard any incomplete frame before appending the authoritative
-		// gateway failure. Never emit a synthetic item.done ahead of failure:
-		// sub2api would interpret it as progress and disable safe failover.
+		// gateway failure. Legacy mode leaves empty reasoning open to preserve
+		// downstream failover; multihop closes only its already-delivered space.
 		w.responses.discardPending()
 		err := w.responses.feed(payload, w.writeResponsesFrameLocked)
 		if err == nil {

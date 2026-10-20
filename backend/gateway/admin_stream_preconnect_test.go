@@ -27,7 +27,7 @@ func TestApplyStreamPreconnectPolicyValidatesRangeAtomically(t *testing.T) {
 			policy := storage.GatewayStreamPreconnectPolicy{StreamPreconnectMinDelayMS: 20, StreamPreconnectMaxDelayMS: 40}
 			original := policy
 			err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{
-				StreamPreconnectEnabled: &enabled, StreamPreconnectSub2apiEnabled: &enabled, StreamPreconnectMinDelayMS: &tc.min, StreamPreconnectMaxDelayMS: &tc.max,
+				StreamPreconnectEnabled: &enabled, StreamPreconnectSub2apiEnabled: &enabled, StreamPreconnectMultihopEnabled: &enabled, StreamPreconnectMinDelayMS: &tc.min, StreamPreconnectMaxDelayMS: &tc.max,
 			})
 			if (err == nil) != tc.valid {
 				t.Fatalf("valid=%v error=%v", tc.valid, err)
@@ -35,7 +35,7 @@ func TestApplyStreamPreconnectPolicyValidatesRangeAtomically(t *testing.T) {
 			if !tc.valid && policy != original {
 				t.Fatalf("invalid input mutated policy: %+v", policy)
 			}
-			if tc.valid && (!policy.StreamPreconnectEnabled || !policy.StreamPreconnectSub2apiEnabled || policy.StreamPreconnectMinDelayMS != tc.min || policy.StreamPreconnectMaxDelayMS != tc.max) {
+			if tc.valid && (!policy.StreamPreconnectEnabled || !policy.StreamPreconnectSub2apiEnabled || !policy.StreamPreconnectMultihopEnabled || policy.StreamPreconnectMinDelayMS != tc.min || policy.StreamPreconnectMaxDelayMS != tc.max) {
 				t.Fatalf("policy = %+v", policy)
 			}
 		})
@@ -43,7 +43,7 @@ func TestApplyStreamPreconnectPolicyValidatesRangeAtomically(t *testing.T) {
 }
 
 func TestApplyStreamPreconnectPolicyPartialUpdate(t *testing.T) {
-	policy := storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: true, StreamPreconnectSub2apiEnabled: true, StreamPreconnectMinDelayMS: 50, StreamPreconnectMaxDelayMS: 100}
+	policy := storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: true, StreamPreconnectSub2apiEnabled: true, StreamPreconnectMultihopEnabled: true, StreamPreconnectMinDelayMS: 50, StreamPreconnectMaxDelayMS: 100}
 	original := policy
 	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{}); err != nil || policy != original {
 		t.Fatalf("omitted fields changed policy: %+v, %v", policy, err)
@@ -53,8 +53,29 @@ func TestApplyStreamPreconnectPolicyPartialUpdate(t *testing.T) {
 		t.Fatalf("partial update broke existing range: %+v, %v", policy, err)
 	}
 	disabled := false
-	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectEnabled: &disabled}); err != nil || policy.StreamPreconnectEnabled || !policy.StreamPreconnectSub2apiEnabled || policy.StreamPreconnectMinDelayMS != 50 || policy.StreamPreconnectMaxDelayMS != 100 {
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectEnabled: &disabled}); err != nil || policy.StreamPreconnectEnabled || !policy.StreamPreconnectSub2apiEnabled || !policy.StreamPreconnectMultihopEnabled || policy.StreamPreconnectMinDelayMS != 50 || policy.StreamPreconnectMaxDelayMS != 100 {
 		t.Fatalf("disable did not preserve range and compatibility preference: %+v, %v", policy, err)
+	}
+}
+
+func TestApplyStreamPreconnectMultihopExplicitUpdate(t *testing.T) {
+	policy := storage.GatewayStreamPreconnectPolicy{}
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{}); err != nil || policy.StreamPreconnectMultihopEnabled {
+		t.Fatalf("omitted multihop flag must remain disabled: %+v, %v", policy, err)
+	}
+	enabled := true
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectMultihopEnabled: &enabled}); err != nil || !policy.StreamPreconnectMultihopEnabled || policy.StreamPreconnectEnabled || policy.StreamPreconnectSub2apiEnabled {
+		t.Fatalf("multihop preference changed parent switches: %+v, %v", policy, err)
+	}
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectEnabled: &enabled, StreamPreconnectSub2apiEnabled: &enabled}); err != nil || !policy.StreamPreconnectEnabled || !policy.StreamPreconnectSub2apiEnabled || !policy.StreamPreconnectMultihopEnabled {
+		t.Fatalf("enabling parents lost multihop preference: %+v, %v", policy, err)
+	}
+	disabled := false
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectSub2apiEnabled: &disabled}); err != nil || policy.StreamPreconnectSub2apiEnabled || !policy.StreamPreconnectMultihopEnabled {
+		t.Fatalf("disabling semantic parent lost multihop preference: %+v, %v", policy, err)
+	}
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectMultihopEnabled: &disabled}); err != nil || policy.StreamPreconnectMultihopEnabled || !policy.StreamPreconnectEnabled {
+		t.Fatalf("explicit false did not disable multihop independently: %+v, %v", policy, err)
 	}
 }
 

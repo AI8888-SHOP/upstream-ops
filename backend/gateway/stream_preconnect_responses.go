@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	streamPreconnectReasoningPrefix = "rs_uops_preconnect_"
-	streamPreconnectResponsePrefix  = "resp_uops_preconnect_"
+	streamPreconnectReasoningPrefix      = "rs_uops_preconnect_"
+	streamPreconnectSpaceReasoningPrefix = "rs_uops_preconnect_space_"
+	streamPreconnectResponsePrefix       = "resp_uops_preconnect_"
 )
 
 // preconnectResponsesStream is deliberately limited to explicitly stateless
@@ -27,6 +28,9 @@ const (
 // Empty reasoning is semantic TTFT in stock sub2api, but is not visible output
 // and does not disarm its first-output guard. The synthetic item stays open
 // until real output arrives. Unknown/non-standard events are not invented.
+// The explicitly enabled multihop variant emits one ASCII space in a reasoning
+// summary, which causes compatible buffering relays to flush and start visible
+// TTFT too. Those relays necessarily consider output committed from that point.
 type preconnectResponsesStream struct {
 	responseID  string
 	reasoningID string
@@ -42,6 +46,7 @@ type preconnectResponsesStream struct {
 	items       map[int64]*preconnectResponsesItem
 	itemBytes   int
 	sawOutput   bool
+	multihop    bool
 }
 
 type preconnectResponsesItem struct {
@@ -51,7 +56,7 @@ type preconnectResponsesItem struct {
 	done  json.RawMessage
 }
 
-func newPreconnectResponsesStream() (*preconnectResponsesStream, error) {
+func newPreconnectResponsesStream(multihop ...bool) (*preconnectResponsesStream, error) {
 	var entropy [16]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
 		return nil, fmt.Errorf("create Responses preconnect identity: %w", err)
@@ -61,6 +66,10 @@ func newPreconnectResponsesStream() (*preconnectResponsesStream, error) {
 		responseID:  streamPreconnectResponsePrefix + suffix,
 		reasoningID: streamPreconnectReasoningPrefix + suffix,
 		createdAt:   time.Now().Unix(),
+	}
+	s.multihop = len(multihop) > 0 && multihop[0]
+	if s.multihop {
+		s.reasoningID = streamPreconnectSpaceReasoningPrefix + suffix
 	}
 	// Cache the preamble: asking for it twice cannot consume sequence numbers
 	// or create a second response identity.
@@ -73,6 +82,14 @@ func newPreconnectResponsesStream() (*preconnectResponsesStream, error) {
 		"output_index": json.RawMessage("0"),
 		"item":         s.reasoning("in_progress"),
 	})...)
+	if s.multihop {
+		part := s.summaryEnvelope()
+		part["part"] = preconnectResponsesJSON(map[string]string{"type": "summary_text", "text": ""})
+		s.prefix = append(s.prefix, s.frame("response.reasoning_summary_part.added", part)...)
+		delta := s.summaryEnvelope()
+		delta["delta"] = preconnectResponsesJSON(" ")
+		s.prefix = append(s.prefix, s.frame("response.reasoning_summary_text.delta", delta)...)
+	}
 	return s, nil
 }
 
@@ -282,16 +299,13 @@ func (s *preconnectResponsesStream) event(wire []byte, emit func([]byte) error) 
 	if _, ok := envelope["response_id"]; ok {
 		envelope["response_id"] = preconnectResponsesJSON(s.responseID)
 	}
-	// A failed first real event must remain retryable in sub2api: emitting
-	// output_item.done before it would incorrectly count as client progress.
-	if !failed && eventType != "response.queued" && !s.itemClosed {
-		if err := emit(s.frame("response.output_item.done", map[string]json.RawMessage{
-			"output_index": json.RawMessage("0"),
-			"item":         s.reasoning("completed"),
-		})); err != nil {
+	// Legacy empty reasoning must remain retryable on a failed first event.
+	// Multihop has already committed output in downstream relays, so close its
+	// summary coherently even before failure, without inventing response success.
+	if (!failed || s.multihop) && eventType != "response.queued" && !s.itemClosed {
+		if err := s.closeReasoning(emit); err != nil {
 			return err
 		}
-		s.itemClosed = true
 	}
 	if err := emit(s.frame(eventType, envelope)); err != nil {
 		return err
@@ -433,16 +447,25 @@ func (s *preconnectResponsesStream) normalizeFailure(response, envelope map[stri
 }
 
 // failure is used for malformed/truncated streams. It never claims successful
-// model output, manufactures usage, or emits item.done before the failure.
+// model output or manufactures usage. The default empty mode does not emit
+// item.done before failure; multihop closes only its already-delivered space.
 func (s *preconnectResponsesStream) failure(message string) []byte {
 	if s.terminal {
 		return nil
 	}
 	s.discardPending()
 	s.terminal = true
+	wasItemClosed := s.itemClosed
+	var output []byte
+	if s.multihop && !s.itemClosed {
+		_ = s.closeReasoning(func(frame []byte) error {
+			output = append(output, frame...)
+			return nil
+		})
+	}
 	var response map[string]json.RawMessage
 	_ = json.Unmarshal(s.baseline("failed"), &response)
-	if s.itemClosed {
+	if wasItemClosed {
 		// Keep the client's already accumulated real/partial items. Replacing
 		// them with a synthetic-only output array would lose visible content.
 		delete(response, "output")
@@ -452,13 +475,51 @@ func (s *preconnectResponsesStream) failure(message string) []byte {
 	response["error"] = preconnectResponsesJSON(map[string]string{
 		"type": "upstream_error", "code": "stream_protocol_error", "message": message,
 	})
-	return s.frame("response.failed", map[string]json.RawMessage{"response": preconnectResponsesJSON(response)})
+	return append(output, s.frame("response.failed", map[string]json.RawMessage{"response": preconnectResponsesJSON(response)})...)
 }
 
 func (s *preconnectResponsesStream) reasoning(status string) json.RawMessage {
+	summary := []any{}
+	if s.multihop && status == "completed" {
+		summary = append(summary, map[string]string{"type": "summary_text", "text": " "})
+	}
 	return preconnectResponsesJSON(map[string]any{
-		"id": s.reasoningID, "type": "reasoning", "summary": []any{}, "status": status,
+		"id": s.reasoningID, "type": "reasoning", "summary": summary, "status": status,
 	})
+}
+
+func (s *preconnectResponsesStream) summaryEnvelope() map[string]json.RawMessage {
+	return map[string]json.RawMessage{
+		"item_id":       preconnectResponsesJSON(s.reasoningID),
+		"output_index":  json.RawMessage("0"),
+		"summary_index": json.RawMessage("0"),
+	}
+}
+
+func (s *preconnectResponsesStream) closeReasoning(emit func([]byte) error) error {
+	if s.itemClosed {
+		return nil
+	}
+	if s.multihop {
+		text := s.summaryEnvelope()
+		text["text"] = preconnectResponsesJSON(" ")
+		if err := emit(s.frame("response.reasoning_summary_text.done", text)); err != nil {
+			return err
+		}
+		part := s.summaryEnvelope()
+		part["part"] = preconnectResponsesJSON(map[string]string{"type": "summary_text", "text": " "})
+		if err := emit(s.frame("response.reasoning_summary_part.done", part)); err != nil {
+			return err
+		}
+	}
+	if err := emit(s.frame("response.output_item.done", map[string]json.RawMessage{
+		"output_index": json.RawMessage("0"),
+		"item":         s.reasoning("completed"),
+	})); err != nil {
+		return err
+	}
+	s.itemClosed = true
+	return nil
 }
 
 func (s *preconnectResponsesStream) baseline(status string) json.RawMessage {

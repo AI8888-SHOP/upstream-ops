@@ -689,6 +689,8 @@ export interface GatewayGroup {
   stream_preconnect_enabled?: boolean
   /** 无状态 store:false Responses 的 sub2api semantic 首字统计兼容；改变响应 ID，不改变真实首字或计费。 */
   stream_preconnect_sub2api_enabled?: boolean
+  /** 合成 reasoning 空格用于多层 sub2api 首响应；依赖前两个开关，会影响下游首输出超时与换源。 */
+  stream_preconnect_multihop_enabled?: boolean
   /** 握手随机延迟下限，0 到 60000 毫秒。 */
   stream_preconnect_min_delay_ms?: number
   /** 握手随机延迟上限，不小于下限且不超过 60000 毫秒。 */

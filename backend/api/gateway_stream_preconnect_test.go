@@ -43,8 +43,8 @@ func TestGatewayStreamPreconnectPolicyAPI(t *testing.T) {
 	if defaults.GatewayStreamPreconnectPolicy != (storage.GatewayStreamPreconnectPolicy{}) {
 		t.Fatalf("unsafe default: %+v", defaults.GatewayStreamPreconnectPolicy)
 	}
-	group := decode(request(http.MethodPost, "/api/gateway/groups", `{"name":"preconnect-enabled","stream_preconnect_enabled":true,"stream_preconnect_min_delay_ms":25,"stream_preconnect_max_delay_ms":125}`), http.StatusCreated)
-	want := storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: true, StreamPreconnectMinDelayMS: 25, StreamPreconnectMaxDelayMS: 125}
+	group := decode(request(http.MethodPost, "/api/gateway/groups", `{"name":"preconnect-enabled","stream_preconnect_enabled":true,"stream_preconnect_sub2api_enabled":true,"stream_preconnect_multihop_enabled":true,"stream_preconnect_min_delay_ms":25,"stream_preconnect_max_delay_ms":125}`), http.StatusCreated)
+	want := storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: true, StreamPreconnectSub2apiEnabled: true, StreamPreconnectMultihopEnabled: true, StreamPreconnectMinDelayMS: 25, StreamPreconnectMaxDelayMS: 125}
 	if group.GatewayStreamPreconnectPolicy != want {
 		t.Fatalf("create policy: %+v", group.GatewayStreamPreconnectPolicy)
 	}
@@ -60,6 +60,8 @@ func TestGatewayStreamPreconnectPolicyAPI(t *testing.T) {
 		`{"stream_preconnect_max_delay_ms":60001}`,
 		`{"stream_preconnect_min_delay_ms":1.5}`,
 		`{"stream_preconnect_max_delay_ms":"100"}`,
+		`{"stream_preconnect_multihop_enabled":"true"}`,
+		`{"stream_preconnect_multihop_enabled":1}`,
 	} {
 		if w := request(http.MethodPut, path, body); w.Code != http.StatusBadRequest {
 			t.Fatalf("invalid update %s accepted: %d %s", body, w.Code, w.Body.String())
@@ -72,7 +74,12 @@ func TestGatewayStreamPreconnectPolicyAPI(t *testing.T) {
 	if w := request(http.MethodPost, "/api/gateway/groups", `{"name":"preconnect-invalid","stream_preconnect_min_delay_ms":1,"stream_preconnect_max_delay_ms":0}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid create accepted: %d %s", w.Code, w.Body.String())
 	}
-	updated = decode(request(http.MethodPut, path, `{"stream_preconnect_enabled":false,"stream_preconnect_min_delay_ms":0,"stream_preconnect_max_delay_ms":0}`), http.StatusOK)
+	updated = decode(request(http.MethodPut, path, `{"stream_preconnect_sub2api_enabled":false}`), http.StatusOK)
+	want.StreamPreconnectSub2apiEnabled = false
+	if updated.GatewayStreamPreconnectPolicy != want {
+		t.Fatalf("parent disable lost independent multihop preference: %+v", updated.GatewayStreamPreconnectPolicy)
+	}
+	updated = decode(request(http.MethodPut, path, `{"stream_preconnect_enabled":false,"stream_preconnect_multihop_enabled":false,"stream_preconnect_min_delay_ms":0,"stream_preconnect_max_delay_ms":0}`), http.StatusOK)
 	if updated.GatewayStreamPreconnectPolicy != (storage.GatewayStreamPreconnectPolicy{}) {
 		t.Fatalf("explicit disable/reset failed: %+v", updated.GatewayStreamPreconnectPolicy)
 	}

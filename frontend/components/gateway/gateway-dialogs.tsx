@@ -1245,10 +1245,10 @@ export function GroupFormDialog({
                 <div className="min-w-0 flex-1">
                   <Label>sub2api 首字统计兼容（Responses / semantic）</Label>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    无需修改 sub2api 源码，但其首字统计需使用 semantic；visible 口径仍等待真实输出。仅在 Responses 请求明确设置 store:false，且不使用续接、会话或后台模式时，提前发送生命周期事件与空 reasoning 项；其他请求仅发送普通保活注释。
+                    无需修改 sub2api 源码。未开启下方多层模式时，其首字统计需使用 semantic；visible 口径仍等待真实输出，多层转发也可能缓冲空事件。仅在 Responses 请求明确设置 store:false，且不使用续接、会话或后台模式时，提前发送生命周期事件与空 reasoning 项；其他请求仅发送普通保活注释。
                   </p>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    启用后，提前建流的响应使用网关生成的响应 ID，并多出空 reasoning 项，不能用于 previous_response_id 续接。仅改变下游统计，不会降低本程序真实首字、改变回答内容、Token 用量或计费；实际下游计时还包含网络与代理耗时，不保证等于设置的毫秒数。
+                    启用后，提前建流的响应使用网关生成的响应 ID，并多出 reasoning 项，不能用于 previous_response_id 续接。未开启多层模式时该项为空；开启后包含下方说明的合成空格。不会降低本程序真实首字、改变真实回答正文、Token 用量或计费；实际下游计时还包含网络与代理耗时，不保证等于设置的毫秒数。
                   </p>
                 </div>
                 <Switch
@@ -1256,6 +1256,23 @@ export function GroupFormDialog({
                   checked={groupForm.stream_preconnect_sub2api_enabled}
                   disabled={!groupForm.stream_preconnect_enabled}
                   onCheckedChange={(v) => setGroupForm({ ...groupForm, stream_preconnect_sub2api_enabled: v })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <Label>合成首响应（多层 sub2api 兼容）</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    在上述兼容模式基础上，额外发送一个 reasoning summary 空格 delta，促使现有 sub2api 向下一层转发。其 semantic 与 visible 统计均可识别，不要求修改下游；不保证任意代理或协议转换路径都有效。仍仅适用于满足条件的 store:false Responses 请求。
+                  </p>
+                  <p className="text-[11px] leading-5 text-amber-700 dark:text-amber-300">
+                    这不是零内容保活或真实提速：下游会认为已经输出，解除各层首输出超时保护，并可能影响失败换源。会额外产生一个合成推理空格；本程序仍按真实上游输出计算 TTFT、执行真实首字预算、校验与计费。默认关闭，旧组不会自动启用。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  checked={groupForm.stream_preconnect_multihop_enabled}
+                  disabled={!groupForm.stream_preconnect_enabled || !groupForm.stream_preconnect_sub2api_enabled}
+                  onCheckedChange={(v) => setGroupForm({ ...groupForm, stream_preconnect_multihop_enabled: v })}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">

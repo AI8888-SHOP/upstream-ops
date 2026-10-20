@@ -164,6 +164,129 @@ func TestPreconnectResponsesPreambleSemanticOnly(t *testing.T) {
 	}
 }
 
+func TestPreconnectResponsesMultihopLifecycleAndRealPayload(t *testing.T) {
+	stream, err := newPreconnectResponsesStream(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := bytes.NewBuffer(append([]byte(nil), stream.preamble()...))
+	prefix := parsePreconnectResponsesTestEvents(t, wire.Bytes())
+	wantPrefix := []string{"response.created", "response.in_progress", "response.output_item.added", "response.reasoning_summary_part.added", "response.reasoning_summary_text.delta"}
+	if len(prefix) != len(wantPrefix) {
+		t.Fatalf("prefix has %d events, want %d: %s", len(prefix), len(wantPrefix), wire)
+	}
+	for i, event := range prefix {
+		if event.name != wantPrefix[i] {
+			t.Fatalf("prefix event %d = %s, want %s", i, event.name, wantPrefix[i])
+		}
+		if strings.Contains(event.name, "output_text") || len(event.root["usage"]) > 0 {
+			t.Fatalf("prefix fabricated answer or usage: %s", event.data)
+		}
+	}
+	item := preconnectResponsesTestObject(t, prefix[2].root["item"])
+	id := preconnectResponsesTestString(t, item["id"])
+	if !strings.HasPrefix(id, streamPreconnectSpaceReasoningPrefix) || string(item["summary"]) != "[]" {
+		t.Fatalf("multihop reasoning identity/initial summary invalid: %s", prefix[2].data)
+	}
+	for _, event := range prefix[3:] {
+		if preconnectResponsesTestString(t, event.root["item_id"]) != id || preconnectResponsesTestInt(t, event.root["output_index"]) != 0 || preconnectResponsesTestInt(t, event.root["summary_index"]) != 0 {
+			t.Fatalf("invalid summary event identity: %s", event.data)
+		}
+	}
+	part := preconnectResponsesTestObject(t, prefix[3].root["part"])
+	if preconnectResponsesTestString(t, part["text"]) != "" || preconnectResponsesTestString(t, prefix[4].root["delta"]) != " " {
+		t.Fatalf("multihop must contain only one space delta: %s", wire)
+	}
+	if !bytes.Equal(stream.preamble(), wire.Bytes()) {
+		t.Fatal("preamble changed on repeat access")
+	}
+	const answer = "actual answer without a leading space"
+	real := []byte(preconnectForwardResponse(answer))
+	// Every-byte delivery also exercises split JSON, lines, and SSE delimiters.
+	for _, b := range real {
+		if err := stream.feed([]byte{b}, preconnectResponsesTestEmit(wire)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events := parsePreconnectResponsesTestEvents(t, wire.Bytes())
+	assertPreconnectResponsesTestSequence(t, events)
+	wantClose := []string{"response.reasoning_summary_text.done", "response.reasoning_summary_part.done", "response.output_item.done"}
+	for i, name := range wantClose {
+		if events[len(prefix)+i].name != name {
+			t.Fatalf("synthetic closure event %d = %s, want %s", i, events[len(prefix)+i].name, name)
+		}
+	}
+	counts := make(map[string]int)
+	var realDelta string
+	for _, event := range events {
+		counts[event.name]++
+		if event.name == "response.output_text.delta" {
+			realDelta += preconnectResponsesTestString(t, event.root["delta"])
+			if preconnectResponsesTestInt(t, event.root["output_index"]) != 1 {
+				t.Fatalf("real item index not shifted: %s", event.data)
+			}
+		}
+	}
+	if realDelta != answer || counts["response.reasoning_summary_text.delta"] != 1 || counts["response.reasoning_summary_text.done"] != 1 || counts["response.reasoning_summary_part.done"] != 1 {
+		t.Fatalf("answer changed or synthetic summary duplicated: delta=%q counts=%v", realDelta, counts)
+	}
+	terminal := events[len(events)-1]
+	response := preconnectResponsesTestObject(t, terminal.root["response"])
+	var output []json.RawMessage
+	if err := json.Unmarshal(response["output"], &output); err != nil || len(output) != 2 {
+		t.Fatalf("terminal output = %s, err=%v", response["output"], err)
+	}
+	if !streamPreconnectIsReplayItem(output[0]) || !bytes.Equal(output[0], events[len(prefix)+2].root["item"]) {
+		t.Fatalf("synthetic final item does not match completed event: %s", output[0])
+	}
+	realEvents := parsePreconnectResponsesTestEvents(t, real)
+	realResponse := preconnectResponsesTestObject(t, realEvents[len(realEvents)-1].root["response"])
+	var actualOutput []json.RawMessage
+	_ = json.Unmarshal(realResponse["output"], &actualOutput)
+	if !bytes.Equal(output[1], actualOutput[0]) || !bytes.Equal(response["usage"], realResponse["usage"]) || preconnectResponsesTestString(t, response["model"]) != "m" {
+		t.Fatalf("real output, usage, or model changed: %s", terminal.data)
+	}
+}
+
+func TestPreconnectResponsesMultihopFailureClosesOnlySyntheticSpace(t *testing.T) {
+	for _, protocolFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("protocolFailure=%v", protocolFailure), func(t *testing.T) {
+			stream, err := newPreconnectResponsesStream(true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire := bytes.NewBuffer(append([]byte(nil), stream.preamble()...))
+			if protocolFailure {
+				wire.Write(stream.failure("truncated source"))
+			} else {
+				payload := preconnectResponsesJSON(map[string]any{"type": "response.failed", "response": map[string]any{"status": "failed", "error": map[string]string{"type": "upstream_error", "message": "no route"}}})
+				if err := stream.feed(append(append([]byte("data: "), payload...), '\n', '\n'), preconnectResponsesTestEmit(wire)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			events := parsePreconnectResponsesTestEvents(t, wire.Bytes())
+			want := []string{"response.reasoning_summary_text.done", "response.reasoning_summary_part.done", "response.output_item.done", "response.failed"}
+			if len(events) != 9 {
+				t.Fatalf("failure lifecycle has %d events: %s", len(events), wire)
+			}
+			for i, kind := range want {
+				if events[5+i].name != kind {
+					t.Fatalf("failure event %d = %s, want %s", i, events[5+i].name, kind)
+				}
+			}
+			response := preconnectResponsesTestObject(t, events[8].root["response"])
+			var output []json.RawMessage
+			if err := json.Unmarshal(response["output"], &output); err != nil || len(output) != 1 || !streamPreconnectIsReplayItem(output[0]) {
+				t.Fatalf("failed terminal lost synthetic space: %s", events[8].data)
+			}
+			if preconnectResponsesTestString(t, response["status"]) != "failed" || preconnectResponsesHasUsage(response["usage"]) || strings.Contains(wire.String(), "response.completed") {
+				t.Fatalf("failure fabricated success or usage: %s", wire)
+			}
+			assertPreconnectResponsesTestSequence(t, events)
+		})
+	}
+}
+
 func TestPreconnectResponsesPreservesPayloadAndTerminal(t *testing.T) {
 	stream, wire, responseID, itemID := preconnectResponsesTestStart(t)
 	const toolArgs = "{\"城市\":\"维也纳\",\"n\":9007199254740993}"

@@ -131,6 +131,46 @@ func TestStripStreamPreconnectReplayPreservesNoOpBytes(t *testing.T) {
 	}
 }
 
+func TestStripStreamPreconnectReplayRecognizesOnlyExactSpaceItems(t *testing.T) {
+	const id = "rs_uops_preconnect_space_0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name   string
+		item   string
+		remove bool
+	}{
+		{"exact space", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" \"}]}", true},
+		{"completed space", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" \"}],\"status\":\"completed\"}", true},
+		{"reference", "{\"id\":\"ID\",\"type\":\"item_reference\"}", true},
+		{"empty summary not our multihop terminal", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[]}", false},
+		{"two spaces", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"  \"}]}", false},
+		{"newline", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"\\n\"}]}", false},
+		{"real text", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" answer\"}]}", false},
+		{"two parts", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" \"},{\"type\":\"summary_text\",\"text\":\"real\"}]}", false},
+		{"duplicate text", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"real\",\"text\":\" \"}]}", false},
+		{"unknown summary field", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" \",\"other\":1}]}", false},
+		{"encrypted content", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" \"}],\"encrypted_content\":\"actual\"}", false},
+		{"in progress", "{\"id\":\"ID\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" \"}],\"status\":\"in_progress\"}", false},
+		{"legacy namespace with text", "{\"id\":\"rs_uops_preconnect_0123456789abcdef0123456789abcdef\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" \"}]}", false},
+		{"wrong space id length", "{\"id\":\"ID0\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\" \"}]}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := strings.ReplaceAll(tc.item, "ID", id)
+			body := []byte("{\"input\":[" + item + "],\"store\":false}")
+			got := stripStreamPreconnectReplay(body)
+			if !tc.remove {
+				if !bytes.Equal(got, body) || &got[0] != &body[0] {
+					t.Fatalf("real or ambiguous item changed: %s", got)
+				}
+				return
+			}
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(got, &object); err != nil || string(object["input"]) != "[]" {
+				t.Fatalf("synthetic space item not removed: %s, err=%v", got, err)
+			}
+		})
+	}
+}
+
 func TestStripStreamPreconnectReplayPreservesRealItemsAndNumberPrecision(t *testing.T) {
 	body := []byte(`{
 		"model":"model", "store":true, "background":true,

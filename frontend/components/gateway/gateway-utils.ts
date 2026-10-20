@@ -48,6 +48,7 @@ export type GroupFormState = {
   first_token_timeout_cooldown_enabled: boolean
   stream_preconnect_enabled: boolean
   stream_preconnect_sub2api_enabled: boolean
+  stream_preconnect_multihop_enabled: boolean
   stream_preconnect_min_delay_ms: string
   stream_preconnect_max_delay_ms: string
   candy_check_enabled: boolean
@@ -695,6 +696,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   first_token_timeout_cooldown_enabled: true,
   stream_preconnect_enabled: false,
   stream_preconnect_sub2api_enabled: false,
+  stream_preconnect_multihop_enabled: false,
   stream_preconnect_min_delay_ms: "0",
   stream_preconnect_max_delay_ms: "0",
   candy_check_enabled: false,

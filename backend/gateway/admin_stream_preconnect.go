@@ -9,10 +9,11 @@ import (
 // StreamPreconnectPolicyInput uses pointers so omitted fields preserve the
 // existing group policy, including when an older admin client saves a group.
 type StreamPreconnectPolicyInput struct {
-	StreamPreconnectEnabled        *bool `json:"stream_preconnect_enabled"`
-	StreamPreconnectSub2apiEnabled *bool `json:"stream_preconnect_sub2api_enabled"`
-	StreamPreconnectMinDelayMS     *int  `json:"stream_preconnect_min_delay_ms"`
-	StreamPreconnectMaxDelayMS     *int  `json:"stream_preconnect_max_delay_ms"`
+	StreamPreconnectEnabled         *bool `json:"stream_preconnect_enabled"`
+	StreamPreconnectSub2apiEnabled  *bool `json:"stream_preconnect_sub2api_enabled"`
+	StreamPreconnectMultihopEnabled *bool `json:"stream_preconnect_multihop_enabled"`
+	StreamPreconnectMinDelayMS      *int  `json:"stream_preconnect_min_delay_ms"`
+	StreamPreconnectMaxDelayMS      *int  `json:"stream_preconnect_max_delay_ms"`
 }
 
 func applyStreamPreconnectPolicy(policy *storage.GatewayStreamPreconnectPolicy, in StreamPreconnectPolicyInput) error {
@@ -22,6 +23,9 @@ func applyStreamPreconnectPolicy(policy *storage.GatewayStreamPreconnectPolicy, 
 	}
 	if in.StreamPreconnectSub2apiEnabled != nil {
 		next.StreamPreconnectSub2apiEnabled = *in.StreamPreconnectSub2apiEnabled
+	}
+	if in.StreamPreconnectMultihopEnabled != nil {
+		next.StreamPreconnectMultihopEnabled = *in.StreamPreconnectMultihopEnabled
 	}
 	if in.StreamPreconnectMinDelayMS != nil {
 		next.StreamPreconnectMinDelayMS = *in.StreamPreconnectMinDelayMS
