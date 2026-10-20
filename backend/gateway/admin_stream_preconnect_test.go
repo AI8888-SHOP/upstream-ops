@@ -27,7 +27,7 @@ func TestApplyStreamPreconnectPolicyValidatesRangeAtomically(t *testing.T) {
 			policy := storage.GatewayStreamPreconnectPolicy{StreamPreconnectMinDelayMS: 20, StreamPreconnectMaxDelayMS: 40}
 			original := policy
 			err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{
-				StreamPreconnectEnabled: &enabled, StreamPreconnectMinDelayMS: &tc.min, StreamPreconnectMaxDelayMS: &tc.max,
+				StreamPreconnectEnabled: &enabled, StreamPreconnectSub2apiEnabled: &enabled, StreamPreconnectMinDelayMS: &tc.min, StreamPreconnectMaxDelayMS: &tc.max,
 			})
 			if (err == nil) != tc.valid {
 				t.Fatalf("valid=%v error=%v", tc.valid, err)
@@ -35,7 +35,7 @@ func TestApplyStreamPreconnectPolicyValidatesRangeAtomically(t *testing.T) {
 			if !tc.valid && policy != original {
 				t.Fatalf("invalid input mutated policy: %+v", policy)
 			}
-			if tc.valid && (!policy.StreamPreconnectEnabled || policy.StreamPreconnectMinDelayMS != tc.min || policy.StreamPreconnectMaxDelayMS != tc.max) {
+			if tc.valid && (!policy.StreamPreconnectEnabled || !policy.StreamPreconnectSub2apiEnabled || policy.StreamPreconnectMinDelayMS != tc.min || policy.StreamPreconnectMaxDelayMS != tc.max) {
 				t.Fatalf("policy = %+v", policy)
 			}
 		})
@@ -43,7 +43,7 @@ func TestApplyStreamPreconnectPolicyValidatesRangeAtomically(t *testing.T) {
 }
 
 func TestApplyStreamPreconnectPolicyPartialUpdate(t *testing.T) {
-	policy := storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: true, StreamPreconnectMinDelayMS: 50, StreamPreconnectMaxDelayMS: 100}
+	policy := storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: true, StreamPreconnectSub2apiEnabled: true, StreamPreconnectMinDelayMS: 50, StreamPreconnectMaxDelayMS: 100}
 	original := policy
 	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{}); err != nil || policy != original {
 		t.Fatalf("omitted fields changed policy: %+v, %v", policy, err)
@@ -53,7 +53,25 @@ func TestApplyStreamPreconnectPolicyPartialUpdate(t *testing.T) {
 		t.Fatalf("partial update broke existing range: %+v, %v", policy, err)
 	}
 	disabled := false
-	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectEnabled: &disabled}); err != nil || policy.StreamPreconnectEnabled || policy.StreamPreconnectMinDelayMS != 50 || policy.StreamPreconnectMaxDelayMS != 100 {
-		t.Fatalf("disable did not preserve range: %+v, %v", policy, err)
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectEnabled: &disabled}); err != nil || policy.StreamPreconnectEnabled || !policy.StreamPreconnectSub2apiEnabled || policy.StreamPreconnectMinDelayMS != 50 || policy.StreamPreconnectMaxDelayMS != 100 {
+		t.Fatalf("disable did not preserve range and compatibility preference: %+v, %v", policy, err)
+	}
+}
+
+func TestApplyStreamPreconnectSub2apiExplicitUpdate(t *testing.T) {
+	policy := storage.GatewayStreamPreconnectPolicy{}
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{}); err != nil || policy.StreamPreconnectSub2apiEnabled {
+		t.Fatalf("omitted compatibility flag must remain disabled: %+v, %v", policy, err)
+	}
+	enabled := true
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectSub2apiEnabled: &enabled}); err != nil || !policy.StreamPreconnectSub2apiEnabled || policy.StreamPreconnectEnabled {
+		t.Fatalf("compatibility setting changed parent switch: %+v, %v", policy, err)
+	}
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectEnabled: &enabled}); err != nil || !policy.StreamPreconnectEnabled || !policy.StreamPreconnectSub2apiEnabled {
+		t.Fatalf("enabling parent lost compatibility preference: %+v, %v", policy, err)
+	}
+	disabled := false
+	if err := applyStreamPreconnectPolicy(&policy, StreamPreconnectPolicyInput{StreamPreconnectSub2apiEnabled: &disabled}); err != nil || policy.StreamPreconnectSub2apiEnabled || !policy.StreamPreconnectEnabled {
+		t.Fatalf("explicit false did not disable compatibility independently: %+v, %v", policy, err)
 	}
 }

@@ -58,7 +58,7 @@ func TestGatewayDailyReportPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sqlDB.Close()
-	if err := db.AutoMigrate(&GatewayUsageLog{}, &Channel{}, &GatewayProvider{}); err != nil {
+	if err := db.AutoMigrate(&GatewayUsageLog{}, &Channel{}, &GatewayProvider{}, &GatewayGroup{}, &GatewayRequestFinalization{}); err != nil {
 		t.Fatal(err)
 	}
 	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
@@ -87,4 +87,5 @@ func TestGatewayDailyReportPostgres(t *testing.T) {
 	if len(report.Today.Sources) != 2 || len(report.Today.Sources[0].Groups) != 1 || report.Today.Sources[0].Groups[0].SourceGroupName != "renamed" {
 		t.Fatalf("source identity=%+v", report.Today.Sources)
 	}
+	runGatewayDailyReportProfitRegression(t, db)
 }

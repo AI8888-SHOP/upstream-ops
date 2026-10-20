@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,8 +20,31 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func preconnectForwardResponse(text string) string {
+	var wire strings.Builder
+	sequence := 0
+	emit := func(kind string, fields map[string]any) {
+		fields["type"], fields["sequence_number"] = kind, sequence
+		sequence++
+		payload, _ := json.Marshal(fields)
+		fmt.Fprintf(&wire, "event: %s\ndata: %s\n\n", kind, payload)
+	}
+	part := map[string]any{"type": "output_text", "text": text, "annotations": []any{}}
+	item := map[string]any{"id": "msg_real", "type": "message", "role": "assistant", "status": "completed", "content": []any{part}}
+	emit("response.created", map[string]any{"response": map[string]any{"id": "resp_real", "model": "m", "object": "response", "status": "in_progress", "output": []any{}}})
+	emit("response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": "msg_real", "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}})
+	emit("response.content_part.added", map[string]any{"output_index": 0, "content_index": 0, "item_id": "msg_real", "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
+	emit("response.output_text.delta", map[string]any{"output_index": 0, "content_index": 0, "item_id": "msg_real", "delta": text})
+	emit("response.output_text.done", map[string]any{"output_index": 0, "content_index": 0, "item_id": "msg_real", "text": text})
+	emit("response.content_part.done", map[string]any{"output_index": 0, "content_index": 0, "item_id": "msg_real", "part": part})
+	emit("response.output_item.done", map[string]any{"output_index": 0, "item": item})
+	emit("response.completed", map[string]any{"response": map[string]any{"id": "resp_real", "model": "m", "object": "response", "status": "completed", "output": []any{item}, "usage": map[string]int{"input_tokens": 7, "output_tokens": 2}}})
+	return wire.String()
+}
+
 // The first upstream cannot respond until the real HTTP client has received
-// a complete SSE comment. Retry ordering therefore needs no arbitrary sleeps.
+// a complete SSE comment or compatibility lifecycle event. Retry ordering
+// therefore needs no arbitrary sleeps.
 func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, coordinated := range []bool{false, true} {
@@ -28,13 +52,22 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 			name                                     string
 			enabled, stream, fallbackOK, rejectFirst bool
 			upstreamError                            int
+			sub2api                                  bool
+			corrupt                                  string
 		}{
-			{"keepalive-then-failover-success", true, true, true, false, http.StatusServiceUnavailable},
-			{"keepalive-then-validation-failover", true, true, true, true, http.StatusServiceUnavailable},
-			{"keepalive-then-all-failed", true, true, false, false, http.StatusServiceUnavailable},
-			{"disabled-retains-503", false, true, false, false, http.StatusServiceUnavailable},
-			{"disabled-retains-502", false, true, false, false, http.StatusBadGateway},
-			{"nonstream-retains-503", true, false, false, false, http.StatusServiceUnavailable},
+			{"keepalive-then-failover-success", true, true, true, false, http.StatusServiceUnavailable, false, ""},
+			{"keepalive-then-validation-failover", true, true, true, true, http.StatusServiceUnavailable, false, ""},
+			{"keepalive-then-all-failed", true, true, false, false, http.StatusServiceUnavailable, false, ""},
+			{"disabled-retains-503", false, true, false, false, http.StatusServiceUnavailable, false, ""},
+			{"disabled-retains-502", false, true, false, false, http.StatusBadGateway, false, ""},
+			{"nonstream-retains-503", true, false, false, false, http.StatusServiceUnavailable, false, ""},
+			{"sub2api-then-failover-success", true, true, true, false, http.StatusServiceUnavailable, true, ""},
+			{"sub2api-then-validation-failover", true, true, true, true, http.StatusServiceUnavailable, true, ""},
+			{"sub2api-then-all-failed", true, true, false, false, http.StatusServiceUnavailable, true, ""},
+			{"sub2api-parent-disabled-retains-503", false, true, false, false, http.StatusServiceUnavailable, true, ""},
+			{"sub2api-nonstream-retains-503", true, false, false, false, http.StatusServiceUnavailable, true, ""},
+			{"sub2api-postcommit-eof-not-billed", true, true, true, false, http.StatusServiceUnavailable, true, "eof"},
+			{"sub2api-postcommit-bad-terminal-not-billed", true, true, true, false, http.StatusServiceUnavailable, true, "identity"},
 		} {
 			if tc.rejectFirst && !coordinated {
 				continue
@@ -51,11 +84,16 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 				}
 				groups, keys, routes := storage.NewGatewayGroups(db), storage.NewGatewayKeys(db), storage.NewGatewayRoutes(db)
 				group := &storage.GatewayGroup{
-					GatewayStreamPreconnectPolicy: storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: tc.enabled},
+					GatewayStreamPreconnectPolicy: storage.GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: tc.enabled, StreamPreconnectSub2apiEnabled: tc.sub2api},
 					Name:                          "preconnect-forward", Status: storage.GatewayGroupStatusActive, RateSortDirection: "asc",
 					RetryEnabled: true, RetryCount: 0, FailoverEnabled: true, FailoverMax: 1,
 					RequestFirstTokenTimeoutSec: 10, ResponseValidationEnabled: coordinated,
 					ResponseValidationStreamMode: "prefix", ResponseValidationPrefixBytes: 8192,
+				}
+				if tc.corrupt != "" {
+					// Commit on the first eligible real output; the terminal is held
+					// by the fake upstream until the downstream receives that output.
+					group.ResponseValidationPrefixBytes = 1
 				}
 				if err := groups.Create(group); err != nil {
 					t.Fatal(err)
@@ -76,8 +114,12 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 				}
 				var calls [2]atomic.Int32
 				commentReceived := make(chan struct{})
+				answerReceived := make(chan struct{})
 				var releaseOnce sync.Once
+				var answerOnce sync.Once
 				release := func() { releaseOnce.Do(func() { close(commentReceived) }) }
+				releaseAnswer := func() { answerOnce.Do(func() { close(answerReceived) }) }
+				t.Cleanup(releaseAnswer)
 				wantPreconnect := tc.enabled && tc.stream
 				providers := storage.NewGatewayProviders(db)
 				var inputs []storage.GatewayRoute
@@ -100,6 +142,27 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 							}
 							payload := zeroUsageTestBody(protocol.KindOpenAIResponses, true, text, 2, true, true)
 							payload = strings.ReplaceAll(payload, "\"input_tokens\":0", "\"input_tokens\":7")
+							if tc.sub2api {
+								payload = preconnectForwardResponse(text)
+							}
+							if index == 1 && tc.corrupt != "" {
+								terminal := strings.Index(payload, "event: response.completed\n")
+								if terminal < 0 {
+									t.Error("corrupt fixture has no terminal event")
+									return
+								}
+								_, _ = io.WriteString(w, payload[:terminal])
+								w.(http.Flusher).Flush()
+								select {
+								case <-answerReceived:
+								case <-r.Context().Done():
+									return
+								}
+								if tc.corrupt == "identity" {
+									_, _ = io.WriteString(w, strings.ReplaceAll(payload[terminal:], "msg_real", "msg_other"))
+								}
+								return
+							}
 							_, _ = io.WriteString(w, payload)
 							return
 						}
@@ -137,10 +200,10 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 					installedPreconnect = streamPreconnectFor(c) != nil
 				})
 				server := httptest.NewServer(router)
-				t.Cleanup(func() { release(); server.Close() })
+				t.Cleanup(func() { release(); releaseAnswer(); server.Close() })
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/responses", strings.NewReader(fmt.Sprintf("{\"model\":\"gpt-4o\",\"stream\":%v,\"input\":\"hi\"}", tc.stream)))
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/responses", strings.NewReader(fmt.Sprintf("{\"model\":\"gpt-4o\",\"stream\":%v,\"store\":false,\"input\":\"hi\"}", tc.stream)))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -166,20 +229,44 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 						if strings.TrimSpace(line) == "" {
 							break
 						}
-						if !strings.HasPrefix(line, ":") {
+						if !tc.sub2api && !strings.HasPrefix(line, ":") {
 							t.Fatalf("model output fabricated before upstream responded: %q", line)
 						}
 					}
-					if !strings.Contains(prefix.String(), "keepalive") {
+					if tc.sub2api {
+						if !strings.Contains(prefix.String(), "event: response.created\n") || !strings.Contains(prefix.String(), "resp_uops_preconnect_") {
+							t.Fatalf("missing compatible lifecycle: %q", prefix.String())
+						}
+					} else if !strings.Contains(prefix.String(), "keepalive") {
 						t.Fatalf("missing SSE comment: %q", prefix.String())
 					}
 					release()
+				}
+				if tc.corrupt != "" {
+					for {
+						line, err := reader.ReadString('\n')
+						if err != nil {
+							t.Fatalf("read real output before corrupt terminal: %v", err)
+						}
+						prefix.WriteString(line)
+						if strings.TrimSpace(line) == "" && strings.Contains(prefix.String(), "fallback answer") {
+							releaseAnswer()
+							break
+						}
+					}
 				}
 				rest, err := io.ReadAll(reader)
 				if err != nil {
 					t.Fatal(err)
 				}
 				body := prefix.String() + string(rest)
+				if wantPreconnect && tc.sub2api {
+					if strings.Count(body, "event: response.created\n") != 1 || !strings.Contains(body, "rs_uops_preconnect_") {
+						t.Fatalf("compatibility lifecycle was duplicated or lost: %s", body)
+					}
+				} else if strings.Contains(body, "uops_preconnect_") {
+					t.Fatalf("excluded request acquired synthetic lifecycle: %s", body)
+				}
 				select {
 				case <-handlerDone:
 				case <-ctx.Done():
@@ -206,7 +293,7 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 				if err := db.Where("request_id = ?", logs[0].RequestID).First(&finalization).Error; err != nil {
 					t.Fatal(err)
 				}
-				if tc.fallbackOK {
+				if tc.fallbackOK && tc.corrupt == "" {
 					if response.StatusCode != http.StatusOK || !strings.Contains(body, "fallback answer") || !strings.Contains(body, "response.completed") || strings.Contains(body, "response.failed") || strings.Contains(body, "blocked-preconnect-answer") {
 						t.Fatalf("fallback body invalid: status=%d body=%s", response.StatusCode, body)
 					}
@@ -214,15 +301,22 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 						t.Fatalf("fallback delivery/usage lost: usage=%+v final=%+v", logs[1], finalization)
 					}
 				} else {
-					if wantPreconnect {
+					if tc.corrupt != "" {
+						if response.StatusCode != http.StatusOK || !strings.Contains(body, "fallback answer") || !strings.Contains(body, "event: response.failed") || strings.Contains(body, "event: response.completed") {
+							t.Fatalf("corrupt committed response not terminal failure: status=%d body=%s", response.StatusCode, body)
+						}
+					} else if wantPreconnect {
 						if response.StatusCode != http.StatusOK || !strings.Contains(body, "event: response.failed") || strings.Contains(body, "response.completed") {
 							t.Fatalf("all-failed response not terminal SSE: status=%d body=%s", response.StatusCode, body)
 						}
 					} else if response.StatusCode != tc.upstreamError || strings.Contains(body, ": upstream-ops keepalive") || !strings.HasPrefix(response.Header.Get("Content-Type"), "application/json") {
 						t.Fatalf("excluded request changed HTTP error: status=%d body=%s", response.StatusCode, body)
 					}
-					if logs[1].Success || logs[1].Winner || logs[1].BilledCost != 0 || logs[1].AttemptStatus != storage.GatewayAttemptStatusError || logs[1].RequestFirstTokenMS != nil || finalization.Delivered || finalization.BilledCost != 0 {
+					if logs[1].Success || logs[1].Winner || logs[1].BilledCost != 0 || logs[1].AttemptStatus != storage.GatewayAttemptStatusError || (tc.corrupt == "" && logs[1].RequestFirstTokenMS != nil) || finalization.Delivered || finalization.BilledCost != 0 {
 						t.Fatalf("failed stream falsely settled: usage=%+v final=%+v", logs[1], finalization)
+					}
+					if tc.corrupt != "" && logs[1].RequestFirstTokenMS == nil {
+						t.Fatalf("real output before failure lost true TTFT: %+v", logs[1])
 					}
 					var settlements int64
 					if err := db.Model(&storage.GatewayWinnerSettlement{}).Count(&settlements).Error; err != nil || settlements != 0 {

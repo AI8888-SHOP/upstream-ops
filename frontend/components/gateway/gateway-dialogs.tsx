@@ -862,6 +862,25 @@ export function GroupFormDialog({
             </div>
           )}
 
+          <div className="space-y-2 rounded-lg border border-border bg-muted/20 p-3">
+            <Label htmlFor="gateway-group-sell-rate">卖出倍率（利润报表）</Label>
+            <Input
+              id="gateway-group-sell-rate"
+              type="number"
+              min={0}
+              max={1_000_000}
+              step="any"
+              value={groupForm.sell_rate_multiplier}
+              onChange={(e) => setGroupForm({ ...groupForm, sell_rate_multiplier: e.target.value })}
+              placeholder="未设置"
+            />
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              收入估算 = 成功交付请求的标准结算费用 × 卖出倍率；按实际结算模型计算，去除上游倍率并包含虚拟缓存调整。渠道利润扣除全部上游尝试成本，仅用于报表，不改变密钥扣费或路由。
+            </p>
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              可填写 0 到 1,000,000，留空表示未设置，0 表示免费。保存后，历史报表也按当前倍率重新估算；不是实际收款或上游账单。
+            </p>
+          </div>
           <CandyCheckSettings form={groupForm} onChange={setGroupForm} />
           <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 p-3">
             <div className="min-w-0 flex-1">
@@ -1213,13 +1232,30 @@ export function GroupFormDialog({
                 <div className="min-w-0 flex-1">
                   <Label>提前建立流并保活（非真实首字）</Label>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    仅对当前网关组的流式文本请求生效。等待上游期间，在指定随机延迟后发送 HTTP 200 与 SSE 保活注释；不生成虚假内容，不改变真实首字、TPS 或计费。
+                    仅对当前网关组的流式文本请求生效。等待上游期间，在指定随机延迟后发送 HTTP 200 与 SSE 保活；默认仅发送注释，不生成回答内容，不改变本程序真实首字、TPS 或计费。
                   </p>
                 </div>
                 <Switch
                   className="shrink-0"
                   checked={groupForm.stream_preconnect_enabled}
                   onCheckedChange={(v) => setGroupForm({ ...groupForm, stream_preconnect_enabled: v })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <Label>sub2api 首字统计兼容（Responses / semantic）</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    无需修改 sub2api 源码，但其首字统计需使用 semantic；visible 口径仍等待真实输出。仅在 Responses 请求明确设置 store:false，且不使用续接、会话或后台模式时，提前发送生命周期事件与空 reasoning 项；其他请求仅发送普通保活注释。
+                  </p>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    启用后，提前建流的响应使用网关生成的响应 ID，并多出空 reasoning 项，不能用于 previous_response_id 续接。仅改变下游统计，不会降低本程序真实首字、改变回答内容、Token 用量或计费；实际下游计时还包含网络与代理耗时，不保证等于设置的毫秒数。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  checked={groupForm.stream_preconnect_sub2api_enabled}
+                  disabled={!groupForm.stream_preconnect_enabled}
+                  onCheckedChange={(v) => setGroupForm({ ...groupForm, stream_preconnect_sub2api_enabled: v })}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">

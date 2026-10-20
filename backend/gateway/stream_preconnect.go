@@ -20,9 +20,9 @@ const streamPreconnectWriteTimeout = 5 * time.Second
 
 type streamPreconnectKey struct{}
 
-// This is transport keepalive, not synthetic model output. The raw writer is
-// below requestTimingWriter: comments cannot mark TTFT, stop its budget, select
-// a hedge winner or make an unvalidated upstream prefix committed.
+// The raw writer is below requestTimingWriter: transport comments and the
+// opt-in empty Responses preamble cannot mark our real TTFT, stop its budget,
+// select a hedge winner or commit an unvalidated upstream attempt.
 type streamPreconnectWriter struct {
 	gin.ResponseWriter
 	mu              sync.Mutex
@@ -32,6 +32,7 @@ type streamPreconnectWriter struct {
 	preconnected    bool
 	outputCommitted bool
 	writeErr        error
+	protocolErr     error // adapter failure, never a downstream client disconnect
 	stop            chan struct{}
 	done            chan struct{}
 	stopped         bool
@@ -39,6 +40,7 @@ type streamPreconnectWriter struct {
 	cancel          context.CancelFunc
 	kind            protocolKind
 	requestID       string
+	responses       *preconnectResponsesStream // used only after the first early write
 }
 
 func streamPreconnectFor(c *gin.Context) *streamPreconnectWriter {
@@ -67,7 +69,7 @@ func streamPreconnectDelay(minMS, maxMS int) time.Duration {
 	return time.Duration(minMS+rand.IntN(maxMS-minMS+1)) * time.Millisecond
 }
 
-func beginStreamPreconnect(c *gin.Context, group *storage.GatewayGroup, kind protocolKind, path string, stream, textRequest bool) func() {
+func beginStreamPreconnect(c *gin.Context, group *storage.GatewayGroup, kind protocolKind, path string, stream, textRequest bool, requestBody ...[]byte) func() {
 	noop := func() {}
 	if c == nil || c.Request == nil || group == nil || !group.StreamPreconnectEnabled || !stream || !textRequest {
 		return noop
@@ -93,6 +95,11 @@ func beginStreamPreconnect(c *gin.Context, group *storage.GatewayGroup, kind pro
 	}
 	ctx, cancel := context.WithCancel(c.Request.Context())
 	w := newStreamPreconnectWriter(ctx, raw, kind, raw.Header().Get(headerUpstreamOpsRequestID), cancel)
+	if group.StreamPreconnectSub2apiEnabled && path == "/v1/responses" && protocol.NormalizeKind(kind) == protocol.KindOpenAIResponses && len(requestBody) == 1 && streamPreconnectStatelessEligible(requestBody[0]) {
+		// On entropy failure retain the ordinary transport-only mode. Never
+		// substitute a predictable response ID or alter stateful requests.
+		w.responses, _ = newPreconnectResponsesStream()
+	}
 	c.Request = c.Request.WithContext(context.WithValue(ctx, streamPreconnectKey{}, w))
 	if hasTiming {
 		timing.ResponseWriter = w
@@ -159,6 +166,13 @@ func (w *streamPreconnectWriter) finish() {
 	// Never wait for the timer while holding its write mutex. A slow socket
 	// write is bounded by the heartbeat-only deadline below.
 	<-w.done
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.responses != nil && w.preconnected && !w.responses.done() && w.writeErr == nil && w.ctx.Err() == nil {
+		// An incomplete synthetic lifecycle must not look like a successful
+		// response. This bypasses real-output timing just like writeFinalError.
+		w.failResponsesLocked(io.ErrUnexpectedEOF)
+	}
 }
 
 func replaceResponseHeaders(dst, src http.Header) {
@@ -198,9 +212,12 @@ func (w *streamPreconnectWriter) keepalive() bool {
 		replaceResponseHeaders(w.ResponseWriter.Header(), w.earlyHeader)
 		w.ResponseWriter.WriteHeader(http.StatusOK)
 	}
-	// An SSE comment is ignored by model parsers; never emit a fabricated
-	// content delta, response.created, usage record or success terminal frame.
+	// Ordinary mode remains transport-only. The opt-in Responses mode emits
+	// an empty, coherent lifecycle, never text, usage or a success terminal.
 	payload := []byte(": upstream-ops keepalive\n\n")
+	if w.responses != nil && !w.preconnected {
+		payload = w.responses.preamble()
+	}
 	n, err := w.ResponseWriter.Write(payload)
 	w.preconnected = true
 	if err == nil && n != len(payload) {
@@ -252,6 +269,16 @@ func (w *streamPreconnectWriter) Write(payload []byte) (int, error) {
 		return 0, nil
 	}
 	w.prepareWriteLocked()
+	if w.responses != nil && w.preconnected {
+		err := w.responses.feed(payload, w.writeResponsesFrameLocked)
+		if err != nil {
+			if w.writeErr == nil {
+				w.failResponsesLocked(err)
+			}
+			return 0, err
+		}
+		return len(payload), nil
+	}
 	n, err := w.ResponseWriter.Write(payload)
 	if n > 0 {
 		w.outputCommitted = true
@@ -265,6 +292,63 @@ func (w *streamPreconnectWriter) Write(payload []byte) (int, error) {
 	return n, err
 }
 
+func (w *streamPreconnectWriter) writeResponsesFrameLocked(frame []byte) error {
+	n, err := w.ResponseWriter.Write(frame)
+	if n > 0 {
+		w.outputCommitted = true
+	}
+	if err == nil && n != len(frame) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		w.failLocked(err)
+	}
+	return err
+}
+
+// Fail closed on malformed/oversized transformed SSE instead of mixing raw
+// upstream IDs and indexes into an already-started synthetic lifecycle.
+func (w *streamPreconnectWriter) failResponsesLocked(cause error) {
+	w.protocolErr = cause
+	controller := preconnectController(w.ResponseWriter)
+	if err := controller.SetWriteDeadline(time.Now().Add(streamPreconnectWriteTimeout)); err == nil || errors.Is(err, http.ErrNotSupported) {
+		if !w.responses.done() {
+			frame := w.responses.failure("upstream response stream could not be completed")
+			if err := w.writeResponsesFrameLocked(frame); err == nil {
+				_ = controller.Flush()
+			}
+		}
+		_ = controller.SetWriteDeadline(time.Time{})
+	}
+	w.failLocked(cause)
+}
+
+// Check the selected output before either forwarding path records success or
+// settles a winner. Attempt-local buffered/losing streams must not call this
+// while another attempt is still running against the same downstream writer.
+func finalizeStreamPreconnect(c *gin.Context, result *streamAttemptResult) {
+	w := streamPreconnectFor(c)
+	if w == nil || result == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.responses == nil || !w.preconnected {
+		return
+	}
+	if w.protocolErr == nil && !w.responses.done() && w.writeErr == nil && w.ctx.Err() == nil &&
+		(result.Committed || w.outputCommitted) && !result.ClientDisconnected && result.Err == nil && result.StreamErr == nil {
+		w.failResponsesLocked(io.ErrUnexpectedEOF)
+	}
+	if w.protocolErr != nil {
+		result.Err = w.protocolErr
+		result.StreamErr = w.protocolErr
+		result.ClientDisconnected = false
+		result.DownstreamComplete = false
+		result.Committed = w.outputCommitted
+	}
+}
+
 func (w *streamPreconnectWriter) WriteString(value string) (int, error) {
 	return w.Write([]byte(value))
 }
@@ -274,7 +358,9 @@ func (w *streamPreconnectWriter) WriteHeaderNow() {
 	defer w.mu.Unlock()
 	w.prepareWriteLocked()
 	w.ResponseWriter.WriteHeaderNow()
-	w.outputCommitted = true
+	if w.responses == nil || !w.preconnected {
+		w.outputCommitted = true
+	}
 }
 
 func (w *streamPreconnectWriter) Flush() {
@@ -285,7 +371,9 @@ func (w *streamPreconnectWriter) Flush() {
 	}
 	w.prepareWriteLocked()
 	w.ResponseWriter.Flush()
-	w.outputCommitted = true
+	if w.responses == nil || !w.preconnected {
+		w.outputCommitted = true
+	}
 }
 
 func (w *streamPreconnectWriter) Status() int {
@@ -377,6 +465,20 @@ func (w *streamPreconnectWriter) writeFinalError(status int, body []byte) error 
 			errCode = identity.Code
 		}
 		payload = streamTerminalErrorFrameWithCode(protocol.NormalizeKind(w.kind), errType, errCode, message, w.requestID)
+	}
+	if w.responses != nil && w.preconnected {
+		// Discard any incomplete frame before appending the authoritative
+		// gateway failure. Never emit a synthetic item.done ahead of failure:
+		// sub2api would interpret it as progress and disable safe failover.
+		w.responses.discardPending()
+		err := w.responses.feed(payload, w.writeResponsesFrameLocked)
+		if err == nil {
+			err = controller.Flush()
+		}
+		if err != nil {
+			w.failResponsesLocked(err)
+		}
+		return err
 	}
 	n, err := w.ResponseWriter.Write(payload)
 	if n > 0 {

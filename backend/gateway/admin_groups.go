@@ -142,11 +142,16 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if err != nil {
 		return nil, err
 	}
+	sellRate, err := groupSellRateMultiplier(in.SellRateMultiplier)
+	if err != nil {
+		return nil, err
+	}
 	pos, err := a.Groups.NextPosition()
 	if err != nil {
 		return nil, err
 	}
 	item := &storage.GatewayGroup{
+		SellRateMultiplier:                    sellRate,
 		Name:                                  name,
 		Description:                           strings.TrimSpace(in.Description),
 		Position:                              pos,
@@ -280,6 +285,13 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	item, err := a.Groups.FindByID(id)
 	if err != nil {
 		return nil, err
+	}
+	if in.SellRateMultiplier.Set {
+		rate, err := groupSellRateMultiplier(in.SellRateMultiplier.Value)
+		if err != nil {
+			return nil, err
+		}
+		item.SellRateMultiplier = rate
 	}
 	previousCachePolicy := resolveCacheHealthPolicy(a.gatewayRuntime(), item)
 	if err := applyStreamPreconnectPolicy(&item.GatewayStreamPreconnectPolicy, in.StreamPreconnectPolicyInput); err != nil {

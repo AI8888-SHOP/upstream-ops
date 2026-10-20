@@ -39,6 +39,12 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		// 仅透传；若路由强制 anthropic 则报错
 	}
 
+	if protocol.NormalizeKind(kind) == protocol.KindOpenAIResponses {
+		// SDKs may replay output items on stateless follow-up turns. Remove
+		// only our namespaced empty preconnect item, even if the option was
+		// subsequently disabled; real reasoning and tool history stay intact.
+		body = stripStreamPreconnectReplay(body)
+	}
 	requestInfo := analyzeRequestBody(body)
 	requestedModel, stream := requestInfo.Model, requestInfo.Stream
 	serviceTier, reasoningEffort := requestInfo.ServiceTier, requestInfo.ReasoningEffort
@@ -102,7 +108,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		useCoordinator = validator != nil && validator.Enabled()
 	}
 	finishPreconnect := beginStreamPreconnect(c, group, kind, path, stream,
-		requestInfo.Parsed && !requestInfo.MediaGeneration && !mappedMediaModel)
+		requestInfo.Parsed && !requestInfo.MediaGeneration && !mappedMediaModel, body)
 	defer finishPreconnect()
 	if useCoordinator {
 		ftTimeoutSec := rt.clampFirstTokenTimeoutSec(group.FirstTokenTimeoutSec)
@@ -351,6 +357,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					c.Request.Context(), c, target, upstreamPath, c.Request.Method, c.Request.Header, fwdBody,
 					kind, upstreamKind, upstreamModel, converted, attemptFTTimeout, providerVirtualCachePercent,
 				)
+				finalizeStreamPreconnect(c, &res)
 				status = res.Status
 				usageMeta.ResponseModel = res.ResponseModel
 				respHeaders = res.Headers

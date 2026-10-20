@@ -631,6 +631,8 @@ export type GatewayUpstreamProtocol =
   | "anthropic"
 
 export interface GatewayGroup {
+  /** Report-only selling multiplier; null/unset excludes revenue estimates. */
+  sell_rate_multiplier?: number | null
   id: number
   name: string
   description?: string
@@ -685,6 +687,8 @@ export interface GatewayGroup {
   first_token_timeout_cooldown_enabled?: boolean
   /** SSE 连接握手与保活，不是模型内容或真实首字；默认关闭。 */
   stream_preconnect_enabled?: boolean
+  /** 无状态 store:false Responses 的 sub2api semantic 首字统计兼容；改变响应 ID，不改变真实首字或计费。 */
+  stream_preconnect_sub2api_enabled?: boolean
   /** 握手随机延迟下限，0 到 60000 毫秒。 */
   stream_preconnect_min_delay_ms?: number
   /** 握手随机延迟上限，不小于下限且不超过 60000 毫秒。 */

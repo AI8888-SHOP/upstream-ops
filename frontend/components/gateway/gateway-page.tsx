@@ -880,6 +880,7 @@ export function GatewayPage() {
     setGroupForm({
       name: g.name,
       description: g.description ?? "",
+      sell_rate_multiplier: g.sell_rate_multiplier == null ? "" : String(g.sell_rate_multiplier),
       status: g.status === "disabled" ? "disabled" : "active",
       rate_resort_enabled: !!g.rate_resort_enabled,
       max_billing_rate_multiplier: String(g.max_billing_rate_multiplier ?? 0),
@@ -902,6 +903,7 @@ export function GatewayPage() {
       first_token_timeout_cooldown_enabled:
         g.first_token_timeout_cooldown_enabled !== false,
       stream_preconnect_enabled: !!g.stream_preconnect_enabled,
+      stream_preconnect_sub2api_enabled: !!g.stream_preconnect_sub2api_enabled,
       stream_preconnect_min_delay_ms: String(g.stream_preconnect_min_delay_ms ?? 0),
       stream_preconnect_max_delay_ms: String(g.stream_preconnect_max_delay_ms ?? 0),
       candy_check_enabled: !!g.candy_check_enabled,
@@ -999,6 +1001,12 @@ export function GatewayPage() {
       100,
       Math.min(30000, Math.floor(Number(groupForm.response_validation_prefix_timeout_ms) || 2000)),
     )
+    const sellRateText = groupForm.sell_rate_multiplier.trim()
+    const sellRateMultiplier = sellRateText === "" ? null : Number(sellRateText)
+    if (sellRateMultiplier != null && (!Number.isFinite(sellRateMultiplier) || sellRateMultiplier < 0 || sellRateMultiplier > 1_000_000)) {
+      toast.error("卖出倍率必须是 0 到 1,000,000 之间的有效数字，留空表示未设置")
+      return
+    }
     const maxBillingRateInput = Number(groupForm.max_billing_rate_multiplier)
     const maxBillingRateMultiplier =
       Number.isFinite(maxBillingRateInput) && maxBillingRateInput > 0
@@ -1087,7 +1095,9 @@ export function GatewayPage() {
       return
     }
     const policy = {
+      sell_rate_multiplier: sellRateMultiplier,
       stream_preconnect_enabled: groupForm.stream_preconnect_enabled,
+      stream_preconnect_sub2api_enabled: groupForm.stream_preconnect_sub2api_enabled,
       stream_preconnect_min_delay_ms: preconnectMinDelay,
       stream_preconnect_max_delay_ms: preconnectMaxDelay,
       candy_check_enabled: groupForm.candy_check_enabled,

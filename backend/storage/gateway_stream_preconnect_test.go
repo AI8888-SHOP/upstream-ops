@@ -2,6 +2,33 @@ package storage
 
 import "testing"
 
+func TestGatewayStreamPreconnectSub2apiMigrationKeepsExistingGroupOptedOut(t *testing.T) {
+	db := openTestDB(t)
+	groups := NewGatewayGroups(db)
+	legacy := &GatewayGroup{
+		Name: "legacy-enabled-stream-preconnect",
+		GatewayStreamPreconnectPolicy: GatewayStreamPreconnectPolicy{
+			StreamPreconnectEnabled: true, StreamPreconnectMinDelayMS: 30, StreamPreconnectMaxDelayMS: 90,
+		},
+	}
+	if err := groups.Create(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrator().DropColumn(&GatewayGroup{}, "stream_preconnect_sub2api_enabled"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var restored GatewayGroup
+	if err := db.First(&restored, legacy.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if restored.GatewayStreamPreconnectPolicy != legacy.GatewayStreamPreconnectPolicy {
+		t.Fatalf("migration changed existing policy or opted group in: %+v", restored.GatewayStreamPreconnectPolicy)
+	}
+}
+
 func TestGatewayStreamPreconnectMigrationDefaultAndClone(t *testing.T) {
 	db := openTestDB(t)
 	groups := NewGatewayGroups(db)
@@ -9,7 +36,7 @@ func TestGatewayStreamPreconnectMigrationDefaultAndClone(t *testing.T) {
 	if err := groups.Create(legacy); err != nil {
 		t.Fatal(err)
 	}
-	for _, column := range []string{"stream_preconnect_enabled", "stream_preconnect_min_delay_ms", "stream_preconnect_max_delay_ms"} {
+	for _, column := range []string{"stream_preconnect_enabled", "stream_preconnect_sub2api_enabled", "stream_preconnect_min_delay_ms", "stream_preconnect_max_delay_ms"} {
 		if err := db.Migrator().DropColumn(&GatewayGroup{}, column); err != nil {
 			t.Fatalf("drop %s: %v", column, err)
 		}
@@ -24,7 +51,7 @@ func TestGatewayStreamPreconnectMigrationDefaultAndClone(t *testing.T) {
 	if restored.GatewayStreamPreconnectPolicy != (GatewayStreamPreconnectPolicy{}) {
 		t.Fatalf("legacy group should remain disabled with zero delays: %+v", restored.GatewayStreamPreconnectPolicy)
 	}
-	restored.GatewayStreamPreconnectPolicy = GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: true, StreamPreconnectMinDelayMS: 30, StreamPreconnectMaxDelayMS: 90}
+	restored.GatewayStreamPreconnectPolicy = GatewayStreamPreconnectPolicy{StreamPreconnectEnabled: true, StreamPreconnectSub2apiEnabled: true, StreamPreconnectMinDelayMS: 30, StreamPreconnectMaxDelayMS: 90}
 	if err := groups.Update(&restored); err != nil {
 		t.Fatal(err)
 	}

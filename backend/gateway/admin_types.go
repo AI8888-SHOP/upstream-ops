@@ -59,6 +59,7 @@ type CreateGroupInput struct {
 	SchedulingPolicyInput
 	CandyCheckPolicyInput
 	StreamPreconnectPolicyInput
+	SellRateMultiplier                    *float64 `json:"sell_rate_multiplier"`
 	Name                                  string   `json:"name"`
 	Description                           string   `json:"description"`
 	RateSortDirection                     string   `json:"rate_sort_direction"`
@@ -103,6 +104,7 @@ type UpdateGroupInput struct {
 	SchedulingPolicyInput
 	CandyCheckPolicyInput
 	StreamPreconnectPolicyInput
+	SellRateMultiplier                    optionalFloat64 `json:"sell_rate_multiplier"`
 	Name                                  *string         `json:"name"`
 	Description                           *string         `json:"description"`
 	Status                                *string         `json:"status"`

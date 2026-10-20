@@ -293,6 +293,7 @@ func cloneGatewayKey(item GatewayKey) GatewayKey {
 }
 
 func cloneGatewayGroup(item GatewayGroup) GatewayGroup {
+	item.SellRateMultiplier = clonePointer(item.SellRateMultiplier)
 	item.CacheHitRateWindowMinutes = clonePointer(item.CacheHitRateWindowMinutes)
 	item.CacheHitRateThresholdPercent = clonePointer(item.CacheHitRateThresholdPercent)
 	item.CacheHitRateBlacklistMinutes = clonePointer(item.CacheHitRateBlacklistMinutes)

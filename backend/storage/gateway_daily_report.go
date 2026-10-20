@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +27,10 @@ type GatewayDailyReportMetrics struct {
 	Attempts           int64    `json:"attempts"`
 	SuccessfulRequests int64    `json:"successful_requests"`
 	Cost               float64  `json:"cost"`
+	Revenue            *float64 `json:"revenue"`
+	Profit             *float64 `json:"profit"`
+	ProfitMargin       *float64 `json:"profit_margin"`
+	UnpricedRequests   int64    `json:"unpriced_requests"`
 	Tokens             int64    `json:"tokens"`
 	CacheHitRate       *float64 `json:"cache_hit_rate"`
 }
@@ -69,6 +74,8 @@ type gatewayDailyReportRow struct {
 	LatestID                                       uint
 	Requests, Attempts, SuccessfulRequests, Tokens int64
 	Cost                                           float64
+	Revenue                                        float64
+	UnpricedRequests                               int64
 	CacheInput, CacheRead, CacheCreation           int64
 }
 
@@ -78,10 +85,28 @@ func (row gatewayDailyReportRow) metrics() GatewayDailyReportMetrics {
 		value := cacheHitRatePercent(row.CacheInput, row.CacheRead, row.CacheCreation)
 		hitRate = &value
 	}
-	return GatewayDailyReportMetrics{
+	metrics := GatewayDailyReportMetrics{
 		Requests: row.Requests, Attempts: row.Attempts, SuccessfulRequests: row.SuccessfulRequests,
 		Cost: row.Cost, Tokens: row.Tokens, CacheHitRate: hitRate,
+		UnpricedRequests: row.UnpricedRequests,
 	}
+	// Unknown selling prices are not free sales. Withhold the total rather
+	// than presenting a partial sum as the channel's complete gross profit.
+	if row.UnpricedRequests == 0 {
+		revenue, profit := row.Revenue, row.Revenue-row.Cost
+		if math.IsNaN(revenue) || math.IsInf(revenue, 0) || math.IsNaN(profit) || math.IsInf(profit, 0) {
+			metrics.UnpricedRequests = row.SuccessfulRequests
+			return metrics
+		}
+		metrics.Revenue, metrics.Profit = &revenue, &profit
+		if revenue > 0 {
+			margin := profit / revenue * 100
+			if !math.IsNaN(margin) && !math.IsInf(margin, 0) {
+				metrics.ProfitMargin = &margin
+			}
+		}
+	}
+	return metrics
 }
 
 // DailyReport uses a bounded two-day CTE and five grouped rollups. Neither raw
@@ -161,15 +186,38 @@ func (r *GatewayUsageLogs) DailyReport(ctx context.Context, date time.Time) (*Ga
 // The day discriminator uses explicit UTC boundaries, not the database session
 // timezone. Known source-group IDs win over names; old name-only snapshots
 // remain separate, rather than being guessed into a possibly wrong group.
-const gatewayDailyReportSQL = `WITH report_usage AS (
-	SELECT CASE WHEN created_at >= ? THEN 1 ELSE 0 END AS day_index,
-		CASE WHEN gateway_provider_id > 0 THEN 'provider' ELSE 'monitor' END AS source_kind,
-		CASE WHEN gateway_provider_id > 0 THEN gateway_provider_id ELSE channel_id END AS source_id,
-		CASE WHEN source_group_id > 0 THEN source_group_id ELSE NULL END AS source_group_id,
-		CASE WHEN source_group_id > 0 THEN '' ELSE COALESCE(source_group_name,'') END AS legacy_group_name,
-		COALESCE(requested_model,'') AS requested_model, id, request_id, winner, success,
-		actual_cost, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
-	FROM gateway_usage_logs WHERE created_at >= ? AND created_at < ?
+const gatewayDailyReportSQL = `WITH report_base AS (
+	SELECT CASE WHEN u.created_at >= ? THEN 1 ELSE 0 END AS day_index,
+		CASE WHEN u.gateway_provider_id > 0 THEN 'provider' ELSE 'monitor' END AS source_kind,
+		CASE WHEN u.gateway_provider_id > 0 THEN u.gateway_provider_id ELSE u.channel_id END AS source_id,
+		CASE WHEN u.source_group_id > 0 THEN u.source_group_id ELSE NULL END AS source_group_id,
+		CASE WHEN u.source_group_id > 0 THEN '' ELSE COALESCE(u.source_group_name,'') END AS legacy_group_name,
+		COALESCE(u.requested_model,'') AS requested_model, u.id, u.request_id, u.winner, u.success,
+		u.actual_cost, u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens,
+		g.sell_rate_multiplier,
+		CASE
+			WHEN COALESCE(u.billing_mode,'') NOT IN ('','token','image') THEN NULL
+			WHEN f.request_id IS NOT NULL THEN
+				CASE WHEN f.billed_cost > 0 OR (f.billed_cost = 0 AND f.actual_cost > 0 AND f.virtual_cache_read_tokens > 0)
+					THEN f.billed_cost / (` + gatewayDailyReportOriginalRateSQL + `) ELSE NULL END
+			WHEN u.billed_cost > 0 THEN u.billed_cost / (` + gatewayDailyReportOriginalRateSQL + `)
+			WHEN COALESCE(u.attempt_status,'') = '' AND u.virtual_cache_read_tokens = 0 AND COALESCE(u.virtual_cache_reason,'') = '' THEN
+				CASE WHEN u.total_cost > 0 THEN u.total_cost
+					WHEN u.actual_cost > 0 THEN u.actual_cost / (` + gatewayDailyReportOriginalRateSQL + `) ELSE NULL END
+			ELSE NULL
+		END AS sales_base
+	FROM gateway_usage_logs u
+	LEFT JOIN gateway_groups g ON g.id = u.gateway_group_id
+	LEFT JOIN gateway_request_finalizations f ON u.winner AND f.request_id = u.request_id
+		AND f.gateway_key_id = u.gateway_key_id AND f.winner_usage_log_id = u.id AND f.delivered
+	WHERE u.created_at >= ? AND u.created_at < ?
+), report_usage AS (
+	SELECT report_base.*,
+		CASE WHEN NOT winner THEN 0
+			WHEN sell_rate_multiplier = 0 THEN 0
+			WHEN sell_rate_multiplier > 0 AND sales_base >= 0 THEN sales_base * sell_rate_multiplier
+			ELSE NULL END AS sales_revenue
+	FROM report_base
 ), report_rollups AS (
 	SELECT 0 AS level, day_index, '' AS source_kind, 0 AS source_id,
 		CAST(NULL AS BIGINT) AS source_group_id, '' AS legacy_group_name, '' AS requested_model,
@@ -191,12 +239,23 @@ const gatewayDailyReportSQL = `WITH report_usage AS (
 )
 SELECT * FROM report_rollups ORDER BY level, day_index, source_kind, source_id, source_group_id, legacy_group_name, requested_model`
 
+// CalculateCost applies exactly one upstream rate. Log rates are immutable
+// even after reference repricing; never divide settlement by actual/total_cost.
+// Finalization has a request_id primary key, so joining it cannot multiply rows.
+// A zero snapshot without a known positive pre-credit cost may be missing model
+// pricing, not free usage. Only an explicit selling rate of zero bypasses this.
+const gatewayDailyReportOriginalRateSQL = `CASE
+	WHEN u.billing_rate_multiplier > 0 THEN u.billing_rate_multiplier
+	WHEN u.rate_multiplier > 0 THEN u.rate_multiplier ELSE 1.0 END`
+
 const gatewayDailyReportAggregateSQL = `
 	MAX(id) AS latest_id,
 	COUNT(DISTINCT request_id) AS requests,
 	COUNT(*) AS attempts,
 	COUNT(DISTINCT CASE WHEN winner THEN request_id END) AS successful_requests,
 	COALESCE(SUM(actual_cost),0) AS cost,
+	COALESCE(SUM(sales_revenue),0) AS revenue,
+	COUNT(DISTINCT CASE WHEN winner AND sales_revenue IS NULL THEN request_id END) AS unpriced_requests,
 	COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),0) AS tokens,
 	COALESCE(SUM(CASE WHEN success THEN input_tokens ELSE 0 END),0) AS cache_input,
 	COALESCE(SUM(CASE WHEN success THEN cache_read_tokens ELSE 0 END),0) AS cache_read,
@@ -216,8 +275,8 @@ type gatewayReportGroupKey struct {
 func buildGatewayDailyReport(today time.Time, rows []gatewayDailyReportRow, channelNames, providerNames map[uint]string, snapshots map[uint]GatewayUsageLog) *GatewayDailyReport {
 	result := &GatewayDailyReport{
 		Date: today.Format("2006-01-02"), Timezone: today.Location().String(), GeneratedAt: time.Now().UTC(),
-		Today:     GatewayDailyReportDay{Date: today.Format("2006-01-02"), Sources: []GatewayDailyReportSource{}},
-		Yesterday: GatewayDailyReportDay{Date: today.AddDate(0, 0, -1).Format("2006-01-02"), Sources: []GatewayDailyReportSource{}},
+		Today:     GatewayDailyReportDay{GatewayDailyReportMetrics: (gatewayDailyReportRow{}).metrics(), Date: today.Format("2006-01-02"), Sources: []GatewayDailyReportSource{}},
+		Yesterday: GatewayDailyReportDay{GatewayDailyReportMetrics: (gatewayDailyReportRow{}).metrics(), Date: today.AddDate(0, 0, -1).Format("2006-01-02"), Sources: []GatewayDailyReportSource{}},
 	}
 	sources := map[gatewayReportSourceKey]*GatewayDailyReportSource{}
 	groups := map[gatewayReportGroupKey]*GatewayDailyReportGroup{}

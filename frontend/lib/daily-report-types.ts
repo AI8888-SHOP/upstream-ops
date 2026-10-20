@@ -5,6 +5,10 @@ export interface DailyReportMetrics {
   attempts: number
   successful_requests: number
   cost: number
+  revenue: number | null
+  profit: number | null
+  profit_margin: number | null
+  unpriced_requests: number
   tokens: number
   cache_hit_rate: number | null
 }

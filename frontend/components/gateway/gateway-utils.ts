@@ -24,6 +24,7 @@ export type ModelSourceLabel = {
 export type GroupFormState = {
   name: string
   description: string
+  sell_rate_multiplier: string
   status: "active" | "disabled"
   rate_resort_enabled: boolean
   max_billing_rate_multiplier: string
@@ -46,6 +47,7 @@ export type GroupFormState = {
   request_max_attempts: string
   first_token_timeout_cooldown_enabled: boolean
   stream_preconnect_enabled: boolean
+  stream_preconnect_sub2api_enabled: boolean
   stream_preconnect_min_delay_ms: string
   stream_preconnect_max_delay_ms: string
   candy_check_enabled: boolean
@@ -670,6 +672,7 @@ export function mTokToPerToken(s: string): number {
 export const emptyGroupForm = (): GroupFormState => ({
   name: "",
   description: "",
+  sell_rate_multiplier: "",
   status: "active",
   rate_resort_enabled: false,
   max_billing_rate_multiplier: "0",
@@ -691,6 +694,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   request_max_attempts: "0",
   first_token_timeout_cooldown_enabled: true,
   stream_preconnect_enabled: false,
+  stream_preconnect_sub2api_enabled: false,
   stream_preconnect_min_delay_ms: "0",
   stream_preconnect_max_delay_ms: "0",
   candy_check_enabled: false,

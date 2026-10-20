@@ -543,6 +543,9 @@ type GatewayGroup struct {
 	GatewaySchedulerPolicy `gorm:"embedded"`
 	GatewayCandyCheckPolicy `gorm:"embedded"`
 	GatewayStreamPreconnectPolicy `gorm:"embedded"`
+	// SellRateMultiplier is report-only; nil means revenue/profit is not configured.
+	// Reports apply the current value to historical standard settlement costs.
+	SellRateMultiplier *float64 `json:"sell_rate_multiplier"`
 	ID          uint   `gorm:"primaryKey" json:"id"`
 	Name        string `gorm:"size:128;not null;uniqueIndex" json:"name"`
 	Description string `gorm:"size:512;not null;default:''" json:"description,omitempty"`

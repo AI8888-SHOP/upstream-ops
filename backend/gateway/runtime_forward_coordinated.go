@@ -489,6 +489,8 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	if result.Winner != nil && result.Winner.Value != nil && req.stream {
 		winner := result.Winner.Value
 		streamResult := winner.awaitStreamResult()
+		finalizeStreamPreconnect(req.c, &streamResult)
+		winner.setStreamResult(streamResult)
 		winner.applyStreamResult(streamResult)
 	}
 	if req.stream {
