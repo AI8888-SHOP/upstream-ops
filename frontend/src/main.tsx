@@ -15,6 +15,7 @@ import CaptchaPage from '@/app/captcha-page'
 import NotificationsPage from '@/app/notifications-page'
 import SettingsPage from '@/app/settings-page'
 import GatewayPage from '@/app/gateway-page'
+import DailyReportPage from '@/app/daily-report-page'
 import '@/app/globals.css'
 
 createRoot(document.getElementById('root')!).render(
@@ -31,6 +32,7 @@ createRoot(document.getElementById('root')!).render(
                     <Route path="captcha" element={<CaptchaPage />} />
                     <Route path="notifications" element={<NotificationsPage />} />
                     <Route path="gateway" element={<GatewayPage />} />
+                    <Route path="daily-report" element={<DailyReportPage />} />
                     <Route path="settings" element={<SettingsPage />} />
                   </Route>
                 </Routes>

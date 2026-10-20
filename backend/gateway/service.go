@@ -43,18 +43,20 @@ type ChannelAPI interface {
 // Service 网关领域服务组装根。
 // 管理面操作见 Admin；数据面转发见 Runtime；公开方法多为委托以保持调用方兼容。
 type Service struct {
-	Groups        *storage.GatewayGroups
-	Keys          *storage.GatewayKeys
-	Routes        *storage.GatewayRoutes
-	ResponseRules *storage.GatewayResponseRules
-	Providers     *storage.GatewayProviders
-	Usage         *storage.GatewayUsageLogs
-	Prices        *storage.ModelPriceOverrides
-	Channels      *storage.Channels
-	ChannelAPI    ChannelAPI
-	Cipher        *crypto.Cipher
-	Pricing       *PricingCatalog
-	Log           *slog.Logger
+	Groups          *storage.GatewayGroups
+	Keys            *storage.GatewayKeys
+	Routes          *storage.GatewayRoutes
+	ResponseRules   *storage.GatewayResponseRules
+	Providers       *storage.GatewayProviders
+	Usage           *storage.GatewayUsageLogs
+	Prices          *storage.ModelPriceOverrides
+	Channels        *storage.Channels
+	ChannelAPI      ChannelAPI
+	Cipher          *crypto.Cipher
+	Pricing         *PricingCatalog
+	priceWorkerOnce sync.Once
+	priceWake       chan struct{}
+	Log             *slog.Logger
 
 	// Admin 管理面；嵌入 *Service 共享依赖。
 	Admin *AdminService

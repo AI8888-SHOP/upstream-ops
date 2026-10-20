@@ -249,46 +249,59 @@ func (rt *Runtime) writeStreamTerminalError(c *gin.Context, kind protocolKind, e
 	if c == nil {
 		return errors.New("nil context")
 	}
+	payload := streamTerminalErrorFrame(kind, errType, message, rt.ensureGatewayRequestID(c))
+	if _, err := c.Writer.Write(payload); err != nil {
+		return err
+	}
+	rt.flushWriter(c)
+	return nil
+}
+
+func streamTerminalErrorFrame(kind protocolKind, errType, message, requestID string) []byte {
+	return streamTerminalErrorFrameWithCode(kind, errType, nil, message, requestID)
+}
+
+func streamTerminalErrorFrameWithCode(kind protocolKind, errType string, errCode any, message, requestID string) []byte {
 	if errType == "" {
 		errType = "api_error"
 	}
 	if message == "" {
 		message = errType
 	}
+	errorBody := map[string]any{"type": errType, "message": message}
+	if errCode != nil {
+		errorBody["code"] = errCode
+	}
 	var payload []byte
 	if protocol.NormalizeKind(kind) == protocol.KindAnthropic {
 		body, _ := json.Marshal(map[string]any{
-			"type": "error",
-			"error": map[string]string{
-				"type":    errType,
-				"message": message,
-			},
+			"type":                      "error",
+			jsonKeyUpstreamOpsRequestID: requestID,
+			"error":                     errorBody,
 		})
 		payload = []byte(fmt.Sprintf("event: error\ndata: %s\n\n", body))
 	} else if protocol.NormalizeKind(kind) == protocol.KindOpenAIResponses {
+		if errCode == nil {
+			errorBody["code"] = errType
+		}
 		body, _ := json.Marshal(map[string]any{
-			"type": "response.failed",
+			"type":                      "response.failed",
+			jsonKeyUpstreamOpsRequestID: requestID,
 			"response": map[string]any{
 				"object": "response",
 				"status": "failed",
-				"error":  map[string]string{"type": errType, "code": errType, "message": message},
+				"error":  errorBody,
 			},
 		})
 		payload = []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", body))
 	} else {
 		body, _ := json.Marshal(map[string]any{
-			"error": map[string]any{
-				"message": message,
-				"type":    errType,
-			},
+			jsonKeyUpstreamOpsRequestID: requestID,
+			"error":                     errorBody,
 		})
 		payload = []byte(fmt.Sprintf("data: %s\n\ndata: [DONE]\n\n", body))
 	}
-	if _, err := c.Writer.Write(payload); err != nil {
-		return err
-	}
-	rt.flushWriter(c)
-	return nil
+	return payload
 }
 
 func (rt *Runtime) mergeStreamUsage(dst *UsageTokens, data string, kind protocolKind) {

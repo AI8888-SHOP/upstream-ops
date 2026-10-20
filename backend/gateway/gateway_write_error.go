@@ -56,22 +56,35 @@ func (svc *Service) writeAuthError(c *gin.Context, kind protocolKind, msg string
 
 func (svc *Service) writeGatewayError(c *gin.Context, kind protocolKind, status int, typ, msg string) {
 	reqID := svc.ensureGatewayRequestID(c)
+	var body gin.H
 	if protocol.NormalizeKind(kind) == protocol.KindAnthropic {
-		c.JSON(status, gin.H{
+		body = gin.H{
 			"type": "error",
 			"error": gin.H{
 				"type":    typ,
 				"message": msg,
 			},
 			jsonKeyUpstreamOpsRequestID: reqID,
-		})
+		}
+	} else {
+		body = gin.H{
+			"error": gin.H{
+				"message": msg,
+				"type":    typ,
+			},
+			jsonKeyUpstreamOpsRequestID: reqID,
+		}
+	}
+	encoded, _ := json.Marshal(body)
+	svc.writeGatewayErrorBody(c, status, encoded)
+}
+
+// Final failures must be serialized as SSE if the optional preconnect already
+// established the transport; otherwise retain the original HTTP status/body.
+func (svc *Service) writeGatewayErrorBody(c *gin.Context, status int, body []byte) {
+	if writer := streamPreconnectFor(c); writer != nil {
+		_ = writer.writeFinalError(status, body)
 		return
 	}
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"message": msg,
-			"type":    typ,
-		},
-		jsonKeyUpstreamOpsRequestID: reqID,
-	})
+	c.Data(status, "application/json; charset=utf-8", body)
 }

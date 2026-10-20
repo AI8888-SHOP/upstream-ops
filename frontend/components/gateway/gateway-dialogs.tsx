@@ -1208,6 +1208,43 @@ export function GroupFormDialog({
               <strong>额外费用风险越高</strong>
               。4xx 顺延还可能把错误请求打到更多上游。
             </p>
+            <div className="space-y-3 border-t border-border/60 pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <Label>提前建立流并保活（非真实首字）</Label>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    仅对当前网关组的流式文本请求生效。等待上游期间，在指定随机延迟后发送 HTTP 200 与 SSE 保活注释；不生成虚假内容，不改变真实首字、TPS 或计费。
+                  </p>
+                </div>
+                <Switch
+                  className="shrink-0"
+                  checked={groupForm.stream_preconnect_enabled}
+                  onCheckedChange={(v) => setGroupForm({ ...groupForm, stream_preconnect_enabled: v })}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label>随机延迟下限（毫秒）</Label>
+                  <Input type="number" min={0} max={60000} step={1}
+                    disabled={!groupForm.stream_preconnect_enabled}
+                    value={groupForm.stream_preconnect_min_delay_ms}
+                    onChange={(e) => setGroupForm({ ...groupForm, stream_preconnect_min_delay_ms: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label>随机延迟上限（毫秒）</Label>
+                  <Input type="number" min={0} max={60000} step={1}
+                    disabled={!groupForm.stream_preconnect_enabled}
+                    value={groupForm.stream_preconnect_max_delay_ms}
+                    onChange={(e) => setGroupForm({ ...groupForm, stream_preconnect_max_delay_ms: e.target.value })} />
+                </div>
+              </div>
+              <p className="text-[11px] leading-5 text-muted-foreground">
+                范围为 0–60000 毫秒；两端相同表示固定延迟，均为 0 表示尽快建流。真实响应更早就绪时不会为了等待该延迟而阻塞。
+              </p>
+              <p className="rounded-md border border-amber-200/80 bg-amber-50/80 px-2 py-1.5 text-[11px] leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                HTTP 200 仅表示流连接已建立，不代表请求成功。建流后若所有上游尝试失败，只能通过流内错误事件返回；部分下游不会因此自动重试。保活不会缩短模型真实首字时间，也不会延长首字超时或请求总预算。
+              </p>
+            </div>
             <div className="space-y-1 border-t border-border/60 pt-3">
               <Label>首字超时（秒）</Label>
               <Input

@@ -39,7 +39,7 @@ jobs:
         run: go test ./...
 
   candy-postgres:
-    name: Candy check PostgreSQL leases
+    name: PostgreSQL integration checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -61,10 +61,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Test concurrent PostgreSQL probe claims
+      - name: Test PostgreSQL leases, reports and historical repricing
         env:
           UPSTREAM_OPS_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/upstreamops_test?sslmode=disable
-        run: go test -race ./backend/storage -run TestCandyCheckPostgres -count=1
+        run: go test -race ./backend/storage -run 'TestCandyCheckPostgres|TestGatewayDailyReportPostgres|TestPriceRepricingPostgres' -count=1
 
   go-race:
     name: Go race checks
@@ -145,6 +145,9 @@ jobs:
 
       - name: Type check
         run: pnpm exec tsc --noEmit --incremental false
+
+      - name: Frontend regression checks
+        run: node --test tests/*.test.mjs
 
       - name: Build
         run: pnpm build

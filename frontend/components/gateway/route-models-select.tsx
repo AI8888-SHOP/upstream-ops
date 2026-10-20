@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { ChevronDown, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -26,6 +26,12 @@ import { apiFetch } from "@/lib/api"
 import type { GatewayProviderModelPolicy, GatewayRoute } from "@/lib/api-types"
 import { cn } from "@/lib/utils"
 import { routeSourceKind } from "./gateway-utils"
+import {
+  ModelMappingEditor,
+  parseMappingJSON,
+  serializeMappingJSON,
+  type MappingRow,
+} from "./model-mapping-editor"
 
 function modelIDs(text: string): string[] {
   return Array.from(new Set(text.split(/\r?\n|,/).map((id) => id.trim()).filter(Boolean)))
@@ -56,7 +62,7 @@ type RouteModelsSelectProps = {
   groupID: number
   route: Partial<GatewayRoute>
   disabled: boolean
-  onChange: (policy: GatewayProviderModelPolicy, modelsJSON: string) => void
+  onChange: (policy: GatewayProviderModelPolicy, modelsJSON: string, modelMapping: string) => void
 }
 
 export function RouteModelsSelect({ groupID, route, disabled, onChange }: RouteModelsSelectProps) {
@@ -65,8 +71,10 @@ export function RouteModelsSelect({ groupID, route, disabled, onChange }: RouteM
   const [text, setText] = useState("")
   const [available, setAvailable] = useState<string[]>([])
   const [query, setQuery] = useState("")
+  const [mappingRows, setMappingRows] = useState<MappingRow[]>([])
   const [loading, setLoading] = useState(false)
   const pullRef = useRef<AbortController | null>(null)
+  const mappingDatalistID = `route-model-suggestions-${useId().replace(/:/g, "")}`
 
   useEffect(() => () => pullRef.current?.abort(), [])
 
@@ -74,12 +82,16 @@ export function RouteModelsSelect({ groupID, route, disabled, onChange }: RouteM
   const candidates = Array.from(new Set([...available, ...selected]))
     .filter((model) => model.toLowerCase().includes(query.trim().toLowerCase()))
   const saved = savedModelIDs(route.allowed_models_json)
-  const summary = route.model_policy === "allowlist" ? `仅 ${saved.length} 个模型` : "全部模型"
+  const mappingCount = parseMappingJSON(route.model_mapping).length
+  const summary = route.model_policy === "allowlist"
+    ? `仅 ${saved.length} 个模型${mappingCount ? ` · 映射 ${mappingCount}` : ""}`
+    : mappingCount ? `全部模型 · 映射 ${mappingCount}` : "全部模型"
 
   function changeOpen(value: boolean) {
     if (value) {
       setPolicy(route.model_policy || "all")
       setText(saved.join("\n"))
+      setMappingRows(parseMappingJSON(route.model_mapping))
       setQuery("")
       setAvailable([])
     } else {
@@ -116,19 +128,39 @@ export function RouteModelsSelect({ groupID, route, disabled, onChange }: RouteM
     }
   }
 
+  function applyModels() {
+    const sources = new Set<string>()
+    for (const [index, row] of mappingRows.entries()) {
+      const from = row.from.trim()
+      const to = row.to.trim()
+      if (!from && !to) continue
+      if (!from || !to) {
+        toast.error(`第 ${index + 1} 条模型映射需要同时填写客户端模型和上游模型`)
+        return
+      }
+      if (sources.has(from)) {
+        toast.error(`客户端模型 ${from} 重复，请为每个客户端模型只保留一条映射`)
+        return
+      }
+      sources.add(from)
+    }
+    onChange(policy, JSON.stringify(selected), serializeMappingJSON(mappingRows))
+    changeOpen(false)
+  }
+
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogTrigger asChild>
-        <Button type="button" variant="outline" className="w-32 justify-between" disabled={disabled}>
+        <Button type="button" variant="outline" className="w-40 justify-between" disabled={disabled} title={summary}>
           <span className="truncate">{summary}</span>
           <ChevronDown className="size-3.5 shrink-0 opacity-50" />
         </Button>
       </DialogTrigger>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>路由支持模型</DialogTitle>
+          <DialogTitle>路由支持模型与映射</DialogTitle>
           <DialogDescription>
-            仅限制当前网关组中的这条路由，按映射后的上游模型 ID 精确匹配。直连渠道自身的模型限制仍然生效。
+            支持范围和映射仅作用于当前路由。请求模型先应用本路由映射，再应用网关组映射；支持模型按最终上游模型 ID 匹配。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
@@ -169,13 +201,21 @@ export function RouteModelsSelect({ groupID, route, disabled, onChange }: RouteM
               </p>
             </div>
           ) : <p className="text-sm text-muted-foreground">不额外限制这条路由的模型；实际可用范围仍由上游决定。</p>}
+          <div className="border-t pt-4">
+            <ModelMappingEditor
+              rows={mappingRows}
+              onChange={setMappingRows}
+              modelSuggestions={Array.from(new Set([...available, ...selected]))}
+              datalistID={mappingDatalistID}
+            />
+            <p className="mt-2 text-xs text-muted-foreground">
+              例如把客户端请求的 model-a 映射到此渠道的 upstream-model。留空则不添加渠道级映射。
+            </p>
+          </div>
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => changeOpen(false)}>取消</Button>
-          <Button type="button" disabled={disabled} onClick={() => {
-            onChange(policy, JSON.stringify(selected))
-            changeOpen(false)
-          }}>应用到路由</Button>
+          <Button type="button" disabled={disabled} onClick={applyModels}>应用到路由</Button>
         </DialogFooter>
         <p className="text-xs text-muted-foreground">应用后，点击渠道路由页面的“保存路由”生效。</p>
       </DialogContent>

@@ -21,8 +21,15 @@ func streamWriterActuallyCommitted(c *gin.Context) bool {
 	if c == nil || c.Writer == nil {
 		return false
 	}
-	if gate, ok := c.Writer.(*streamPrefixGateWriter); ok {
-		return gate.DownstreamCommitted()
+	for writer := http.ResponseWriter(c.Writer); writer != nil; {
+		if semantic, ok := writer.(interface{ DownstreamCommitted() bool }); ok {
+			return semantic.DownstreamCommitted()
+		}
+		if unwrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter }); ok {
+			writer = unwrapper.Unwrap()
+		} else {
+			break
+		}
 	}
 	return c.Writer.Written()
 }

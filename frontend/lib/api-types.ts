@@ -683,6 +683,12 @@ export interface GatewayGroup {
   request_max_attempts?: number
   /** 首字超时触发后是否冷却当前网关组内的路由/模型。 */
   first_token_timeout_cooldown_enabled?: boolean
+  /** SSE 连接握手与保活，不是模型内容或真实首字；默认关闭。 */
+  stream_preconnect_enabled?: boolean
+  /** 握手随机延迟下限，0 到 60000 毫秒。 */
+  stream_preconnect_min_delay_ms?: number
+  /** 握手随机延迟上限，不小于下限且不超过 60000 毫秒。 */
+  stream_preconnect_max_delay_ms?: number
   candy_check_enabled?: boolean
   candy_check_model?: string
   candy_check_interval_minutes?: number
@@ -1258,6 +1264,10 @@ export interface ModelPriceOverride {
   output_price_per_token: number
   cache_creation_price_per_token: number
   cache_read_price_per_token: number
+  cache_creation_1h_price_per_token?: number | null
+  context_tiers_json?: string
+  source?: "manual" | "sub2api"
+  source_url?: string
   enabled: boolean
   created_at: string
   updated_at: string
@@ -1270,4 +1280,18 @@ export interface ModelDefaultPrice {
   output_price_per_token: number
   cache_creation_price_per_token: number
   cache_read_price_per_token: number
+  cache_creation_1h_price_per_token?: number | null
+  context_tiers_json?: string
+}
+
+export interface ModelPriceRepricingJob {
+  status: "idle" | "pending" | "running" | "completed"
+  generation: number
+  last_id: number
+  upper_id: number
+  updated_rows: number
+  skipped_rows: number
+  error?: string
+  started_at?: string
+  completed_at?: string
 }

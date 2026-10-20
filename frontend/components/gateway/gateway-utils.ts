@@ -45,6 +45,9 @@ export type GroupFormState = {
   request_first_token_timeout_sec: string
   request_max_attempts: string
   first_token_timeout_cooldown_enabled: boolean
+  stream_preconnect_enabled: boolean
+  stream_preconnect_min_delay_ms: string
+  stream_preconnect_max_delay_ms: string
   candy_check_enabled: boolean
   candy_check_model: string
   candy_check_interval_minutes: string
@@ -92,7 +95,56 @@ export type PriceFormState = {
   output_mtok: string
   cache_create_mtok: string
   cache_read_mtok: string
+  cache_create_1h_mtok: string
+  context_tiers: PriceTierForm[]
   enabled: boolean
+}
+
+export type PriceTierForm = {
+  above_input_tokens: string
+  inclusive: boolean
+  input_mtok: string
+  output_mtok: string
+  cache_create_mtok: string
+  cache_create_1h_mtok: string
+  cache_read_mtok: string
+}
+
+export const emptyPriceTier = (): PriceTierForm => ({ above_input_tokens: "", inclusive: false, input_mtok: "", output_mtok: "", cache_create_mtok: "", cache_create_1h_mtok: "", cache_read_mtok: "" })
+
+const tierPriceFields = { input_mtok: "input_price_per_token", output_mtok: "output_price_per_token", cache_create_mtok: "cache_creation_price_per_token", cache_create_1h_mtok: "cache_creation_1h_price_per_token", cache_read_mtok: "cache_read_price_per_token" } as const
+
+export function priceTiersFromJSON(raw?: string): PriceTierForm[] {
+  if (!raw) return []
+  try {
+    const rows: unknown = JSON.parse(raw)
+    if (!Array.isArray(rows)) return []
+    return rows.map((row: Record<string, unknown>) => {
+      const form = { ...emptyPriceTier(), above_input_tokens: String(row.above_input_tokens ?? ""), inclusive: row.inclusive === true }
+      for (const [key, field] of Object.entries(tierPriceFields)) {
+        const value = row[field]
+        if (typeof value === "number") form[key as keyof typeof tierPriceFields] = perTokenToMTok(value)
+      }
+      return form
+    })
+  } catch { return [] }
+}
+
+export function priceTiersToJSON(tiers: PriceTierForm[]): string {
+  const seen = new Set<number>()
+  return JSON.stringify(tiers.map((tier) => {
+    const threshold = Number(tier.above_input_tokens)
+    if (!Number.isSafeInteger(threshold) || threshold <= 0 || seen.has(threshold)) throw new Error("上下文阈值必须是互不重复的正整数")
+    seen.add(threshold)
+    const result: Record<string, number | boolean> = { above_input_tokens: threshold, inclusive: tier.inclusive }
+    for (const [key, field] of Object.entries(tierPriceFields)) {
+      const value = tier[key as keyof typeof tierPriceFields].trim()
+      if (!value) continue
+      if (!Number.isFinite(Number(value)) || Number(value) < 0) throw new Error("阶梯价格必须是非负数，空白表示沿用上一档")
+      result[field] = Number(value) / MTOK
+    }
+    return result
+  }))
 }
 
 export function channelGroupLabel(
@@ -638,6 +690,9 @@ export const emptyGroupForm = (): GroupFormState => ({
   request_first_token_timeout_sec: "0",
   request_max_attempts: "0",
   first_token_timeout_cooldown_enabled: true,
+  stream_preconnect_enabled: false,
+  stream_preconnect_min_delay_ms: "0",
+  stream_preconnect_max_delay_ms: "0",
   candy_check_enabled: false,
   candy_check_model: "",
   candy_check_interval_minutes: "5",
@@ -678,6 +733,8 @@ export const emptyPriceForm = (): PriceFormState => ({
   output_mtok: "0",
   cache_create_mtok: "0",
   cache_read_mtok: "0",
+  cache_create_1h_mtok: "",
+  context_tiers: [],
   enabled: true,
 })
 

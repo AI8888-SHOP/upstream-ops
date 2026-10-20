@@ -58,6 +58,7 @@ type AuthResult struct {
 type CreateGroupInput struct {
 	SchedulingPolicyInput
 	CandyCheckPolicyInput
+	StreamPreconnectPolicyInput
 	Name                                  string   `json:"name"`
 	Description                           string   `json:"description"`
 	RateSortDirection                     string   `json:"rate_sort_direction"`
@@ -101,6 +102,7 @@ type CreateGroupInput struct {
 type UpdateGroupInput struct {
 	SchedulingPolicyInput
 	CandyCheckPolicyInput
+	StreamPreconnectPolicyInput
 	Name                                  *string         `json:"name"`
 	Description                           *string         `json:"description"`
 	Status                                *string         `json:"status"`

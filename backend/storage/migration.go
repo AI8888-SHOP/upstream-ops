@@ -105,6 +105,7 @@ var gatewayMigrationModels = []migrationModelSpec{
 	{table: "gateway_request_finalizations", model: &GatewayRequestFinalization{}},
 	{table: "gateway_winner_settlements", model: &GatewayWinnerSettlement{}},
 	{table: "model_price_overrides", model: &ModelPriceOverride{}},
+	{table: "model_price_repricing_jobs", model: &ModelPriceRepricingJob{}},
 }
 
 var migrationSoftDeleteTables = map[string]struct{}{

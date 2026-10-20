@@ -542,6 +542,7 @@ func (GatewayProvider) TableName() string { return "gateway_providers" }
 type GatewayGroup struct {
 	GatewaySchedulerPolicy `gorm:"embedded"`
 	GatewayCandyCheckPolicy `gorm:"embedded"`
+	GatewayStreamPreconnectPolicy `gorm:"embedded"`
 	ID          uint   `gorm:"primaryKey" json:"id"`
 	Name        string `gorm:"size:128;not null;uniqueIndex" json:"name"`
 	Description string `gorm:"size:512;not null;default:''" json:"description,omitempty"`
@@ -1007,15 +1008,19 @@ func (GatewayWinnerSettlement) TableName() string { return "gateway_winner_settl
 
 // ModelPriceOverride 覆盖内置模型单价（per-token，USD）。
 type ModelPriceOverride struct {
-	ID                         uint      `gorm:"primaryKey" json:"id"`
-	ModelName                  string    `gorm:"size:256;not null;uniqueIndex" json:"model_name"`
-	InputPricePerToken         float64   `gorm:"not null;default:0" json:"input_price_per_token"`
-	OutputPricePerToken        float64   `gorm:"not null;default:0" json:"output_price_per_token"`
-	CacheCreationPricePerToken float64   `gorm:"not null;default:0" json:"cache_creation_price_per_token"`
-	CacheReadPricePerToken     float64   `gorm:"not null;default:0" json:"cache_read_price_per_token"`
-	Enabled                    bool      `gorm:"default:true" json:"enabled"`
-	CreatedAt                  time.Time `json:"created_at"`
-	UpdatedAt                  time.Time `json:"updated_at"`
+	ID                           uint      `gorm:"primaryKey" json:"id"`
+	ModelName                    string    `gorm:"size:256;not null;uniqueIndex" json:"model_name"`
+	InputPricePerToken           float64   `gorm:"not null;default:0" json:"input_price_per_token"`
+	OutputPricePerToken          float64   `gorm:"not null;default:0" json:"output_price_per_token"`
+	CacheCreationPricePerToken   float64   `gorm:"not null;default:0" json:"cache_creation_price_per_token"`
+	CacheReadPricePerToken       float64   `gorm:"not null;default:0" json:"cache_read_price_per_token"`
+	CacheCreation1hPricePerToken *float64  `json:"cache_creation_1h_price_per_token"`
+	ContextTiersJSON             string    `gorm:"type:text;not null;default:'[]'" json:"context_tiers_json"`
+	Source                       string    `gorm:"size:32;not null;default:'manual'" json:"source"`
+	SourceURL                    string    `gorm:"size:512;not null;default:''" json:"source_url,omitempty"`
+	Enabled                      bool      `gorm:"default:true" json:"enabled"`
+	CreatedAt                    time.Time `json:"created_at"`
+	UpdatedAt                    time.Time `json:"updated_at"`
 }
 
 func (ModelPriceOverride) TableName() string { return "model_price_overrides" }

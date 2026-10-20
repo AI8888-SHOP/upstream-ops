@@ -556,9 +556,14 @@ export function RoutesPanel({
                     groupID={groupID}
                     route={r}
                     disabled={busy}
-                    onChange={(policy, modelsJSON) => setRouteDrafts((prev) => {
+                    onChange={(policy, modelsJSON, modelMapping) => setRouteDrafts((prev) => {
                       const next = [...prev]
-                      next[idx] = { ...next[idx], model_policy: policy, allowed_models_json: modelsJSON }
+                      next[idx] = {
+                        ...next[idx],
+                        model_policy: policy,
+                        allowed_models_json: modelsJSON,
+                        model_mapping: modelMapping,
+                      }
                       return next
                     })}
                   />

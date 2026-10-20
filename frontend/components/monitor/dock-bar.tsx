@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import {
+  BarChart3,
   Bell,
   LayoutDashboard,
   Network,
@@ -177,6 +178,12 @@ export function DockBar() {
       label: "请求网关",
       path: "/gateway",
       gradient: "from-violet-400 via-indigo-500 to-blue-600",
+    },
+    {
+      icon: BarChart3,
+      label: "每日报表",
+      path: "/daily-report",
+      gradient: "from-teal-400 via-cyan-500 to-blue-600",
     },
     {
       icon: Settings,

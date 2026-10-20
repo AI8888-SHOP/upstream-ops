@@ -312,7 +312,7 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 		billedActual = rawCost.ActualCost
 	}
 	accountRate := billedCost.ActualCost
-	virtualReadCost := float64(virtualTokens) * pricing.CacheReadPricePerToken
+	virtualReadCost := float64(virtualTokens) * pricing.forTokens(tokens).CacheReadPricePerToken
 	if billedCost.TotalCost > 0 {
 		accountRate /= billedCost.TotalCost
 	} else {
@@ -371,7 +371,7 @@ func (rt *Runtime) buildProviderVirtualCacheSettlement(
 		billedActual = rawCost.ActualCost
 	}
 	accountRate := billedCost.ActualCost
-	virtualReadCost := float64(virtualTokens) * pricing.CacheReadPricePerToken
+	virtualReadCost := float64(virtualTokens) * pricing.forTokens(tokens).CacheReadPricePerToken
 	if billedCost.TotalCost > 0 {
 		accountRate /= billedCost.TotalCost
 	} else {

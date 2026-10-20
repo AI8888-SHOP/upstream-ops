@@ -98,12 +98,12 @@ func TestSaveRouteModelPolicyRoundTripAndIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	input := RouteInput{SourceChannelID: 1, Enabled: true, SourceGroupName: "same-source", ModelPolicy: " ALLOWLIST ", AllowedModelsJSON: `[" model-b ","model-a","model-b",""]`}
+	input := RouteInput{SourceChannelID: 1, Enabled: true, SourceGroupName: "same-source", ModelPolicy: " ALLOWLIST ", AllowedModelsJSON: `[" model-b ","model-a","model-b",""]`, ModelMappingJSON: `{"client-model":"upstream-model"}`}
 	saved, err := svc.SaveRoutes(group.ID, []RouteInput{input})
 	if err != nil || len(saved) != 1 {
 		t.Fatalf("save=%+v err=%v", saved, err)
 	}
-	if saved[0].ModelPolicy != "allowlist" || saved[0].AllowedModelsJSON != `["model-b","model-a"]` {
+	if saved[0].ModelPolicy != "allowlist" || saved[0].AllowedModelsJSON != `["model-b","model-a"]` || saved[0].ModelMappingJSON != `{"client-model":"upstream-model"}` {
 		t.Fatalf("not normalized: %+v", saved[0])
 	}
 	input.ID = saved[0].ID
@@ -118,7 +118,7 @@ func TestSaveRouteModelPolicyRoundTripAndIsolation(t *testing.T) {
 	svc.modelsCache[group.ID] = modelsCacheEntry{body: []byte(`{"stale":true}`)}
 	input.AllowedModelsJSON = `[]`
 	updated, err := svc.SaveRoutes(group.ID, []RouteInput{input})
-	if err != nil || updated[0].ID != input.ID || updated[0].SourceAPIKeyCipher != "original-key-cipher" || updated[0].AllowedModelsJSON != `[]` {
+	if err != nil || updated[0].ID != input.ID || updated[0].SourceAPIKeyCipher != "original-key-cipher" || updated[0].AllowedModelsJSON != `[]` || updated[0].ModelMappingJSON != input.ModelMappingJSON {
 		t.Fatalf("update=%+v err=%v", updated, err)
 	}
 	if _, cached := svc.modelsCache[group.ID]; cached {
@@ -138,7 +138,7 @@ func TestSaveRouteModelPolicyRoundTripAndIsolation(t *testing.T) {
 		t.Fatalf("invalid writes changed policy: %+v err=%v", persisted, err)
 	}
 	defaults, err := svc.SaveRoutes(other.ID, []RouteInput{{SourceChannelID: 1, SourceGroupName: "same-source", Enabled: true}})
-	if err != nil || defaults[0].ModelPolicy != "all" || defaults[0].AllowedModelsJSON != `[]` {
+	if err != nil || defaults[0].ModelPolicy != "all" || defaults[0].AllowedModelsJSON != `[]` || defaults[0].ModelMappingJSON != "" {
 		t.Fatalf("defaults or group isolation broken: %+v err=%v", defaults, err)
 	}
 	clone, err := groups.Clone(group.ID, "cloned-route-models", nil)
@@ -146,7 +146,7 @@ func TestSaveRouteModelPolicyRoundTripAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	cloned, err := routes.ListByGroupID(clone.Group.ID)
-	if err != nil || len(cloned) != 1 || cloned[0].ModelPolicy != "allowlist" || cloned[0].AllowedModelsJSON != `[]` {
+	if err != nil || len(cloned) != 1 || cloned[0].ModelPolicy != "allowlist" || cloned[0].AllowedModelsJSON != `[]` || cloned[0].ModelMappingJSON != input.ModelMappingJSON {
 		t.Fatalf("clone lost model policy: %+v err=%v", cloned, err)
 	}
 }
@@ -277,10 +277,19 @@ func TestMonitorRouteAllowlistEnforcedOnBothForwardPaths(t *testing.T) {
 					t.Fatal(err)
 				}
 				var calls [3]atomic.Int32
+				var wrongModel atomic.Bool
 				for index := 0; index < 3; index++ {
 					index := index
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						calls[index].Add(1)
+						var request struct {
+							Model string `json:"model"`
+						}
+						if json.NewDecoder(r.Body).Decode(&request) != nil || request.Model != "gpt-test" {
+							wrongModel.Store(true)
+							w.WriteHeader(http.StatusBadRequest)
+							return
+						}
 						w.Header().Set("Content-Type", "application/json")
 						if index != 2 {
 							w.WriteHeader(http.StatusServiceUnavailable)
@@ -303,7 +312,7 @@ func TestMonitorRouteAllowlistEnforcedOnBothForwardPaths(t *testing.T) {
 					if index == 0 {
 						allowed = `["other-model"]`
 					}
-					route := storage.GatewayRoute{GatewayGroupID: group.ID, Position: index, SourceChannelID: channel.ID, SourceAPIKeyCipher: secret, Enabled: true, UpstreamProtocol: storage.GatewayUpstreamProtocolOpenAIResponses, RateConvertMode: "custom", RateConvertValue: rate, BillingRateMultiplier: rate, ModelPolicy: "allowlist", AllowedModelsJSON: allowed}
+					route := storage.GatewayRoute{GatewayGroupID: group.ID, Position: index, SourceChannelID: channel.ID, SourceAPIKeyCipher: secret, Enabled: true, UpstreamProtocol: storage.GatewayUpstreamProtocolOpenAIResponses, RateConvertMode: "custom", RateConvertValue: rate, BillingRateMultiplier: rate, ModelPolicy: "allowlist", AllowedModelsJSON: allowed, ModelMappingJSON: `{"client-model":"gpt-test"}`}
 					if err := db.Create(&route).Error; err != nil {
 						t.Fatal(err)
 					}
@@ -312,10 +321,10 @@ func TestMonitorRouteAllowlistEnforcedOnBothForwardPaths(t *testing.T) {
 				svc.SetResponseRules(rules)
 				w := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(w)
-				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":"gpt-test","stream":%v,"input":"hi"}`, stream)))
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":"client-model","stream":%v,"input":"hi"}`, stream)))
 				c.Request.Header.Set("Authorization", "Bearer client-key")
 				svc.runtime().HandleForward(c, "/v1/responses", protocol.KindOpenAIResponses)
-				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "allowed answer") || calls[0].Load() != 0 || calls[1].Load() != 1 || calls[2].Load() != 1 {
+				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "allowed answer") || calls[0].Load() != 0 || calls[1].Load() != 1 || calls[2].Load() != 1 || wrongModel.Load() {
 					t.Fatalf("policy/failover broken: status=%d calls=%d/%d/%d body=%s", w.Code, calls[0].Load(), calls[1].Load(), calls[2].Load(), w.Body.String())
 				}
 				w = httptest.NewRecorder()

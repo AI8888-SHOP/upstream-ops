@@ -3017,6 +3017,7 @@ func (r *GatewayRoutes) NoteSuccessForPauseError(id uint) error {
 type GatewayUsageLogs struct {
 	db      *gorm.DB
 	statsMu sync.Mutex
+	statsEpoch uint64
 	// statsQueryMu serializes expensive aggregate refreshes across distinct
 	// dashboard filter keys. Per-key single-flight alone still allows a
 	// dashboard to launch several parallel COUNT(DISTINCT ...) scans.
@@ -4061,6 +4062,7 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 		return cloneGatewayUsageStats(call.value), call.err
 	}
 	queryStartedAt := time.Now()
+	queryEpoch := r.statsEpoch
 	call := &gatewayStatsCall{done: make(chan struct{})}
 	r.statsInFlight[key] = call
 	r.statsMu.Unlock()
@@ -4073,7 +4075,7 @@ func (r *GatewayUsageLogs) Stats(q GatewayUsageQuery) (*GatewayUsageStats, error
 	r.statsMu.Lock()
 	call.value = value
 	call.err = err
-	if err == nil {
+	if err == nil && queryEpoch == r.statsEpoch {
 		// Anchor freshness to the query start. If rows were appended while the
 		// aggregate was running, the cache must become eligible for refresh
 		// after the short coalescing window rather than receiving a new full TTL
@@ -4151,7 +4153,7 @@ func (r *GatewayUsageLogs) statsUncached(q GatewayUsageQuery) (*GatewayUsageStat
 		COALESCE(SUM(actual_cost),0) as total_actual_cost,
 		COALESCE(SUM(actual_cost),0) as total_upstream_cost,
 		COALESCE(SUM(CASE WHEN winner THEN
-			CASE WHEN billed_cost > 0 OR virtual_cache_read_tokens > 0 OR actual_cost = 0
+			CASE WHEN COALESCE(attempt_status, '') <> '' OR billed_cost > 0 OR virtual_cache_read_tokens > 0 OR actual_cost = 0
 				THEN billed_cost ELSE actual_cost END
 			ELSE 0 END),0) as winner_cost,
 		COALESCE(SUM(CASE WHEN winner AND virtual_cache_read_tokens > 0 AND actual_cost > billed_cost

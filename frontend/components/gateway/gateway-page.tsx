@@ -72,6 +72,8 @@ import {
   emptyPriceForm,
   ipListToText,
   mTokToPerToken,
+  priceTiersFromJSON,
+  priceTiersToJSON,
   parseModelsJSON,
   perTokenToMTok,
   routeAccountRate,
@@ -899,6 +901,9 @@ export function GatewayPage() {
       request_max_attempts: String(g.request_max_attempts ?? 0),
       first_token_timeout_cooldown_enabled:
         g.first_token_timeout_cooldown_enabled !== false,
+      stream_preconnect_enabled: !!g.stream_preconnect_enabled,
+      stream_preconnect_min_delay_ms: String(g.stream_preconnect_min_delay_ms ?? 0),
+      stream_preconnect_max_delay_ms: String(g.stream_preconnect_max_delay_ms ?? 0),
       candy_check_enabled: !!g.candy_check_enabled,
       candy_check_model: g.candy_check_model ?? "",
       candy_check_interval_minutes: String(g.candy_check_interval_minutes ?? 5),
@@ -1067,7 +1072,24 @@ export function GatewayPage() {
         return
       }
     }
+    const preconnectMinDelay = Number(groupForm.stream_preconnect_min_delay_ms)
+    const preconnectMaxDelay = Number(groupForm.stream_preconnect_max_delay_ms)
+    if (
+      !groupForm.stream_preconnect_min_delay_ms.trim() ||
+      !groupForm.stream_preconnect_max_delay_ms.trim() ||
+      !Number.isInteger(preconnectMinDelay) ||
+      !Number.isInteger(preconnectMaxDelay) ||
+      preconnectMinDelay < 0 ||
+      preconnectMaxDelay > 60000 ||
+      preconnectMinDelay > preconnectMaxDelay
+    ) {
+      toast.error("提前建流延迟必须满足 0 ≤ 下限 ≤ 上限 ≤ 60000 毫秒，且为整数")
+      return
+    }
     const policy = {
+      stream_preconnect_enabled: groupForm.stream_preconnect_enabled,
+      stream_preconnect_min_delay_ms: preconnectMinDelay,
+      stream_preconnect_max_delay_ms: preconnectMaxDelay,
       candy_check_enabled: groupForm.candy_check_enabled,
       candy_check_model: groupForm.candy_check_model.trim(),
       candy_check_interval_minutes: Number(groupForm.candy_check_interval_minutes),
@@ -1636,6 +1658,8 @@ export function GatewayPage() {
       output_mtok: perTokenToMTok(p.output_price_per_token),
       cache_create_mtok: perTokenToMTok(p.cache_creation_price_per_token),
       cache_read_mtok: perTokenToMTok(p.cache_read_price_per_token),
+      cache_create_1h_mtok: p.cache_creation_1h_price_per_token == null ? "" : perTokenToMTok(p.cache_creation_1h_price_per_token),
+      context_tiers: priceTiersFromJSON(p.context_tiers_json),
       enabled: true,
     })
     setDefaultsOpen(false)
@@ -1649,6 +1673,8 @@ export function GatewayPage() {
       output_mtok: perTokenToMTok(p.output_price_per_token),
       cache_create_mtok: perTokenToMTok(p.cache_creation_price_per_token),
       cache_read_mtok: perTokenToMTok(p.cache_read_price_per_token),
+      cache_create_1h_mtok: p.cache_creation_1h_price_per_token == null ? "" : perTokenToMTok(p.cache_creation_1h_price_per_token),
+      context_tiers: priceTiersFromJSON(p.context_tiers_json),
       enabled: p.enabled !== false,
     })
   }
@@ -1810,6 +1836,9 @@ export function GatewayPage() {
     }
     setBusy(true)
     try {
+      for (const value of [priceForm.input_mtok, priceForm.output_mtok, priceForm.cache_create_mtok, priceForm.cache_create_1h_mtok, priceForm.cache_read_mtok]) {
+        if (!Number.isFinite(Number(value)) || Number(value) < 0) throw new Error("价格必须是有效非负数")
+      }
       await apiFetch("/gateway/prices", {
         method: "PUT",
         body: JSON.stringify({
@@ -1818,10 +1847,12 @@ export function GatewayPage() {
           output_price_per_token: mTokToPerToken(priceForm.output_mtok),
           cache_creation_price_per_token: mTokToPerToken(priceForm.cache_create_mtok),
           cache_read_price_per_token: mTokToPerToken(priceForm.cache_read_mtok),
+          cache_creation_1h_price_per_token: priceForm.cache_create_1h_mtok.trim() === "" ? null : mTokToPerToken(priceForm.cache_create_1h_mtok),
+          context_tiers_json: priceTiersToJSON(priceForm.context_tiers),
           enabled: priceForm.enabled,
         }),
       })
-      toast.success("价格已保存")
+      toast.success("价格已保存，历史参考费用正在后台重算")
       setPriceForm(emptyPriceForm())
       await loadPrices()
     } catch (e) {
@@ -2193,7 +2224,7 @@ export function GatewayPage() {
             onSavePrice={() => void savePrice()}
             onOpenDefaults={() => void openDefaultsModal()}
             onFillFromOverride={fillPriceFormFromOverride}
-            onLoadPrices={() => void loadPrices()}
+            onLoadPrices={loadPrices}
           />
         </TabsContent>
       </Tabs>

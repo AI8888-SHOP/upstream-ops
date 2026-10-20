@@ -101,6 +101,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		// failover; only concurrent media hedging is prohibited.
 		useCoordinator = validator != nil && validator.Enabled()
 	}
+	finishPreconnect := beginStreamPreconnect(c, group, kind, path, stream,
+		requestInfo.Parsed && !requestInfo.MediaGeneration && !mappedMediaModel)
+	defer finishPreconnect()
 	if useCoordinator {
 		ftTimeoutSec := rt.clampFirstTokenTimeoutSec(group.FirstTokenTimeoutSec)
 		var firstTokenTimeout time.Duration
@@ -603,8 +606,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				c.Writer.Header().Del("Content-Length")
 				c.Header("Content-Type", "application/json")
 				rt.setGatewayRequestIDHeaders(c, reqID)
-				c.Status(status)
-				_, _ = c.Writer.Write(clientBody)
+				rt.writeGatewayErrorBody(c, status, clientBody)
 				finishRecoveryProbe(route.ID)
 				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, UsageTokens{}, cand.EffectiveRate, cand.BillingRate, stream, status, false, errInfo, duration, firstTokenMS, c, usageMeta)
 				rt.finalizeUsageFailure(reqID, key)
@@ -699,8 +701,7 @@ finishError:
 		rt.setGatewayRequestIDHeaders(c, reqID)
 		c.Header("Content-Type", "application/json")
 		c.Writer.Header().Del("Content-Length")
-		c.Status(lastStatus)
-		_, _ = c.Writer.Write(out)
+		rt.writeGatewayErrorBody(c, lastStatus, out)
 		return
 	}
 	msg := "all upstream routes failed"

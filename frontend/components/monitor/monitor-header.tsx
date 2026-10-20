@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom"
 import { useTheme } from "next-themes"
 import {
   Activity,
+  BarChart3,
   Github,
   Home,
   LogOut,
@@ -209,6 +210,10 @@ export function MonitorHeader() {
                 <Network className="size-4" />
                 请求网关
               </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate("/daily-report")}>
+                <BarChart3 className="size-4" />
+                每日报表
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => navigate("/settings")}>
                 <Settings className="size-4" />
                 系统设置
@@ -273,6 +278,23 @@ export function MonitorHeader() {
               </TooltipTrigger>
               <TooltipContent side="bottom" className="text-xs">
                 {"请求网关"}
+              </TooltipContent>
+            </Tooltip>
+
+            <Tooltip delayDuration={200}>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => navigate("/daily-report")}
+                  className="size-8 border-border bg-background text-foreground hover:bg-muted"
+                  aria-label="每日报表"
+                >
+                  <BarChart3 className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">
+                {"每日报表"}
               </TooltipContent>
             </Tooltip>
 

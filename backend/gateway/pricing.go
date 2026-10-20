@@ -2,7 +2,6 @@ package gateway
 
 import (
 	_ "embed"
-	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -16,24 +15,38 @@ var defaultPricesJSON []byte
 
 // ModelPricing per-token USD 单价。
 type ModelPricing struct {
-	InputPricePerToken         float64
-	OutputPricePerToken        float64
-	CacheCreationPricePerToken float64
-	CacheReadPricePerToken     float64
+	InputPricePerToken           float64
+	OutputPricePerToken          float64
+	CacheCreationPricePerToken   float64
+	CacheReadPricePerToken       float64
+	CacheCreation1hPricePerToken float64
+	CacheCreation1hPriceExplicit bool
+	ContextTiers                 []storage.ModelPriceContextTier
 }
 
 // HasTokenPrice 是否具备 token 计费单价（对齐 sub2api TokenPricingAbsent 语义）。
 func (p ModelPricing) HasTokenPrice() bool {
+	if p.CacheCreation1hPricePerToken > 0 {
+		return true
+	}
+	for _, tier := range p.ContextTiers {
+		for _, value := range []*float64{tier.InputPricePerToken, tier.OutputPricePerToken, tier.CacheReadPricePerToken, tier.CacheCreationPricePerToken, tier.CacheCreation1hPricePerToken} {
+			if value != nil && *value > 0 {
+				return true
+			}
+		}
+	}
 	return p.InputPricePerToken > 0 || p.OutputPricePerToken > 0 ||
 		p.CacheCreationPricePerToken > 0 || p.CacheReadPricePerToken > 0
 }
 
 // LiteLLM 原始条目（字段可选；与 sub2api model_prices_and_context_window.json 一致）。
 type defaultPriceEntry struct {
-	InputCostPerToken           *float64 `json:"input_cost_per_token"`
-	OutputCostPerToken          *float64 `json:"output_cost_per_token"`
-	CacheCreationInputTokenCost *float64 `json:"cache_creation_input_token_cost"`
-	CacheReadInputTokenCost     *float64 `json:"cache_read_input_token_cost"`
+	InputCostPerToken             *float64 `json:"input_cost_per_token"`
+	OutputCostPerToken            *float64 `json:"output_cost_per_token"`
+	CacheCreationInputTokenCost   *float64 `json:"cache_creation_input_token_cost"`
+	CacheReadInputTokenCost       *float64 `json:"cache_read_input_token_cost"`
+	CacheCreation1hInputTokenCost *float64 `json:"cache_creation_input_token_cost_above_1hr"`
 }
 
 // PricingCatalog 内置价 + DB 覆盖 + 硬编码家族回退（对齐 sub2api BillingService）。
@@ -42,6 +55,7 @@ type PricingCatalog struct {
 	defaults  map[string]ModelPricing
 	fallbacks map[string]ModelPricing
 	overrides *storage.ModelPriceOverrides
+	snapshot  map[string]ModelPricing
 }
 
 func NewPricingCatalog(overrides *storage.ModelPriceOverrides) *PricingCatalog {
@@ -56,40 +70,12 @@ func NewPricingCatalog(overrides *storage.ModelPriceOverrides) *PricingCatalog {
 }
 
 func (c *PricingCatalog) loadDefaults() {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(defaultPricesJSON, &raw); err != nil {
+	entries, err := parsePriceDocument(defaultPricesJSON)
+	if err != nil {
 		return
 	}
-	for name, rawEntry := range raw {
-		if name == "sample_spec" {
-			continue
-		}
-		var e defaultPriceEntry
-		if err := json.Unmarshal(rawEntry, &e); err != nil {
-			continue
-		}
-		// 仅有图片价、无 token 价的条目跳过（避免 token 流量按 $0 计费）
-		if e.InputCostPerToken == nil && e.OutputCostPerToken == nil {
-			continue
-		}
-		p := ModelPricing{}
-		if e.InputCostPerToken != nil {
-			p.InputPricePerToken = *e.InputCostPerToken
-		}
-		if e.OutputCostPerToken != nil {
-			p.OutputPricePerToken = *e.OutputCostPerToken
-		}
-		if e.CacheCreationInputTokenCost != nil {
-			p.CacheCreationPricePerToken = *e.CacheCreationInputTokenCost
-		}
-		if e.CacheReadInputTokenCost != nil {
-			p.CacheReadPricePerToken = *e.CacheReadInputTokenCost
-		}
-		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" {
-			continue
-		}
-		c.defaults[key] = p
+	for _, item := range entries {
+		c.defaults[strings.ToLower(item.ModelName)] = pricingFromOverride(item)
 	}
 }
 
@@ -158,11 +144,13 @@ func (c *PricingCatalog) seedFallbackPrices() {
 
 // DefaultPriceItem 内置默认价（管理端只读展示）。
 type DefaultPriceItem struct {
-	ModelName                  string  `json:"model_name"`
-	InputPricePerToken         float64 `json:"input_price_per_token"`
-	OutputPricePerToken        float64 `json:"output_price_per_token"`
-	CacheCreationPricePerToken float64 `json:"cache_creation_price_per_token"`
-	CacheReadPricePerToken     float64 `json:"cache_read_price_per_token"`
+	ModelName                    string   `json:"model_name"`
+	InputPricePerToken           float64  `json:"input_price_per_token"`
+	OutputPricePerToken          float64  `json:"output_price_per_token"`
+	CacheCreationPricePerToken   float64  `json:"cache_creation_price_per_token"`
+	CacheReadPricePerToken       float64  `json:"cache_read_price_per_token"`
+	CacheCreation1hPricePerToken *float64 `json:"cache_creation_1h_price_per_token"`
+	ContextTiersJSON             string   `json:"context_tiers_json"`
 }
 
 // ListDefaults 返回内置价目表（含硬编码 fallback），可选子串过滤。
@@ -186,11 +174,13 @@ func (c *PricingCatalog) ListDefaults(query string) []DefaultPriceItem {
 			continue
 		}
 		out = append(out, DefaultPriceItem{
-			ModelName:                  name,
-			InputPricePerToken:         p.InputPricePerToken,
-			OutputPricePerToken:        p.OutputPricePerToken,
-			CacheCreationPricePerToken: p.CacheCreationPricePerToken,
-			CacheReadPricePerToken:     p.CacheReadPricePerToken,
+			ModelName:                    name,
+			InputPricePerToken:           p.InputPricePerToken,
+			OutputPricePerToken:          p.OutputPricePerToken,
+			CacheCreationPricePerToken:   p.CacheCreationPricePerToken,
+			CacheReadPricePerToken:       p.CacheReadPricePerToken,
+			CacheCreation1hPricePerToken: p.hourlyPrice(),
+			ContextTiersJSON:             contextTiersJSON(p.ContextTiers),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ModelName < out[j].ModelName })
@@ -200,65 +190,83 @@ func (c *PricingCatalog) ListDefaults(query string) []DefaultPriceItem {
 // Resolve 优先 override，再 LiteLLM 默认表（模糊匹配），再硬编码家族回退。
 // 对齐 sub2api：BillingService.GetModelPricing → PricingService → fallbackPrices。
 func (c *PricingCatalog) Resolve(model string) ModelPricing {
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return ModelPricing{}
+	price, _ := c.resolveKnown(model)
+	return price
+}
+
+func (c *PricingCatalog) overridePrice(model string) (ModelPricing, bool) {
+	if c.snapshot != nil {
+		price, ok := c.snapshot[strings.ToLower(strings.TrimSpace(model))]
+		return price, ok
 	}
-	// DB 覆盖：原名与小写都试
 	if c.overrides != nil {
 		if item, err := c.overrides.FindByModel(model); err == nil && item != nil && item.Enabled {
-			return ModelPricing{
-				InputPricePerToken:         item.InputPricePerToken,
-				OutputPricePerToken:        item.OutputPricePerToken,
-				CacheCreationPricePerToken: item.CacheCreationPricePerToken,
-				CacheReadPricePerToken:     item.CacheReadPricePerToken,
-			}
+			return pricingFromOverride(*item), true
 		}
-		lower := strings.ToLower(model)
-		if lower != model {
-			if item, err := c.overrides.FindByModel(lower); err == nil && item != nil && item.Enabled {
-				return ModelPricing{
-					InputPricePerToken:         item.InputPricePerToken,
-					OutputPricePerToken:        item.OutputPricePerToken,
-					CacheCreationPricePerToken: item.CacheCreationPricePerToken,
-					CacheReadPricePerToken:     item.CacheReadPricePerToken,
-				}
-			}
+	}
+	return ModelPricing{}, false
+}
+
+func (c *PricingCatalog) resolveKnown(model string) (ModelPricing, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ModelPricing{}, false
+	}
+	candidates := modelPricingCandidates(model)
+	for _, candidate := range candidates {
+		if p, ok := c.overridePrice(candidate); ok {
+			return p, true
 		}
 	}
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	for _, candidate := range modelLookupCandidates(model) {
+	for _, candidate := range candidates {
 		if p, ok := c.defaults[candidate]; ok && p.HasTokenPrice() {
-			return p
-		}
-	}
-
-	// 日期后缀模糊：claude-xxx-20250219 → claude-xxx
-	for _, candidate := range modelLookupCandidates(model) {
-		if i := strings.LastIndex(candidate, "-20"); i > 0 && len(candidate)-i >= 9 {
-			base := candidate[:i]
-			if p, ok := c.defaults[base]; ok && p.HasTokenPrice() {
-				return p
-			}
-		}
-		// 4-5 ↔ 4.5 变体
-		alt := strings.ReplaceAll(candidate, "-4-5-", "-4.5-")
-		alt = strings.ReplaceAll(alt, "-4-5", "-4.5")
-		if alt != candidate {
-			if p, ok := c.defaults[alt]; ok && p.HasTokenPrice() {
-				return p
-			}
+			return p, true
 		}
 	}
 
 	// 硬编码家族回退（含 grok-4.5）
-	if p := c.fallbackForModel(model); p.HasTokenPrice() {
-		return p
+	if p, ok := c.fallbackForModel(model); ok {
+		return p, true
 	}
-	return ModelPricing{}
+	return ModelPricing{}, false
+}
+
+func modelPricingCandidates(model string) []string {
+	candidates := modelLookupCandidates(model)
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		seen[candidate] = true
+	}
+	add := func(candidate string) {
+		if candidate != "" && !seen[candidate] {
+			seen[candidate] = true
+			candidates = append(candidates, candidate)
+		}
+	}
+	// Expand aliases transitively: provider/claude-sonnet-4-5-YYYYMMDD
+	// must also find a synced claude-sonnet-4.5 base price.
+	for i := 0; i < len(candidates); i++ {
+		candidate := candidates[i]
+		if date := strings.LastIndex(candidate, "-20"); date > 0 && len(candidate)-date == 9 {
+			digits := true
+			for _, ch := range candidate[date+1:] {
+				if ch < '0' || ch > '9' {
+					digits = false
+					break
+				}
+			}
+			if digits {
+				add(candidate[:date])
+			}
+		}
+		add(strings.ReplaceAll(candidate, "-4-5", "-4.5"))
+		add(strings.ReplaceAll(candidate, "-4.5", "-4-5"))
+	}
+	return candidates
 }
 
 func modelLookupCandidates(model string) []string {
@@ -287,30 +295,33 @@ func modelLookupCandidates(model string) []string {
 
 // fallbackForModel 对齐 sub2api getFallbackPricing 中与网关相关的关键分支。
 // 调用方须已持有 c.mu 读锁（或单线程初始化后只读）。
-func (c *PricingCatalog) fallbackForModel(model string) ModelPricing {
+func (c *PricingCatalog) fallbackForModel(model string) (ModelPricing, bool) {
 	modelLower := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(modelLower, "/"); i >= 0 {
+		modelLower = modelLower[i+1:]
+	}
 	switch modelLower {
 	case "grok", "grok-latest", "grok-4.5", "grok-4.5-latest", "grok-build-latest":
-		return c.fallbacks["grok-4.5"]
+		return c.priceOrFallback("grok-4.5")
 	case "grok-4.3",
 		"grok-4.20-0309-reasoning",
 		"grok-4.20-0309-non-reasoning",
 		"grok-4.20-multi-agent-0309",
 		"grok-4.20-reasoning",
 		"grok-4.20-non-reasoning":
-		return c.fallbacks["grok-4.3"]
+		return c.priceOrFallback("grok-4.3")
 	case "grok-build", "grok-build-0.1", "grok-composer", "grok-composer-2.5-fast", "composer-2.5":
-		return c.fallbacks["grok-build-0.1"]
+		return c.priceOrFallback("grok-build-0.1")
 	}
 	// 前缀宽松匹配：grok-4.5-xxx
 	if strings.HasPrefix(modelLower, "grok-4.5") {
-		return c.fallbacks["grok-4.5"]
+		return c.priceOrFallback("grok-4.5")
 	}
 	if strings.HasPrefix(modelLower, "grok-4.3") {
-		return c.fallbacks["grok-4.3"]
+		return c.priceOrFallback("grok-4.3")
 	}
 	if strings.HasPrefix(modelLower, "grok-build") {
-		return c.fallbacks["grok-build-0.1"]
+		return c.priceOrFallback("grok-build-0.1")
 	}
 
 	// DeepSeek 家族：上游常带 deepseek/ 前缀或日期/变体后缀
@@ -340,18 +351,21 @@ func (c *PricingCatalog) fallbackForModel(model string) ModelPricing {
 			return c.priceOrFallback("deepseek-chat")
 		}
 	}
-	return ModelPricing{}
+	return ModelPricing{}, false
 }
 
-// priceOrFallback 优先 defaults 表，其次 seed fallbacks。
-func (c *PricingCatalog) priceOrFallback(name string) ModelPricing {
+// priceOrFallback keeps canonical synced/manual prices ahead of family defaults.
+func (c *PricingCatalog) priceOrFallback(name string) (ModelPricing, bool) {
+	if p, ok := c.overridePrice(name); ok {
+		return p, true
+	}
 	if p, ok := c.defaults[name]; ok && p.HasTokenPrice() {
-		return p
+		return p, true
 	}
 	if p, ok := c.fallbacks[name]; ok && p.HasTokenPrice() {
-		return p
+		return p, true
 	}
-	return ModelPricing{}
+	return ModelPricing{}, false
 }
 
 // UsageTokens token 计数。
@@ -425,6 +439,7 @@ func (p ModelPricing) Cost(tokens UsageTokens, rateMultiplier, billingRateMultip
 // （原值时即源 ratio，不是强制 1）。优先用 billingRateMultiplier 作为账号计费倍率；
 // 无效时回退 rateMultiplier。只乘一次，避免「有效倍率 × 计费倍率」双重放大。
 func CalculateCost(p ModelPricing, tokens UsageTokens, rateMultiplier, billingRateMultiplier float64) CostBreakdown {
+	p = p.forTokens(tokens)
 	accountRate := billingRateMultiplier
 	if accountRate <= 0 {
 		accountRate = rateMultiplier
@@ -434,7 +449,12 @@ func CalculateCost(p ModelPricing, tokens UsageTokens, rateMultiplier, billingRa
 	}
 	in := float64(tokens.InputTokens) * p.InputPricePerToken
 	out := float64(tokens.OutputTokens) * p.OutputPricePerToken
-	cc := float64(tokens.CacheCreationTokens) * p.CacheCreationPricePerToken
+	fiveMinute, oneHour := storage.NormalizePriceCacheCreation(tokens.CacheCreationTokens, tokens.CacheCreation5mTokens, tokens.CacheCreation1hTokens)
+	oneHourPrice := p.CacheCreation1hPricePerToken
+	if !p.CacheCreation1hPriceExplicit && oneHourPrice <= 0 {
+		oneHourPrice = p.CacheCreationPricePerToken
+	}
+	cc := float64(fiveMinute)*p.CacheCreationPricePerToken + float64(oneHour)*oneHourPrice
 	cr := float64(tokens.CacheReadTokens) * p.CacheReadPricePerToken
 	// image_output 暂用 output 单价
 	img := float64(tokens.ImageOutputTokens) * p.OutputPricePerToken

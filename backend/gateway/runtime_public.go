@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,9 +99,6 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 			var models []string
 			if target.Provider != nil {
 				models, err = rt.fetchProviderModels(c.Request.Context(), target.Provider, target.APIKey, rt.resolveAdminUserAgent(group, &route))
-				if err == nil {
-					models, err = FilterProviderModels(target.Provider, models)
-				}
 			} else {
 				ch := target.Channel
 				if ch == nil {
@@ -119,25 +117,21 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 			if err != nil {
 				continue
 			}
+			// Keep the finite upstream catalog as potential client IDs, but only
+			// admit candidates whose final mapped target passes both policies.
+			knownModels := models
+			if target.Provider != nil {
+				models, err = FilterProviderModels(target.Provider, models)
+				if err != nil {
+					continue
+				}
+			}
 			models, err = FilterRouteModels(&route, models)
 			if err != nil {
 				continue
 			}
 			routeMapping := ParseModelMapping(route.ModelMappingJSON)
-			for _, m := range models {
-				id := m
-				for src, dst := range routeMapping {
-					if dst == m && src != "*" {
-						id = src
-						break
-					}
-				}
-				for src, dst := range groupMapping {
-					if dst == m && src != "*" {
-						id = src
-						break
-					}
-				}
+			for _, id := range publicRouteModelIDs(knownModels, models, routeMapping, groupMapping) {
 				add(id)
 			}
 		}
@@ -155,6 +149,58 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 	rt.modelsCache[group.ID] = modelsCacheEntry{at: time.Now(), body: payload}
 	rt.modelsCacheMu.Unlock()
 	c.Data(http.StatusOK, "application/json", payload)
+}
+
+// publicRouteModelIDs exposes all finite, callable aliases for one route.
+// Reverse-map lookup loses aliases and disagrees with route -> group chaining
+// when an exact mapping overrides a wildcard or another layer. Resolve each
+// known client candidate in the forward direction instead, exactly like a
+// generation request. allowedModels contains only real upstream catalog IDs
+// that survived the provider and route policies; aliases from another route
+// must never be combined with this route's catalog.
+func publicRouteModelIDs(knownModels, allowedModels []string, routeMapping, groupMapping ModelMap) []string {
+	allowed := make(map[string]struct{}, len(allowedModels))
+	for _, model := range allowedModels {
+		if model = strings.TrimSpace(model); model != "" {
+			allowed[model] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(knownModels)+len(routeMapping)+len(groupMapping))
+	if len(allowed) == 0 {
+		return result
+	}
+	seen := make(map[string]struct{})
+	add := func(requested string) {
+		requested = strings.TrimSpace(requested)
+		if requested == "" || requested == "*" {
+			return
+		}
+		if _, exists := seen[requested]; exists {
+			return
+		}
+		seen[requested] = struct{}{}
+		upstream, _ := ResolveModel(requested, routeMapping, groupMapping)
+		if _, exists := allowed[upstream]; exists {
+			result = append(result, requested)
+		}
+	}
+	for _, model := range knownModels {
+		add(model)
+	}
+	// Exact configured aliases are enumerable; a wildcard is a resolver rule,
+	// not a catalog entry or permission to invent an unbounded model list.
+	aliases := make([]string, 0, len(routeMapping)+len(groupMapping))
+	for alias := range routeMapping {
+		aliases = append(aliases, alias)
+	}
+	for alias := range groupMapping {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		add(alias)
+	}
+	return result
 }
 
 // fetchUpstreamModels 拉取上游 /v1/models。

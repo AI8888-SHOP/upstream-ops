@@ -47,7 +47,7 @@ func TestGatewayRouteModelPolicyAPI(t *testing.T) {
 	svc.SetProviders(providers)
 	r := gin.New()
 	registerGatewayAdmin(r.Group("/api"), &Deps{DB: db, Gateway: svc})
-	input := map[string]any{"source_kind": "provider", "gateway_provider_id": provider.ID, "enabled": true, "model_policy": "allowlist", "allowed_models_json": `[" model-b ","model-b"]`}
+	input := map[string]any{"source_kind": "provider", "gateway_provider_id": provider.ID, "enabled": true, "model_policy": "allowlist", "allowed_models_json": `[" model-b ","model-b"]`, "model_mapping": `{"client-model":"model-b"}`}
 	save := func() *httptest.ResponseRecorder {
 		t.Helper()
 		body, err := json.Marshal(map[string]any{"routes": []any{input}})
@@ -71,7 +71,7 @@ func TestGatewayRouteModelPolicyAPI(t *testing.T) {
 		t.Fatalf("decode routes: %v body=%s", err, w.Body.String())
 	}
 	route := list.Items[0]
-	if route.ModelPolicy != "allowlist" || route.AllowedModelsJSON != `["model-b"]` {
+	if route.ModelPolicy != "allowlist" || route.AllowedModelsJSON != `["model-b"]` || route.ModelMappingJSON != `{"client-model":"model-b"}` {
 		t.Fatalf("round-trip policy=%+v", route)
 	}
 	preview := httptest.NewRecorder()
@@ -87,11 +87,12 @@ func TestGatewayRouteModelPolicyAPI(t *testing.T) {
 	}
 	input["allowed_models_json"] = `[]`
 	input["model_policy"] = "all"
+	input["model_mapping"] = ""
 	if w := save(); w.Code != http.StatusOK {
 		t.Fatalf("restore all failed: %d %s", w.Code, w.Body.String())
 	}
 	persisted, err := routes.FindByID(route.ID)
-	if err != nil || persisted.ModelPolicy != "all" || persisted.AllowedModelsJSON != `[]` {
+	if err != nil || persisted.ModelPolicy != "all" || persisted.AllowedModelsJSON != `[]` || persisted.ModelMappingJSON != "" {
 		t.Fatalf("restore not persisted: %+v err=%v", persisted, err)
 	}
 }

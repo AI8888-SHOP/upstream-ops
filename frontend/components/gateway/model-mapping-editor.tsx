@@ -32,10 +32,12 @@ export function ModelMappingEditor({
   rows,
   onChange,
   modelSuggestions = [],
+  datalistID = "gw-model-suggestions",
 }: {
   rows: MappingRow[]
   onChange: (rows: MappingRow[]) => void
   modelSuggestions?: string[]
+  datalistID?: string
 }) {
   return (
     <div className="space-y-3">
@@ -60,7 +62,7 @@ export function ModelMappingEditor({
           {rows.map((row, i) => (
             <div key={i} className="flex items-center gap-2">
               <Input
-                list="gw-model-suggestions"
+                list={datalistID}
                 placeholder="客户端模型"
                 value={row.from}
                 onChange={(e) => {
@@ -71,7 +73,7 @@ export function ModelMappingEditor({
               />
               <span className="text-muted-foreground shrink-0">→</span>
               <Input
-                list="gw-model-suggestions"
+                list={datalistID}
                 placeholder="上游模型"
                 value={row.to}
                 onChange={(e) => {
@@ -93,7 +95,7 @@ export function ModelMappingEditor({
         </div>
       )}
       {modelSuggestions.length > 0 && (
-        <datalist id="gw-model-suggestions">
+        <datalist id={datalistID}>
           {modelSuggestions.map((m) => (
             <option key={m} value={m} />
           ))}

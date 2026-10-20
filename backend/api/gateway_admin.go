@@ -151,6 +151,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.GET("/usage/models", func(c *gin.Context) { listGatewayUsageModels(c, d) })
 		gp.GET("/usage/source-groups", func(c *gin.Context) { listGatewayUsageSourceOptions(c, d) })
 		gp.GET("/usage/timeline", func(c *gin.Context) { timelineGatewayUsage(c, d) })
+		gp.GET("/usage/daily-report", func(c *gin.Context) { dailyReportGatewayUsage(c, d) })
 		gp.POST("/usage/cleanup", func(c *gin.Context) { cleanupGatewayUsage(c, d) })
 		gp.GET("/cache-health", func(c *gin.Context) { listGatewayCacheHealth(c, d) })
 		gp.POST("/cache-health/clear", func(c *gin.Context) { clearGatewayCacheHealth(c, d) })
@@ -158,6 +159,9 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		// prices
 		gp.GET("/prices", func(c *gin.Context) { listGatewayPrices(c, d) })
 		gp.GET("/prices/defaults", func(c *gin.Context) { listGatewayDefaultPrices(c, d) })
+		gp.POST("/prices/sync", func(c *gin.Context) { syncGatewayPrices(c, d) })
+		gp.GET("/prices/repricing", func(c *gin.Context) { gatewayPriceRepricingStatus(c, d) })
+		gp.POST("/prices/repricing", func(c *gin.Context) { restartGatewayPriceRepricing(c, d) })
 		gp.PUT("/prices", func(c *gin.Context) { upsertGatewayPrice(c, d) })
 		gp.DELETE("/prices/:id", func(c *gin.Context) { deleteGatewayPrice(c, d) })
 	}
@@ -1505,15 +1509,23 @@ func upsertGatewayPrice(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if strings.TrimSpace(item.ModelName) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "model_name is required"})
+	if err := storage.ValidateModelPrice(&item); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := d.ModelPrices.Upsert(&item); err != nil {
+	if _, _, err := d.ModelPrices.ApplyWithRepricing(c.Request.Context(), []storage.ModelPriceOverride{item}, 0, false); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, item)
+	if d.Gateway != nil {
+		d.Gateway.WakePriceRepricing()
+	}
+	saved, err := d.ModelPrices.FindByModel(item.ModelName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, saved)
 }
 
 func deleteGatewayPrice(c *gin.Context, d *Deps) {
@@ -1522,9 +1534,12 @@ func deleteGatewayPrice(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	if err := d.ModelPrices.Delete(id); err != nil {
+	if _, _, err := d.ModelPrices.ApplyWithRepricing(c.Request.Context(), nil, id, false); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if d.Gateway != nil {
+		d.Gateway.WakePriceRepricing()
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

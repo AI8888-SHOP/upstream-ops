@@ -253,6 +253,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&GatewayRequestFinalization{},
 		&GatewayWinnerSettlement{},
 		&ModelPriceOverride{},
+		&ModelPriceRepricingJob{},
 	); err != nil {
 		return err
 	}

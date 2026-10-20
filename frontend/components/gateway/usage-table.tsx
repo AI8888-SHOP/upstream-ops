@@ -48,6 +48,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { fullDateTime, formatDurationMS, formatTokens } from "@/lib/format"
+import { usageDisplayedCost, usageOutputTPS } from "@/lib/usage-metrics"
 import { apiFetch } from "@/lib/api"
 import type { GatewayUsageLog } from "@/lib/api-types"
 import { cn } from "@/lib/utils"
@@ -1308,7 +1309,7 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
         ? "渠道级 virtual read"
         : "并发兜底 virtual read"
   const billed = u.billed_cost ?? 0
-  const displayed = u.winner && (billed > 0 || virtualCacheRead > 0) ? billed : actual
+  const displayed = usageDisplayedCost(u)
   const virtualCacheSubsidy =
     u.winner && virtualCacheRead > 0 ? Math.max(0, actual - billed) : 0
   const extra = Math.max(0, (u.estimated_extra_cost || 0) + virtualCacheSubsidy)
@@ -1317,7 +1318,7 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
       <div className="flex items-center gap-1.5">
         <span
           className="font-medium tabular-nums text-green-600 dark:text-green-400"
-          title={virtualCacheRead > 0 ? `${virtualCacheLabel} 后用户实收` : "实收 = 标准费用 × 账号计费倍率"}
+          title={u.winner ? "用户已结算实收；历史价格重算不会重复扣费或改写此金额" : "本次上游尝试参考成本，不代表用户实收"}
         >
           {money6(displayed)}
         </span>
@@ -1331,7 +1332,7 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
             </button>
           </TooltipTrigger>
           <TooltipContent side="left" className="max-w-xs space-y-1 p-3 text-xs">
-            <div className="mb-1 font-semibold">费用明细</div>
+            <div className="mb-1 font-semibold">费用明细（参考价 / 已结算）</div>
             {u.input_cost > 0 && (
               <div className="flex justify-between gap-6">
                 <span className="text-muted-foreground">输入</span>
@@ -1379,16 +1380,16 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
               </span>
             </div>
             <div className="flex justify-between gap-6">
-              <span className="text-muted-foreground">标准费用</span>
+              <span className="text-muted-foreground">标准参考费用</span>
               <span>{money6(standard)}</span>
             </div>
             <div className="flex justify-between gap-6 font-semibold">
-              <span className="text-muted-foreground">实收</span>
+              <span className="text-muted-foreground">{u.winner ? "已结算实收" : "上游参考成本"}</span>
               <span className="text-green-400">{money6(displayed)}</span>
             </div>
-            {virtualCacheRead > 0 && (
+            {u.winner && (
               <div className="flex justify-between gap-6">
-                <span className="text-muted-foreground">upstream actual</span>
+                <span className="text-muted-foreground">上游参考成本</span>
                 <span>{money6(actual)}</span>
               </div>
             )}
@@ -1401,6 +1402,11 @@ function CostCell({ u }: { u: GatewayUsageLog }) {
           </TooltipContent>
         </Tooltip>
       </div>
+      {u.winner ? (
+        <div className="mt-0.5 text-[11px] tabular-nums text-muted-foreground" title="按价格覆盖重算的上游参考成本；不等于上游站点实际扣账">
+          上游 {money6(actual)}
+        </div>
+      ) : null}
       {extra > 0 ? (
         <div className="mt-0.5 text-[11px] tabular-nums text-amber-600 dark:text-amber-400" title="loser/rejected attempt 成本 + 虚拟缓存补贴，不计入网关 Key 配额">
           额外 {money6(extra)}
@@ -1454,6 +1460,8 @@ function SchedulingDecision({ value }: { value?: string }) {
 }
 
 function LatencyCell({ u }: { u: GatewayUsageLog }) {
+  // Use the same attempt for output and timing; request timing includes retries.
+  const tps = usageOutputTPS(u)
   const hasRequestTiming = u.request_duration_ms != null
   const firstToken = hasRequestTiming ? u.request_first_token_ms : u.first_token_ms
   const duration = u.request_duration_ms ?? u.duration_ms
@@ -1490,6 +1498,17 @@ function LatencyCell({ u }: { u: GatewayUsageLog }) {
             <span className="tabular-nums">{formatDurationMS(u.first_token_ms)}</span>
           </>
         )}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="cursor-help text-muted-foreground underline decoration-dotted underline-offset-2">TPS ≈</span>
+          </TooltipTrigger>
+          <TooltipContent side="left" className="max-w-xs text-xs">
+            本次上游尝试输出 Token ÷（尝试总耗时 − 尝试首字耗时），单位 Token/s。
+            不混入之前的重试等待；包含上游报告在输出中的推理 Token，时间差可能包含本次准备/处理开销，属于估算。
+            同步、已识别的图像/视频、缺少首字或无有效生成耗时的记录显示 —。
+          </TooltipContent>
+        </Tooltip>
+        <span className="font-medium tabular-nums">{tps == null ? "—" : `${tps.toFixed(2)} tok/s`}</span>
         <SchedulingDecision value={u.scheduling_decision} />
       </div>
     </div>
@@ -1641,51 +1660,9 @@ export function GatewayUsageTable({
             <TableHeader>
               <TableRow>
                 <TableHead className="w-10 whitespace-nowrap" />
-                {show("status") && (
-                  <TableHead className="whitespace-nowrap">状态</TableHead>
-                )}
-                {show("key") && (
-                  <TableHead className="whitespace-nowrap">API 密钥</TableHead>
-                )}
-                {show("account") && (
-                  <TableHead className="whitespace-nowrap">账户</TableHead>
-                )}
-                {show("model") && (
-                  <TableHead className="whitespace-nowrap">模型</TableHead>
-                )}
-                {show("reasoning") && (
-                  <TableHead className="whitespace-nowrap">推理强度</TableHead>
-                )}
-                {show("endpoint") && (
-                  <TableHead className="whitespace-nowrap">端点</TableHead>
-                )}
-                {show("group") && (
-                  <TableHead className="whitespace-nowrap">分组</TableHead>
-                )}
-                {show("type") && (
-                  <TableHead className="whitespace-nowrap">类型</TableHead>
-                )}
-                {show("billing") && (
-                  <TableHead className="whitespace-nowrap">计费模式</TableHead>
-                )}
-                {show("token") && (
-                  <TableHead className="whitespace-nowrap">Token</TableHead>
-                )}
-                {show("cost") && (
-                  <TableHead className="whitespace-nowrap">费用</TableHead>
-                )}
-                {show("latency") && (
-                  <TableHead className="whitespace-nowrap">延迟</TableHead>
-                )}
-                {show("userAgent") && (
-                  <TableHead className="whitespace-nowrap">User-Agent</TableHead>
-                )}
-                {show("ip") && (
-                  <TableHead className="whitespace-nowrap">IP</TableHead>
-                )}
-                {show("time") && (
-                  <TableHead className="whitespace-nowrap">时间</TableHead>
-                )}
+                {USAGE_COLUMNS.filter((col) => show(col.id)).map((col) => (
+                  <TableHead key={col.id} scope="col" className="whitespace-nowrap">{col.label}</TableHead>
+                ))}
               </TableRow>
             </TableHeader>
             <TableBody>

@@ -24,6 +24,10 @@
 
 ## 更新
 
+管理端现在支持一键从 sub2api 官方仓库同步价格，并自动重算历史参考成本。
+同步策略、上下文档位、5m/1h 缓存写入和不可变结算边界见
+[模型价格同步与历史重算](../../../docs/model-pricing.md)。下列方式仅用于更新发行包的内置兜底表。
+
 ```bash
 # 从参考项目同步（精选子集，DeepSeek 较少）
 cp tmp/sub2api/backend/resources/model-pricing/model_prices_and_context_window.json \

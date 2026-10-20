@@ -1570,8 +1570,7 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 		rt.setGatewayRequestIDHeaders(req.c, req.requestID)
 		req.c.Writer.Header().Del("Content-Length")
 		req.c.Header("Content-Type", "application/json")
-		req.c.Status(lastStatus)
-		_, _ = req.c.Writer.Write(body)
+		rt.writeGatewayErrorBody(req.c, lastStatus, body)
 		return
 	}
 	message := "all upstream routes failed"
