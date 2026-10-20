@@ -750,7 +750,7 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 	}
 	streamValidator := req.validator.NewStreamValidator(string(req.kind), req.requestedModel)
 	gate := newStreamPrefixGateWriter(req.c.Writer, streamValidator)
-	clone := req.c.Copy()
+	clone := copyForwardContext(req.c)
 	clone.Writer = gate
 	clone.Request = req.c.Request.Clone(req.c.Request.Context())
 	upstreamBase := context.WithoutCancel(req.c.Request.Context())

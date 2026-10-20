@@ -144,7 +144,11 @@ func (r *ModelPriceOverrides) ApplyWithRepricing(ctx context.Context, items []Mo
 				items[i].Source = "sub2api"
 			}
 			if len(items) > 0 {
-				result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "model_name"}}, DoUpdates: clause.AssignmentColumns([]string{"input_price_per_token", "output_price_per_token", "cache_creation_price_per_token", "cache_creation_1h_price_per_token", "cache_read_price_per_token", "context_tiers_json", "source", "source_url", "enabled", "updated_at"}), Where: clause.Where{Exprs: []clause.Expression{clause.Eq{Column: clause.Column{Table: "model_price_overrides", Name: "source"}, Value: "sub2api"}}}}).CreateInBatches(items, 100)
+				conflict, err := modelPriceSyncConflict(tx)
+				if err != nil {
+					return err
+				}
+				result := tx.Clauses(conflict).CreateInBatches(items, 100)
 				if result.Error != nil {
 					return result.Error
 				}
@@ -197,6 +201,32 @@ func (r *ModelPriceOverrides) ApplyWithRepricing(ctx context.Context, items []Mo
 	return changed, &job, err
 }
 
+// AssignmentColumns uses literal database identifiers, unlike Select. Resolve
+// them from the schema instead of JSON names: GORM keeps the numeral in
+// CacheCreation1hPricePerToken attached to creation (cache_creation1h_...).
+func modelPriceSyncConflict(db *gorm.DB) (clause.OnConflict, error) {
+	stmt := &gorm.Statement{DB: db}
+	if err := stmt.Parse(&ModelPriceOverride{}); err != nil {
+		return clause.OnConflict{}, err
+	}
+	fields := []string{"ModelName", "InputPricePerToken", "OutputPricePerToken", "CacheCreationPricePerToken", "CacheCreation1hPricePerToken", "CacheReadPricePerToken", "ContextTiersJSON", "Source", "SourceURL", "Enabled", "UpdatedAt"}
+	columns := make([]string, len(fields))
+	for i, name := range fields {
+		field := stmt.Schema.LookUpField(name)
+		if field == nil || field.DBName == "" {
+			return clause.OnConflict{}, fmt.Errorf("missing model price database field %s", name)
+		}
+		columns[i] = field.DBName
+	}
+	return clause.OnConflict{
+		Columns:   []clause.Column{{Name: columns[0]}},
+		DoUpdates: clause.AssignmentColumns(columns[1:]),
+		Where: clause.Where{Exprs: []clause.Expression{clause.Eq{
+			Column: clause.Column{Table: stmt.Schema.Table, Name: stmt.Schema.LookUpField("Source").DBName}, Value: "sub2api",
+		}}},
+	}, nil
+}
+
 func (r *ModelPriceOverrides) RepricingStatus(ctx context.Context) (*ModelPriceRepricingJob, error) {
 	var job ModelPriceRepricingJob
 	err := r.db.WithContext(ctx).First(&job, 1).Error
@@ -231,7 +261,9 @@ func (r *ModelPriceOverrides) RepriceBatch(ctx context.Context, calculator func(
 		}
 		calculate := calculator(prices)
 		var rows []GatewayUsageLog
-		if err := tx.Select("id", "request_id", "attempt_status", "winner", "billing_mode", "upstream_model", "requested_model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cache_creation_5m_tokens", "cache_creation_1h_tokens", "image_output_tokens", "rate_multiplier", "billing_rate_multiplier").Where("id > ? AND id <= ?", job.LastID, job.UpperID).Order("id ASC").Limit(200).Find(&rows).Error; err != nil {
+		// Select resolves Go field names through the model schema; JSON names
+		// such as cache_creation_5m_tokens are not database column names.
+		if err := tx.Select("ID", "RequestID", "AttemptStatus", "Winner", "BillingMode", "UpstreamModel", "RequestedModel", "InputTokens", "OutputTokens", "CacheReadTokens", "CacheCreationTokens", "CacheCreation5mTokens", "CacheCreation1hTokens", "ImageOutputTokens", "RateMultiplier", "BillingRateMultiplier").Where("id > ? AND id <= ?", job.LastID, job.UpperID).Order("id ASC").Limit(200).Find(&rows).Error; err != nil {
 			return err
 		}
 		requestIDs := make([]string, 0, len(rows))

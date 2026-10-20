@@ -6,7 +6,58 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
+
+func TestPriceRepricingCacheTTLFieldMapping(t *testing.T) {
+	assertPriceRepricingCacheTTLFieldMapping(t, openTestDB(t))
+}
+
+// Run the same nonzero TTL round trip on SQLite and PostgreSQL. JSON names
+// differ from the actual GORM column names when a field contains 5m or 1h.
+func assertPriceRepricingCacheTTLFieldMapping(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	ctx := context.Background()
+	repo := NewModelPriceOverrides(db)
+	row := GatewayUsageLog{RequestID: "price-cache-ttl", RequestedModel: "cache-ttl", InputTokens: 11, OutputTokens: 13, CacheReadTokens: 19, CacheCreationTokens: 46, CacheCreation5mTokens: 17, CacheCreation1hTokens: 29, ActualCost: 1, BilledCost: 0.75, CreatedAt: time.Now()}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, hourly := range []float64{2, 3} {
+		price := ModelPriceOverride{ModelName: row.RequestedModel, InputPricePerToken: 1, CacheCreationPricePerToken: 1, CacheCreation1hPricePerToken: &hourly, Enabled: true}
+		changed, _, err := repo.ApplyWithRepricing(ctx, []ModelPriceOverride{price}, 0, true)
+		if err != nil || changed != 1 {
+			t.Fatalf("sync hourly=%g changed=%d err=%v", hourly, changed, err)
+		}
+		saved, err := repo.FindByModel(row.RequestedModel)
+		if err != nil || saved == nil || saved.CacheCreation1hPricePerToken == nil || *saved.CacheCreation1hPricePerToken != hourly {
+			t.Fatalf("saved hourly=%+v err=%v", saved, err)
+		}
+	}
+	seen := 0
+	done, err := repo.RepriceBatch(ctx, func(prices []ModelPriceOverride) func(GatewayUsageLog) map[string]any {
+		return func(got GatewayUsageLog) map[string]any {
+			seen++
+			if got.ID != row.ID || got.InputTokens != 11 || got.OutputTokens != 13 || got.CacheReadTokens != 19 || got.CacheCreationTokens != 46 || got.CacheCreation5mTokens != 17 || got.CacheCreation1hTokens != 29 {
+				t.Errorf("repricing lost selected usage fields: %+v", got)
+			}
+			if len(prices) != 1 || prices[0].CacheCreation1hPricePerToken == nil || *prices[0].CacheCreation1hPricePerToken != 3 {
+				t.Errorf("repricing lost hourly price: %+v", prices)
+				return nil
+			}
+			cost := float64(got.CacheCreation5mTokens)*prices[0].CacheCreationPricePerToken + float64(got.CacheCreation1hTokens)*(*prices[0].CacheCreation1hPricePerToken)
+			return map[string]any{"cache_creation_cost": cost, "actual_cost": cost}
+		}
+	})
+	if err != nil || !done || seen != 1 {
+		t.Fatalf("repricing done=%v seen=%d err=%v", done, seen, err)
+	}
+	var saved GatewayUsageLog
+	if err := db.First(&saved, row.ID).Error; err != nil || saved.CacheCreationCost != 104 || saved.ActualCost != 104 || saved.CacheCreation5mTokens != 17 || saved.CacheCreation1hTokens != 29 || saved.BilledCost != 0.75 {
+		t.Fatalf("repriced TTL row=%+v err=%v", saved, err)
+	}
+}
 
 func TestPriceValidationAndCacheNormalization(t *testing.T) {
 	for _, tc := range []struct{ total, five, hour, wantFive, wantHour int }{

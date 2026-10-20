@@ -30,6 +30,61 @@ func preconnectTestWriter(t *testing.T, kind protocolKind) (*gin.Context, *httpt
 	return c, rec, w
 }
 
+func TestStreamPreconnectContextCopyDoesNotRaceHeartbeat(t *testing.T) {
+	c, _, w := preconnectTestWriter(t, protocol.KindOpenAIResponses)
+	c.Set("forward-test", "original")
+	c.Params = gin.Params{{Key: "model", Value: "original"}}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 500; i++ {
+			if !w.keepalive() {
+				t.Error("heartbeat stopped while context copies were being created")
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 500; i++ {
+			clone := copyForwardContext(c)
+			if clone.Request != c.Request || streamPreconnectFor(clone) != w {
+				t.Error("attempt copy lost the request context")
+				return
+			}
+			clone.Set("forward-test", "copy")
+			clone.Params[0].Value = "copy"
+		}
+	}()
+	close(start)
+	wg.Wait()
+	w.finish()
+	if value, _ := c.Get("forward-test"); value != "original" || c.Params[0].Value != "original" {
+		t.Fatal("attempt copy modified the original context metadata")
+	}
+	if streamWriterActuallyCommitted(c) {
+		t.Fatal("copying contexts committed model output")
+	}
+}
+
+func TestCopyForwardContextWithoutPreconnect(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set("forward-test", "original")
+	clone := copyForwardContext(c)
+	clone.Set("forward-test", "copy")
+	if clone.Request != c.Request || streamPreconnectFor(clone) != nil {
+		t.Fatal("disabled preconnect changed request copying")
+	}
+	if value, _ := c.Get("forward-test"); value != "original" {
+		t.Fatal("attempt copy modified the original context metadata")
+	}
+}
+
 func TestStreamPreconnectCommentDoesNotCommitModelOrTTFT(t *testing.T) {
 	c, rec, w := preconnectTestWriter(t, protocol.KindOpenAIResponses)
 	state := &forwardRequestTiming{started: time.Now().Add(-100 * time.Millisecond)}

@@ -68,6 +68,10 @@ func openPriceRepricingPostgres(t *testing.T) *gorm.DB {
 }
 
 func TestPriceRepricingPostgres(t *testing.T) {
+	t.Run("cache_ttl_field_mapping", func(t *testing.T) {
+		assertPriceRepricingCacheTTLFieldMapping(t, openPriceRepricingPostgres(t))
+	})
+
 	t.Run("two_workers_share_committed_cursor", func(t *testing.T) {
 		db := openPriceRepricingPostgres(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

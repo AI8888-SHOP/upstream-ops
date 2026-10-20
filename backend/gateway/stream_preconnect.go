@@ -49,6 +49,17 @@ func streamPreconnectFor(c *gin.Context) *streamPreconnectWriter {
 	return w
 }
 
+// Gin's Copy reads its private writermem by value even when c.Writer has been
+// replaced by a wrapper. Synchronize that snapshot with preconnect writes to
+// the same raw writer; otherwise copying an attempt races its size/status.
+func copyForwardContext(c *gin.Context) *gin.Context {
+	if w := streamPreconnectFor(c); w != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+	}
+	return c.Copy()
+}
+
 func streamPreconnectDelay(minMS, maxMS int) time.Duration {
 	if maxMS <= minMS {
 		return time.Duration(minMS) * time.Millisecond

@@ -46,7 +46,7 @@ export function PricesPanel({
   const [progressUnavailable, setProgressUnavailable] = useState(false)
   useEffect(() => {
     const controller = new AbortController()
-    let timer: ReturnType<typeof window.setTimeout> | undefined
+    let timer: number | undefined
     const load = async () => {
       let delay = 10000
       try {
