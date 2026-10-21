@@ -946,7 +946,21 @@ func coordinatedAttemptSuppressesSameRouteRetries(attempt *coordinatedForwardAtt
 		return true
 	}
 	if validation.IsRejected() {
-		return coordinatedRejectedUpstreamFailure(attempt)
+		if !coordinatedRejectedUpstreamFailure(attempt) {
+			return false
+		}
+		// Matching a rule must not turn a retryable HTTP 500/502 into a
+		// deterministic failure. Prefer a fresh source when one exists (the
+		// caller handles that), but retain the configured retry ladder when
+		// this is the last source. Structured failures inside HTTP 200 streams
+		// still switch sources rather than replaying an overloaded stream.
+		if status < 400 {
+			return true
+		}
+		attempt.streamMu.Lock()
+		errInfo.UpstreamBody = string(attempt.UpstreamBody)
+		attempt.streamMu.Unlock()
+		return !isSameRouteRetryableUpstreamFailure(status, errInfo)
 	}
 	failed := attemptErr != nil || terminal || status < 200 || status >= 300
 	return failed && !isSameRouteRetryableUpstreamFailure(status, errInfo)

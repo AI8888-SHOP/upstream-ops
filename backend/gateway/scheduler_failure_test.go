@@ -24,8 +24,14 @@ func TestRejectedOverloadSkipsRetriesButContentRulesRemainLocal(t *testing.T) {
 		err      error
 		suppress bool
 	}{
+		{"transient rejected bad gateway", 502, `{"error":{"type":"upstream_error","message":"upstream failed"}}`, nil, false},
+		{"transient rejected server error", 500, `{"error":{"type":"server_error","message":"internal error"}}`, nil, false},
+		{"transient rejected origin unavailable", 521, `Web server is down`, nil, false},
+		{"bad gateway with invalid credential", 502, `{"error":{"code":"invalid_api_key"}}`, nil, true},
+		{"bad gateway with unavailable model", 502, `{"error":{"code":"model_not_found"}}`, nil, true},
 		{"http overload", 503, `{"error":{"message":"busy"}}`, nil, true},
 		{"http rate limit", 429, `{"error":{"message":"rate limit"}}`, nil, true},
+		{"http gateway timeout", 504, `{"error":{"message":"timeout"}}`, nil, true},
 		{"stream error", 200, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\"}}}\n\n", nil, true},
 		{"ordinary rejected content", 200, "data: {\"choices\":[{\"delta\":{\"content\":\"Our servers are overloaded\"}}]}\n\n", nil, false},
 		{"null error", 200, `{"error":null}`, nil, false},
