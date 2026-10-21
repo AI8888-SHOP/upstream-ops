@@ -707,6 +707,10 @@ finishError:
 		rt.writeGatewayError(c, kind, http.StatusBadGateway, "attempt_limit", lastErr.Error())
 		return
 	}
+	if errors.Is(lastErr, errFirstTokenTimeout) {
+		rt.writeGatewayError(c, kind, http.StatusGatewayTimeout, "request_timeout", errFirstTokenTimeout.Error())
+		return
+	}
 	if lastStatus > 0 || routesTried > 0 {
 		// Preserve each upstream's full response in usage diagnostics, but never
 		// expose a failed source's raw 4xx/5xx/HTTP-200 error packet downstream

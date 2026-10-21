@@ -353,7 +353,7 @@ func hasStructuredUpstreamError(body []byte) bool {
 			if strings.Contains(code, "invalid_request") || strings.Contains(code, "context_length") || strings.Contains(code, "content_filter") {
 				continue
 			}
-			for _, marker := range []string{"overloaded", "rate_limit", "server_error", "internal_error", "internal_server_error", "service_unavailable", "model_not_found", "authentication_error", "permission_error"} {
+			for _, marker := range []string{"overloaded", "rate_limit", "server_error", "internal_error", "internal_server_error", "service_unavailable", "upstream_error", "model_not_found", "authentication_error", "permission_error"} {
 				if strings.Contains(code, marker) {
 					return true
 				}

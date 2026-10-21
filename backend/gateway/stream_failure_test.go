@@ -116,7 +116,7 @@ func TestStreamFailureBeforeAndAfterOutputAcrossProtocols(t *testing.T) {
 						}
 						return
 					}
-					if !errors.Is(result.StreamErr, errUpstreamStreamFailure) || !strings.Contains(recorder.Body.String(), "upstream busy") || !strings.Contains(recorder.Body.String(), "visible answer") {
+					if !errors.Is(result.StreamErr, errUpstreamStreamFailure) || strings.Contains(recorder.Body.String(), "upstream busy") || !strings.Contains(recorder.Body.String(), "upstream request failed") || !strings.Contains(recorder.Body.String(), "visible answer") {
 						t.Fatalf("result=%+v body=%s", result, recorder.Body.String())
 					}
 					if strings.Contains(recorder.Body.String(), "response.completed") || strings.Contains(recorder.Body.String(), "message_stop") {

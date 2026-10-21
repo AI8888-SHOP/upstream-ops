@@ -534,8 +534,8 @@ func TestWriteCoordinatedFailureDoesNotReplayRejectedResponse(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), `"content":"blocked"`) {
 		t.Fatalf("rejected response was replayed: %s", recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "all upstream routes failed") {
-		t.Fatalf("gateway did not return a sanitized final failure: %s", recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), "response matched rejection rule") {
+		t.Fatalf("gateway did not return a sanitized rule failure: %s", recorder.Body.String())
 	}
 }
 
@@ -569,8 +569,8 @@ func TestWriteCoordinatedFailureDoesNotReplayPostCommitMatch(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), `"content":"blocked"`) {
 		t.Fatalf("post-commit rejected response was replayed: %s", recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "all upstream routes failed") {
-		t.Fatalf("gateway did not return a sanitized final failure: %s", recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), "response matched rejection rule") {
+		t.Fatalf("gateway did not return a sanitized rule failure: %s", recorder.Body.String())
 	}
 }
 

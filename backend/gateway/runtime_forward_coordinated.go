@@ -1139,7 +1139,8 @@ func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, att
 	// Rule summaries omit the upstream payload. Reconstruct it before deciding
 	// cooldown scope so an upstream first-token budget error obeys the group's
 	// timeout cooldown switch even when a regex rejected that response.
-	if strings.TrimSpace(errInfo.Summary) == "" || (validation.IsRejected() && !coordinatedPolicyRejection(validation)) {
+	if strings.TrimSpace(errInfo.Summary) == "" ||
+		(validation.IsRejected() && validation.Target == "error_message") {
 		attempt.streamMu.Lock()
 		errInfo = rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), attemptErr, status, attempt.Headers, attempt.UpstreamBody, attempt.UpstreamURL, req.c.Request.Method)
 		attempt.streamMu.Unlock()
@@ -1752,7 +1753,10 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 		rt.writeGatewayError(req.c, req.kind, http.StatusBadGateway, "attempt_limit", "upstream attempt limit reached")
 		return
 	}
-	var finalValidation validationResult
+	var (
+		finalErr        error
+		finalValidation validationResult
+	)
 	for i := len(result.Attempts) - 1; i >= 0; i-- {
 		attempt := result.Attempts[i].Value
 		if attempt == nil || attempt.Skipped {
@@ -1760,12 +1764,18 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 		}
 		if req.stream {
 			attempt.streamMu.Lock()
+			finalErr = attempt.Err
 			finalValidation = attempt.Validation
 			attempt.streamMu.Unlock()
 		} else {
+			finalErr = attempt.Err
 			finalValidation = attempt.Validation
 		}
 		break
+	}
+	if errors.Is(finalErr, errFirstTokenTimeout) {
+		rt.writeGatewayError(req.c, req.kind, http.StatusGatewayTimeout, "request_timeout", errFirstTokenTimeout.Error())
+		return
 	}
 	message := "all upstream routes failed"
 	if finalValidation.IsRejected() {

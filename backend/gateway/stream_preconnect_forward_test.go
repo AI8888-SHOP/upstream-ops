@@ -341,8 +341,8 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 						if response.StatusCode != http.StatusOK || !strings.Contains(body, "event: response.failed") || strings.Contains(body, "response.completed") {
 							t.Fatalf("all-failed response not terminal SSE: status=%d body=%s", response.StatusCode, body)
 						}
-					} else if response.StatusCode != tc.upstreamError || strings.Contains(body, ": upstream-ops keepalive") || !strings.HasPrefix(response.Header.Get("Content-Type"), "application/json") {
-						t.Fatalf("excluded request changed HTTP error: status=%d body=%s", response.StatusCode, body)
+					} else if response.StatusCode != http.StatusBadGateway || strings.Contains(body, "upstream busy") || !strings.Contains(body, "all upstream routes failed") || strings.Contains(body, ": upstream-ops keepalive") || !strings.HasPrefix(response.Header.Get("Content-Type"), "application/json") {
+						t.Fatalf("all-failed response was not a sanitized gateway error: status=%d body=%s", response.StatusCode, body)
 					}
 					if logs[1].Success || logs[1].Winner || logs[1].BilledCost != 0 || logs[1].AttemptStatus != storage.GatewayAttemptStatusError || (tc.corrupt == "" && logs[1].RequestFirstTokenMS != nil) || finalization.Delivered || finalization.BilledCost != 0 {
 						t.Fatalf("failed stream falsely settled: usage=%+v final=%+v", logs[1], finalization)
