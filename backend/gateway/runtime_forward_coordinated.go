@@ -465,8 +465,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 			_, runErr = rt.runCoordinatedNonStreamAttempt(ctx, &req, attempt, attemptTimeout)
 		}
 		suppressSameRouteRetry := coordinatedAttemptSuppressesSameRouteRetries(attempt)
-		validation, status, attemptErr, terminal := attempt.validationSnapshot()
-		failed := runErr != nil || attemptErr != nil || terminal || validation.IsRejected() || status < 200 || status >= 300
+		validation, status, _, terminal := attempt.validationSnapshot()
 		// The round-robin plan already tries fresh sources before retrying a
 		// source. Only deterministic failures permanently remove retry slots;
 		// transient failures retain their configured last-resort retries even
