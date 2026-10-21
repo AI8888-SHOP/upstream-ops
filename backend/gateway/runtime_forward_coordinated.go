@@ -924,6 +924,7 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 		rejected := attempt.Validation.IsRejected()
 		status := attempt.Status
 		attemptErr := attempt.Err
+		attemptBody := attempt.UpstreamBody
 		attempt.streamMu.Unlock()
 		if rejected {
 			cancel()
@@ -934,7 +935,9 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 			attempt.applyStreamResult(streamResult)
 			return attempt, nil
 		}
-		if attemptErr != nil || rt.isFailoverStatus(status, req.group.FailoverOn4xx) {
+		// An HTTP 200 protocol failure envelope is still a route failure; it
+		// must not be selected as a winner while another source can answer.
+		if attemptErr != nil || rt.isFailoverResponse(status, req.group.FailoverOn4xx, attemptBody) {
 			if attemptErr == nil {
 				attemptErr = fmt.Errorf("upstream status %d", status)
 				attempt.streamMu.Lock()
@@ -951,6 +954,7 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 		validation := attempt.Validation
 		status := attempt.Status
 		attemptErr := attempt.Err
+		attemptBody := attempt.UpstreamBody
 		if status >= 400 {
 			attempt.Terminal = true
 		}
@@ -958,7 +962,7 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 		if validation.IsRejected() {
 			return attempt, nil
 		}
-		if attemptErr != nil || rt.isFailoverStatus(status, req.group.FailoverOn4xx) {
+		if attemptErr != nil || rt.isFailoverResponse(status, req.group.FailoverOn4xx, attemptBody) {
 			if attemptErr == nil {
 				attemptErr = fmt.Errorf("upstream status %d", status)
 				attempt.streamMu.Lock()

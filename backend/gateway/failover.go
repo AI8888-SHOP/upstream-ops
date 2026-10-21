@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -69,6 +70,11 @@ func upstreamRouteUnavailable(body []byte, allowPlainText ...bool) bool {
 // lifecycle event, which commonly precedes the actual failure.
 func matchUpstreamErrorEnvelope(body []byte, match func(code, message string) bool) bool {
 	check := func(payload []byte) bool {
+		if code, message, ok := rootLevelFailure(payload); ok {
+			if match(strings.ToLower(code), message) {
+				return true
+			}
+		}
 		var envelope struct {
 			Error    json.RawMessage `json:"error"`
 			Response struct {
@@ -132,6 +138,9 @@ func (svc *Service) isFailoverResponse(status int, failoverOn4xx bool, body []by
 // prose, tool arguments, and arbitrary nested JSON are not considered.
 func hasExplicitUpstreamError(body []byte) bool {
 	check := func(payload []byte) bool {
+		if _, _, ok := rootLevelFailure(payload); ok {
+			return true
+		}
 		var envelope struct {
 			Type     string          `json:"type"`
 			Status   string          `json:"status"`
@@ -177,6 +186,102 @@ func hasExplicitUpstreamError(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// rootLevelFailure recognises the incompatible "error" shapes upstream panels
+// put at the JSON root:
+//
+//	{"error": {...}}                              OpenAI / Anthropic
+//	{"code": 500, "msg": "..."}                   one-api / new-api style
+//	{"code": "model_not_found", "message": "..."} sub2api style
+//	{"errors": [{"message": "..."}]}              proxy style
+//
+// A successful payload always wins: proxies sometimes mirror the HTTP status
+// into a root code while returning a normal completion, so the usual success
+// markers short-circuit the check. Only the root object is inspected, never
+// assistant prose, tool arguments, or nested provider data.
+func rootLevelFailure(payload []byte) (code, message string, ok bool) {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(payload, &root) != nil || len(root) == 0 {
+		return "", "", false
+	}
+	if _, hasError := root["error"]; !hasError {
+		if _, hasErrors := root["errors"]; !hasErrors {
+			for _, marker := range []string{"choices", "output", "candidates", "data"} {
+				if raw, present := root[marker]; present && streamErrorValuePresent(raw) {
+					return "", "", false
+				}
+			}
+		}
+	}
+	if raw, present := root["error"]; present && streamErrorValuePresent(raw) {
+		var failure struct {
+			Code    json.RawMessage `json:"code"`
+			Type    string          `json:"type"`
+			Message string          `json:"message"`
+		}
+		if json.Unmarshal(raw, &failure) != nil {
+			_ = json.Unmarshal(raw, &failure.Message)
+		}
+		var named string
+		_ = json.Unmarshal(failure.Code, &named)
+		return strings.TrimSpace(named + " " + failure.Type), strings.TrimSpace(failure.Message), true
+	}
+	if raw, present := root["errors"]; present {
+		var list []json.RawMessage
+		if json.Unmarshal(raw, &list) == nil && len(list) > 0 {
+			var first struct {
+				Code    json.RawMessage `json:"code"`
+				Message string          `json:"message"`
+			}
+			_ = json.Unmarshal(list[0], &first)
+			var named string
+			_ = json.Unmarshal(first.Code, &named)
+			return strings.TrimSpace(named), strings.TrimSpace(first.Message), true
+		}
+	}
+	codeRaw, hasCode := root["code"]
+	messageRaw, hasMessage := root["message"]
+	if !hasMessage {
+		messageRaw, hasMessage = root["msg"]
+	}
+	if !hasCode || !hasMessage {
+		return "", "", false
+	}
+	failure, named := classifyRootCode(codeRaw)
+	if !failure {
+		return "", "", false
+	}
+	_ = json.Unmarshal(messageRaw, &message)
+	return named, strings.TrimSpace(message), true
+}
+
+// classifyRootCode maps the two success conventions (0 and any 2xx, numeric or
+// numeric string) and an explicit allowlist of success words. Anything else is
+// a protocol failure code.
+func classifyRootCode(raw json.RawMessage) (bool, string) {
+	var number float64
+	if json.Unmarshal(raw, &number) == nil {
+		if number == 0 || (number >= 200 && number < 300) {
+			return false, ""
+		}
+		return true, strconv.Itoa(int(number))
+	}
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return false, ""
+	}
+	trimmed := strings.TrimSpace(text)
+	switch strings.ToLower(trimmed) {
+	case "", "0", "ok", "success", "succeed", "succeeded", "fine", "completed", "done", "true":
+		return false, ""
+	}
+	if numeric, err := strconv.Atoi(trimmed); err == nil {
+		if numeric == 0 || (numeric >= 200 && numeric < 300) {
+			return false, ""
+		}
+	}
+	return true, trimmed
 }
 
 func isExplicitFailureState(value string) bool {

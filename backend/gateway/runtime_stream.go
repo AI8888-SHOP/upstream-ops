@@ -807,12 +807,38 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 				bytes.EqualFold(payloadType, []byte("error")) ||
 				isResponsesTerminalEventBytes(payloadType)
 			if !terminal {
-				terminal = streamEnvelopeHasError(payload)
+				terminal = streamPayloadDeclaresFailure(payload)
 			}
+		}
+		if !terminal && hasPayload && trimmedData != "" && !result.Committed {
+			// The Responses classifier above never probes envelopes, yet a panel
+			// may still answer with a root-level failure frame.
+			terminal = streamPayloadDeclaresFailure([]byte(trimmedData))
 		}
 		var failure error
 		if terminal {
 			failure = upstreamStreamFailure(eventName, data)
+		}
+		if failure == nil && !result.Committed {
+			switch {
+			case hasPayload && trimmedData == "":
+				// A non-SSE body (for example HTTP 200 carrying a JSON error
+				// document) cannot be parsed as SSE. Recognise an explicit error
+				// envelope before any byte reaches the downstream writer so the
+				// request can still fail over to another source.
+				if hasExplicitUpstreamError([]byte(strings.Join(lines, "\n"))) {
+					terminal = true
+					failure = fmt.Errorf("%w: upstream returned a non-stream error envelope", errUpstreamStreamFailure)
+				}
+			case trimmedData != "" && !isJSONLikePayload(trimmedData):
+				// Panel-style upstreams sometimes stream a bare error sentence
+				// instead of a protocol frame. Only the pre-commit window is
+				// inspected, so delivered content is never reinterpreted.
+				if err := plainTextStreamFailure(trimmedData); err != nil {
+					terminal = true
+					failure = err
+				}
+			}
 		}
 		return parsedStreamEvent{
 			lines:              lines,
@@ -922,8 +948,14 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 		if event.failure != nil {
 			result.ResponseModel.Observe([]byte(data), true)
 			result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
+			// A non-SSE body carries no data field; keep the raw frame so the
+			// attempt body still proves what the upstream returned.
+			capture := data
+			if strings.TrimSpace(capture) == "" && len(event.lines) > 0 {
+				capture = strings.Join(event.lines, "\n")
+			}
 			var failureBody bytes.Buffer
-			appendSSEDataCapture(&failureBody, data, maxStreamResponseCapture)
+			appendSSEDataCapture(&failureBody, capture, maxStreamResponseCapture)
 			result.Body = failureBody.Bytes()
 			// Preserve configured error-message/raw-body rule audit without
 			// writing the failed frame into a gate that could select it to win.
