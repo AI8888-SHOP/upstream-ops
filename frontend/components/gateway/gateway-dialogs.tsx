@@ -1206,19 +1206,16 @@ export function GroupFormDialog({
             </div>
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex-1">
-                <Label>4xx 状态码顺延</Label>
+                <Label>上游 4xx 自动换源</Label>
                 <p className="text-[11px] leading-5 text-muted-foreground">
-                  网络错误、429、5xx，以及结构化错误明确报告的模型不可用、上游密钥失效或余额不足，可按顺延策略换源。
-                  开启后其它 4xx 也可顺延；参数错误可能在所有渠道重复失败，请谨慎开启。
+                  上游 400/401/403/404 等错误会在响应提交前自动尝试其它可用渠道；重试/顺延开关和次数仍决定最多尝试几条路由。
+                  所有候选都失败时才返回网关错误，避免把单一渠道的错误直接传给下游。
                 </p>
               </div>
               <Switch
                 className="shrink-0"
-                checked={groupForm.failover_on_4xx}
-                disabled={!groupForm.retry_enabled}
-                onCheckedChange={(v) =>
-                  setGroupForm({ ...groupForm, failover_on_4xx: v })
-                }
+                checked
+                disabled
               />
             </div>
             <p className="rounded-md border border-amber-200/80 bg-amber-50/80 px-2 py-1.5 text-[11px] leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">

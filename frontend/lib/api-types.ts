@@ -668,8 +668,9 @@ export interface GatewayGroup {
   /** 顺延次数（首条之后最多再换几条） */
   failover_max?: number
   /**
-   * 4xx 也走重试/顺延。默认 false：仅网络错误、429、5xx；
-   * 开启后 400/401/403/404 等 4xx 同样会重试与顺延（429 始终可顺延）。
+   * Legacy compatibility field. Upstream 4xx responses are now always
+   * eligible for route failover; retry/failover switches still bound the
+   * configured attempt budget.
    */
   failover_on_4xx?: boolean
   /** 失败冷却秒数，0=不冷却 */

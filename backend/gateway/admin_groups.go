@@ -33,10 +33,9 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.FailoverEnabled != nil {
 		failoverEnabled = *in.FailoverEnabled
 	}
-	failoverOn4xx := false
-	if in.FailoverOn4xx != nil {
-		failoverOn4xx = *in.FailoverOn4xx
-	}
+	// Upstream 4xx responses are always handled by route failover. Keep the
+	// legacy field populated as true for older clients that still render it.
+	failoverOn4xx := true
 	gwDefaults := a.gatewayRuntime()
 	retryCount, failoverMax, cooldown := 0, gwDefaults.MaxFailoverSwitches, gwDefaults.TempPauseSeconds
 	if in.RetryCount != nil {
@@ -363,9 +362,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	if in.FailoverEnabled != nil {
 		item.FailoverEnabled = *in.FailoverEnabled
 	}
-	if in.FailoverOn4xx != nil {
-		item.FailoverOn4xx = *in.FailoverOn4xx
-	}
+	// Keep the compatibility field canonical for API clients; runtime policy is
+	// always-on for upstream 4xx failover.
+	item.FailoverOn4xx = true
 	rc, fm, cd := item.RetryCount, item.FailoverMax, item.CooldownSeconds
 	if in.RetryCount != nil {
 		rc = *in.RetryCount

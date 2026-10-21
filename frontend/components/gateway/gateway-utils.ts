@@ -39,7 +39,7 @@ export type GroupFormState = {
   response_validation_retry_count: string
   failover_enabled: boolean
   failover_max: string
-  /** 4xx 状态码也走重试/顺延（默认关） */
+  /** Legacy compatibility field; upstream 4xx failover is always enabled. */
   failover_on_4xx: boolean
   cooldown_seconds: string
   first_token_timeout_sec: string
@@ -688,7 +688,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   response_validation_retry_count: "-1",
   failover_enabled: true,
   failover_max: "8",
-  failover_on_4xx: false,
+  failover_on_4xx: true,
   cooldown_seconds: "30",
   first_token_timeout_sec: "0",
   request_first_token_timeout_sec: "0",

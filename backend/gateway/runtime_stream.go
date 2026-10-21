@@ -331,6 +331,12 @@ func (rt *Runtime) forwardStreamBuffered(
 	data = append(data, rest...)
 
 	tokens := rt.parseUsageByKind(data, true, upstream)
+	if hasExplicitUpstreamError(data) {
+		return streamAttemptResult{
+			Status: status, Headers: headers, Body: data, FirstTokenMS: ft, Tokens: tokens,
+			Err: fmt.Errorf("%w: HTTP %d response contained an upstream error envelope", errUpstreamStreamFailure, status),
+		}
+	}
 	for _, payload := range sseDataPayloads(data) {
 		if err := upstreamStreamFailure("", string(payload)); err != nil {
 			return streamAttemptResult{Status: status, Headers: headers, Body: data, Tokens: tokens, Err: err}
@@ -928,13 +934,10 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 			result.Err = event.failure
 			if result.Committed {
 				result.StreamErr = event.failure
-				if clientKind == upKind {
-					if err := writeFrames([][]byte{[]byte(strings.Join(event.lines, "\n") + "\n\n")}, false); err == nil {
-						result.DownstreamComplete = !result.ClientDisconnected
-					}
-				} else {
-					sendTerminalError("upstream_error", event.failure.Error())
-				}
+				// Once real output is committed we cannot switch routes without
+				// splicing two answers. End the stream with a sanitized gateway
+				// error instead of exposing the upstream's raw error payload.
+				sendTerminalError("upstream_error", "upstream request failed")
 			} else if validationErr != nil {
 				var rejected *responseRejectedError
 				if errors.As(validationErr, &rejected) {

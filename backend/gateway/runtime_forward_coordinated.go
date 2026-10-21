@@ -1144,6 +1144,17 @@ func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, att
 		errInfo = rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), attemptErr, status, attempt.Headers, attempt.UpstreamBody, attempt.UpstreamURL, req.c.Request.Method)
 		attempt.streamMu.Unlock()
 	}
+	// Generic caller/input 4xx responses still fail over to another route, but
+	// they must not poison shared route health. Source-specific model/key/
+	// permission/quota envelopes remain eligible for cooldown.
+	if status >= http.StatusBadRequest && status < http.StatusInternalServerError &&
+		!shouldCooldownUpstreamFailure(status, errInfo, attemptErr) {
+		return
+	}
+	if status >= http.StatusOK && status < http.StatusMultipleChoices && hasExplicitUpstreamError([]byte(errInfo.UpstreamBody)) &&
+		!shouldCooldownUpstreamFailure(status, errInfo, attemptErr) {
+		return
+	}
 	firstTokenTimedOut := rt.isFirstTokenTimeout(attemptErr)
 	firstTokenBudgetFailed := isFirstTokenBudgetFailure(errInfo.Summary) ||
 		matchUpstreamErrorEnvelope([]byte(errInfo.UpstreamBody), func(_ string, message string) bool {
@@ -1737,70 +1748,34 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 		rt.writeGatewayError(req.c, req.kind, http.StatusGatewayTimeout, "request_timeout", errRequestFirstTokenBudget.Error())
 		return
 	}
-	var (
-		found          bool
-		lastStatus     int
-		lastBody       []byte
-		lastHeaders    http.Header
-		lastErr        error
-		lastTerminal   bool
-		lastValidation validationResult
-	)
+	if errors.Is(runErr, errRequestAttemptLimit) {
+		rt.writeGatewayError(req.c, req.kind, http.StatusBadGateway, "attempt_limit", "upstream attempt limit reached")
+		return
+	}
+	var finalValidation validationResult
 	for i := len(result.Attempts) - 1; i >= 0; i-- {
 		attempt := result.Attempts[i].Value
 		if attempt == nil || attempt.Skipped {
 			continue
 		}
-		found = true
 		if req.stream {
 			attempt.streamMu.Lock()
-			lastStatus = attempt.Status
-			lastBody = append([]byte(nil), attempt.ClientBody...)
-			lastHeaders = attempt.Headers.Clone()
-			lastErr = attempt.Err
-			lastTerminal = attempt.Terminal
-			lastValidation = attempt.Validation
+			finalValidation = attempt.Validation
 			attempt.streamMu.Unlock()
 		} else {
-			lastStatus = attempt.Status
-			lastBody = attempt.ClientBody
-			lastHeaders = attempt.Headers
-			lastErr = attempt.Err
-			lastTerminal = attempt.Terminal
-			lastValidation = attempt.Validation
+			finalValidation = attempt.Validation
 		}
-		if lastStatus > 0 || lastErr != nil {
-			break
-		}
-	}
-	// A response rejected by a validation rule must never be replayed merely
-	// because the attempt chain is exhausted. Doing so would bypass the rule.
-	if found && !lastValidation.IsRejected() && lastTerminal && lastErr == nil && lastStatus >= 400 && len(lastBody) == 0 {
-		// Even an empty caller-error body must keep its original HTTP status,
-		// rather than becoming a gateway 502 just because no JSON was supplied.
-		rt.copyResponseHeaders(req.c.Writer.Header(), lastHeaders)
-		req.c.Header("Content-Type", "application/json")
-		rt.writeGatewayError(req.c, req.kind, lastStatus, "api_error", fmt.Sprintf("upstream status %d", lastStatus))
-		return
-	}
-	if found && !lastValidation.IsRejected() && lastStatus > 0 && len(lastBody) > 0 {
-		body := rt.injectUpstreamOpsRequestID(lastBody, req.requestID)
-		rt.copyResponseHeaders(req.c.Writer.Header(), lastHeaders)
-		rt.setGatewayRequestIDHeaders(req.c, req.requestID)
-		req.c.Writer.Header().Del("Content-Length")
-		req.c.Header("Content-Type", "application/json")
-		rt.writeGatewayErrorBody(req.c, lastStatus, body)
-		return
+		break
 	}
 	message := "all upstream routes failed"
-	if found && lastValidation.IsRejected() {
-		message = validationErrorInfo(lastValidation).Summary
-	} else if found && lastErr != nil && !errors.Is(lastErr, errSkippedRejectedRoute) {
-		message = lastErr.Error()
-	} else if runErr != nil && !errors.Is(runErr, errHedgeExhausted) {
-		message = runErr.Error()
+	if finalValidation.IsRejected() {
+		// A configured response rule is safe to report; the rejected upstream
+		// payload itself is intentionally never replayed to the client.
+		message = validationErrorInfo(finalValidation).Summary
 	}
-	rt.writeGatewayError(req.c, req.kind, http.StatusBadGateway, "api_error", message)
+	// Never pass an exhausted source's raw HTTP body/status downstream. The
+	// complete upstream detail remains available in per-attempt usage records.
+	rt.writeGatewayError(req.c, req.kind, http.StatusBadGateway, "upstream_error", message)
 }
 
 func minInt(a, b int) int {

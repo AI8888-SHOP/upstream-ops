@@ -62,8 +62,8 @@ func TestSourceFailureClassificationRequiresErrorEnvelopeOrHTTPFailure(t *testin
 			if got := hasStructuredUpstreamError(body); got != tc.structured {
 				t.Fatalf("structured=%v want=%v", got, tc.structured)
 			}
-			if got := (*Service)(nil).isFailoverResponse(tc.status, false, body); got != tc.unavailable {
-				t.Fatalf("failover=%v want=%v", got, tc.unavailable)
+			if got := (*Service)(nil).isFailoverResponse(tc.status, false, body); !got {
+				t.Fatalf("upstream HTTP %d was not classified for route failover", tc.status)
 			}
 			info := (*Service)(nil).buildUpstreamErrorInfo(nil, tc.status, nil, body, "", http.MethodPost)
 			wantType := "http"
@@ -99,8 +99,11 @@ func TestSourceFailureClassificationDoesNotScanSuccessfulContent(t *testing.T) {
 				t.Fatal("ordinary content was classified as a structured upstream failure")
 			}
 			for _, status := range []int{http.StatusOK, http.StatusBadRequest} {
-				if upstreamRouteUnavailable(body, status >= http.StatusBadRequest) || (*Service)(nil).isFailoverResponse(status, false, body) {
-					t.Fatalf("ordinary content triggered source failover for HTTP %d", status)
+				if upstreamRouteUnavailable(body, status >= http.StatusBadRequest) {
+					t.Fatalf("ordinary content was classified as a source-specific failure for HTTP %d", status)
+				}
+				if got := (*Service)(nil).isFailoverResponse(status, false, body); got != (status == http.StatusBadRequest) {
+					t.Fatalf("HTTP %d failover=%v; failover should depend on status, not body text", status, got)
 				}
 				info := (*Service)(nil).buildUpstreamErrorInfo(nil, status, nil, body, "", http.MethodPost)
 				if info.Type != "http" {
@@ -117,6 +120,31 @@ func TestSourceFailureClassificationDoesNotScanSuccessfulContent(t *testing.T) {
 		if info.Type != "http" {
 			t.Errorf("successful plain text changed error type: %+v", info)
 		}
+	}
+}
+
+func TestHTTP200ErrorEnvelopeIsFailoverEligibleWithoutScanningContent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"root error", `{"error":{"type":"upstream_error","message":"temporarily unavailable"}}`, true},
+		{"responses failure", `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"busy"}}}`, true},
+		{"responses failed status", `{"type":"response.failed","response":{"status":"failed"}}`, true},
+		{"sse failure", "event: response.failed\ndata: {\"response\":{\"status\":\"failed\"}}\n\n", true},
+		{"normal answer mentioning error", `{"choices":[{"message":{"content":"the word error is harmless"}}]}`, false},
+		{"tool argument error", `{"output":[{"type":"function_call","arguments":"{\"error\":\"inside tool input\"}"}]}`, false},
+		{"null errors", `{"error":null,"response":{"status":"completed","error":null}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasExplicitUpstreamError([]byte(tc.body)); got != tc.want {
+				t.Fatalf("explicit error=%v want=%v body=%s", got, tc.want, tc.body)
+			}
+			if got := (*Service)(nil).isFailoverResponse(http.StatusOK, false, []byte(tc.body)); got != tc.want {
+				t.Fatalf("HTTP 200 failover=%v want=%v body=%s", got, tc.want, tc.body)
+			}
+		})
 	}
 }
 
@@ -350,10 +378,17 @@ func TestAvailabilityFailoverThroughBothGatewayPaths(t *testing.T) {
 				{"model-400", 400, `{"error":{"code":"model_not_found","message":"The requested model is unavailable"}}`},
 				{"model-404", 404, `{"error":{"message":"Model gpt-test is not supported by any configured account in this group"}}`},
 				{"balance", 403, `{"error":{"message":"Insufficient account balance"}}`},
+				{"unauthorized-401", 401, `{"error":{"type":"authentication_error","message":"invalid api key"}}`},
+				{"permission-403", 403, `{"error":{"type":"permission_error","message":"permission denied"}}`},
+				{"not-found-404", 404, `{"error":{"code":"model_not_found","message":"model not available"}}`},
 				{"invalid-input-terminal", 400, `{"error":{"type":"invalid_request_error","message":"input_item_not_supported"}}`},
 				{"empty-input-terminal", 400, ""},
+				{"http-200-error-envelope", 200, `{"error":{"type":"upstream_error","message":"source returned an error"}}`},
+				{"http-200-response-failed", 200, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"source returned an error\"}}}\n\n"},
+				{"exhausted-401", 401, `{"error":{"type":"authentication_error","message":"invalid api key"}}`},
 			} {
 				t.Run(fmt.Sprintf("coordinated=%v/stream=%v/%s", coordinated, stream, tc.name), func(t *testing.T) {
+					allFail := tc.name == "exhausted-401"
 					db := openGatewayTestDB(t)
 					cipher, err := crypto.NewCipher("availability-regression")
 					if err != nil {
@@ -385,7 +420,7 @@ func TestAvailabilityFailoverThroughBothGatewayPaths(t *testing.T) {
 						index := index
 						upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 							calls[index].Add(1)
-							if index == 0 {
+							if index == 0 || allFail {
 								w.Header().Set("Content-Type", "application/json")
 								w.WriteHeader(tc.status)
 								_, _ = io.WriteString(w, tc.body)
@@ -423,16 +458,9 @@ func TestAvailabilityFailoverThroughBothGatewayPaths(t *testing.T) {
 					c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":"gpt-test","stream":%v,"input":"hi"}`, stream)))
 					c.Request.Header.Set("Authorization", "Bearer client-key")
 					svc.runtime().HandleForward(c, "/v1/responses", protocol.KindOpenAIResponses)
-					if tc.name == "invalid-input-terminal" || tc.name == "empty-input-terminal" {
-						if recorder.Code != 400 || calls[0].Load() != 1 || calls[1].Load() != 0 || (tc.body != "" && !strings.Contains(recorder.Body.String(), "input_item_not_supported")) {
-							t.Fatalf("caller error was retried: status=%d calls=%d/%d body=%s", recorder.Code, calls[0].Load(), calls[1].Load(), recorder.Body.String())
-						}
-						var logs []storage.GatewayUsageLog
-						if err := db.Find(&logs).Error; err != nil {
-							t.Fatal(err)
-						}
-						if len(logs) != 1 || logs[0].Success || logs[0].Winner || logs[0].CooldownUntil != nil {
-							t.Fatalf("caller error was successful or cooled the model: %+v", logs)
+					if allFail {
+						if recorder.Code != http.StatusBadGateway || calls[0].Load() != 1 || calls[1].Load() != 1 || strings.Contains(recorder.Body.String(), "invalid api key") || !strings.Contains(recorder.Body.String(), "all upstream routes failed") {
+							t.Fatalf("exhausted upstream detail leaked: status=%d calls=%d/%d body=%s", recorder.Code, calls[0].Load(), calls[1].Load(), recorder.Body.String())
 						}
 						return
 					}
@@ -446,7 +474,10 @@ func TestAvailabilityFailoverThroughBothGatewayPaths(t *testing.T) {
 					if len(logs) != 2 || logs[0].Winner || logs[0].Success || !logs[1].Winner || !logs[1].Success || logs[0].RouteID == logs[1].RouteID {
 						t.Fatalf("bad attempt audit: %+v", logs)
 					}
-					if logs[0].CooldownUntil == nil {
+					if logs[0].CooldownUntil != nil && (tc.name == "invalid-input-terminal" || tc.name == "empty-input-terminal") {
+						t.Fatalf("caller error cooled the source: %+v", logs[0])
+					}
+					if tc.name != "invalid-input-terminal" && tc.name != "empty-input-terminal" && logs[0].CooldownUntil == nil {
 						t.Fatal("failed source was not cooled")
 					}
 				})

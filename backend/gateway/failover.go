@@ -20,12 +20,21 @@ func (svc *Service) isFailoverStatus(code int, failoverOn4xx bool) bool {
 	if code == http.StatusTooManyRequests || code == http.StatusRequestTimeout {
 		return true
 	}
+	// Every response-level 4xx is route-local from the gateway's point of
+	// view.  A provider may use 400/401/403/404 for an unavailable model,
+	// credential, group, or capability; forwarding the first such response
+	// leaks a recoverable upstream failure to the downstream caller.  The
+	// legacy failoverOn4xx argument is kept for API/source compatibility, but
+	// 4xx failover is now always enabled.  Caller authentication and request
+	// parsing errors are handled before an upstream route is selected and are
+	// unaffected by this policy.
+	if code >= http.StatusBadRequest && code < http.StatusInternalServerError {
+		return true
+	}
 	if code >= 500 {
 		return true
 	}
-	if failoverOn4xx && code >= 400 && code < 500 {
-		return true
-	}
+	_ = failoverOn4xx
 	return false
 }
 
@@ -108,11 +117,75 @@ func (svc *Service) isFailoverResponse(status int, failoverOn4xx bool, body []by
 	if svc.isFailoverStatus(status, failoverOn4xx) {
 		return true
 	}
-	switch status {
-	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
-		return upstreamRouteUnavailable(body, true)
+	// Some adapters/proxies return a protocol error envelope with HTTP 200.
+	// It is still an upstream failure and must be allowed to switch routes
+	// before any response bytes are committed downstream.
+	if status >= http.StatusOK && status < http.StatusMultipleChoices {
+		return hasExplicitUpstreamError(body)
 	}
 	return false
+}
+
+// hasExplicitUpstreamError identifies a protocol-level failure envelope even
+// when the upstream incorrectly returns HTTP 200.  It deliberately inspects
+// only root error fields / response.error and failure event types; assistant
+// prose, tool arguments, and arbitrary nested JSON are not considered.
+func hasExplicitUpstreamError(body []byte) bool {
+	check := func(payload []byte) bool {
+		var envelope struct {
+			Type     string          `json:"type"`
+			Status   string          `json:"status"`
+			Error    json.RawMessage `json:"error"`
+			Response json.RawMessage `json:"response"`
+		}
+		if json.Unmarshal(payload, &envelope) != nil {
+			return false
+		}
+		if streamErrorValuePresent(envelope.Error) {
+			return true
+		}
+		if len(bytes.TrimSpace(envelope.Response)) > 0 && !bytes.Equal(bytes.TrimSpace(envelope.Response), []byte("null")) {
+			var response struct {
+				Status string          `json:"status"`
+				Error  json.RawMessage `json:"error"`
+			}
+			if json.Unmarshal(envelope.Response, &response) == nil {
+				if streamErrorValuePresent(response.Error) {
+					return true
+				}
+				if isExplicitFailureState(response.Status) {
+					return true
+				}
+			}
+		}
+		return isExplicitFailureState(envelope.Type) || isExplicitFailureState(envelope.Status)
+	}
+
+	if check(body) {
+		return true
+	}
+	if !looksLikeSSEBody(body) {
+		return false
+	}
+	for _, frame := range bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
+		if len(bytes.TrimSpace(frame)) == 0 {
+			continue
+		}
+		eventName, data := (*Runtime)(nil).parseSSEEventLines(strings.Split(string(frame), "\n"))
+		if upstreamStreamFailure(eventName, data) != nil || check([]byte(data)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isExplicitFailureState(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "error", "failed", "canceled", "cancelled", "response.error", "response.failed", "response.canceled", "response.cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 // isSameRouteRetryableUpstreamFailure distinguishes transient failures from
@@ -121,6 +194,15 @@ func (svc *Service) isFailoverResponse(status int, failoverOn4xx bool, body []by
 // it. Saturation and deterministic failures switch sources; other transient
 // transport/HTTP failures retain the configured same-route retry policy.
 func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
+	// Replaying a 4xx request on the same source cannot repair an upstream
+	// route/key/model mismatch.  Move to another source immediately; if no
+	// source succeeds the caller receives the gateway's final failure.
+	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+		return false
+	}
+	if status >= http.StatusOK && status < http.StatusMultipleChoices && hasExplicitUpstreamError([]byte(info.UpstreamBody)) {
+		return false
+	}
 	if upstreamRouteUnavailable([]byte(info.UpstreamBody), status >= 400) {
 		return false
 	}
@@ -147,6 +229,28 @@ func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
 		return false
 	}
 	return true
+}
+
+// shouldCooldownUpstreamFailure separates route-health failures from caller
+// input failures.  All 4xx responses are eligible for route failover, but a
+// generic 400 such as invalid input must not cool every route in a group.  A
+// source-specific error envelope (model/key/permission/quota/capability) is
+// safe to cool; transient HTTP/transport failures are safe as well.
+func shouldCooldownUpstreamFailure(status int, info usageErrorInfo, attemptErr error) bool {
+	if status == 0 {
+		return attemptErr != nil
+	}
+	if status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 {
+		return true
+	}
+	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+		body := []byte(info.UpstreamBody)
+		return upstreamRouteUnavailable(body, true) || isDeterministicRouteFailure(info.Summary)
+	}
+	if status >= http.StatusOK && status < http.StatusMultipleChoices && hasExplicitUpstreamError([]byte(info.UpstreamBody)) {
+		return hasStructuredUpstreamError([]byte(info.UpstreamBody))
+	}
+	return attemptErr != nil
 }
 
 func isDeterministicRouteFailure(value string) bool {

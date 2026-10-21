@@ -160,7 +160,6 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 	exclude := map[uint]struct{}{}
 	var lastStatus int
-	var lastBody []byte
 	var lastErr error
 	// 已顺延次数（换到另一条路由的次数）
 	failoversDone := 0
@@ -529,7 +528,6 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					lastErr = fwdErr
 				} else {
 					lastStatus = status
-					lastBody = rt.convertErrorBody(respBody, kind, upstreamKind, converted)
 					lastErr = fmt.Errorf("upstream status %d: %s", status, errInfo.Summary)
 				}
 				// 最后一次同路由尝试失败才进入冷却（客户端取消 / 重试关闭时不写冷却）
@@ -549,7 +547,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 						return isFirstTokenBudgetFailure(message)
 					})
 				firstTokenCooldownEnabled := group.FirstTokenTimeoutCooldownEnabled
-				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && !clientCanceled && !requestTimedOut &&
+				cooldownEligible := shouldCooldownUpstreamFailure(status, errInfo, fwdErr)
+				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && cooldownEligible && !clientCanceled && !requestTimedOut &&
 					!errors.Is(fwdErr, errUpstreamQueueTimeout) &&
 					(!(firstTokenTimedOut || firstTokenBudgetFailed) || firstTokenCooldownEnabled) {
 					until := time.Now().Add(time.Duration(cooldownSec) * time.Second)
@@ -607,8 +606,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				break // 同路由耗尽，顺延
 			}
 
-			// Unclassified 4xx remain caller-visible unless explicitly enabled.
-			// Structured source-local model/key/quota failures were handled above.
+			// This branch is reserved for non-retryable non-4xx responses.  All
+			// upstream 4xx statuses are handled by the failover branch above so a
+			// recoverable route error is never committed to the client here.
 			if status >= 400 {
 				errInfo := rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), nil, status, respHeaders, respBody, upstreamFullURL, c.Request.Method)
 				clientBody := rt.convertErrorBody(respBody, kind, upstreamKind, converted)
@@ -707,12 +707,11 @@ finishError:
 		rt.writeGatewayError(c, kind, http.StatusBadGateway, "attempt_limit", lastErr.Error())
 		return
 	}
-	if lastStatus > 0 && len(lastBody) > 0 {
-		out := rt.injectUpstreamOpsRequestID(lastBody, reqID)
-		rt.setGatewayRequestIDHeaders(c, reqID)
-		c.Header("Content-Type", "application/json")
-		c.Writer.Header().Del("Content-Length")
-		rt.writeGatewayErrorBody(c, lastStatus, out)
+	if lastStatus > 0 || routesTried > 0 {
+		// Preserve each upstream's full response in usage diagnostics, but never
+		// expose a failed source's raw 4xx/5xx/HTTP-200 error packet downstream
+		// after the configured route budget is exhausted.
+		rt.writeGatewayError(c, kind, http.StatusBadGateway, "upstream_error", "all upstream routes failed")
 		return
 	}
 	msg := "all upstream routes failed"

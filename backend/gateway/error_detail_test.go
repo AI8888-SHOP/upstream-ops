@@ -36,28 +36,22 @@ func TestIsSourceGroupIDPlaceholder(t *testing.T) {
 }
 
 func TestIsFailoverStatus(t *testing.T) {
-	// 默认：仅 0 / 429 / 5xx
-	for _, code := range []int{0, 408, 429, 500, 502, 503, 504, 524} {
+	// Transport failures and every upstream 4xx/5xx can move to another source.
+	for _, code := range []int{0, 400, 401, 403, 404, 408, 422, 429, 500, 502, 503, 504, 524} {
 		if !(*Service)(nil).isFailoverStatus(code, false) {
-			t.Fatalf("default: status %d should failover", code)
+			t.Fatalf("status %d should failover", code)
 		}
 	}
-	for _, code := range []int{200, 400, 401, 403, 404, 422} {
+	for _, code := range []int{200, 300} {
 		if (*Service)(nil).isFailoverStatus(code, false) {
-			t.Fatalf("default: status %d should NOT failover", code)
+			t.Fatalf("status %d should not failover", code)
 		}
 	}
-	// 开启 4xx 顺延：全部 4xx 可 failover
-	for _, code := range []int{400, 401, 403, 404, 408, 422, 429} {
-		if !(*Service)(nil).isFailoverStatus(code, true) {
-			t.Fatalf("failover_on_4xx: status %d should failover", code)
-		}
-	}
-	if (*Service)(nil).isFailoverStatus(200, true) {
-		t.Fatalf("failover_on_4xx: 200 should not failover")
+	if !(*Service)(nil).isFailoverStatus(http.StatusBadRequest, true) {
+		t.Fatal("legacy failover_on_4xx setting changed the new always-failover behavior")
 	}
 	if !(*Service)(nil).isFailoverStatus(503, true) {
-		t.Fatalf("failover_on_4xx: 503 should still failover")
+		t.Fatal("5xx should still failover")
 	}
 }
 
@@ -73,7 +67,7 @@ func TestSameRouteRetryabilitySkipsDeterministicErrors(t *testing.T) {
 		{name: "media capability", status: http.StatusForbidden, info: usageErrorInfo{Summary: "HTTP 403: Image generation is not enabled for this group"}, want: false},
 		{name: "balance", status: http.StatusForbidden, info: usageErrorInfo{UpstreamBody: `{"error":"Insufficient account balance"}`}, want: false},
 		{name: "model missing", status: http.StatusNotFound, info: usageErrorInfo{Summary: "model_not_found: no available channel for model gpt-test"}, want: false},
-		{name: "unknown 403", status: http.StatusForbidden, info: usageErrorInfo{Summary: "HTTP 403: temporary policy response"}, want: true},
+		{name: "unknown 403 switches source instead of retrying same source", status: http.StatusForbidden, info: usageErrorInfo{Summary: "HTTP 403: temporary policy response"}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

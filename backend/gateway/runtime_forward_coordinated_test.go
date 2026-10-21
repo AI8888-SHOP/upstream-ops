@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -535,12 +534,8 @@ func TestWriteCoordinatedFailureDoesNotReplayRejectedResponse(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), `"content":"blocked"`) {
 		t.Fatalf("rejected response was replayed: %s", recorder.Body.String())
 	}
-	var body map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode gateway error: %v", err)
-	}
-	if !strings.Contains(recorder.Body.String(), "blocked output") {
-		t.Fatalf("validation rule missing from gateway error: %s", recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), "all upstream routes failed") {
+		t.Fatalf("gateway did not return a sanitized final failure: %s", recorder.Body.String())
 	}
 }
 
@@ -574,8 +569,8 @@ func TestWriteCoordinatedFailureDoesNotReplayPostCommitMatch(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), `"content":"blocked"`) {
 		t.Fatalf("post-commit rejected response was replayed: %s", recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "late blocked output") {
-		t.Fatalf("validation rule missing from gateway error: %s", recorder.Body.String())
+	if !strings.Contains(recorder.Body.String(), "all upstream routes failed") {
+		t.Fatalf("gateway did not return a sanitized final failure: %s", recorder.Body.String())
 	}
 }
 

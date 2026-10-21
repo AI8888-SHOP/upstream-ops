@@ -895,7 +895,7 @@ export function GatewayPage() {
       response_validation_retry_count: String(g.response_validation_retry_count ?? -1),
       failover_enabled: g.failover_enabled !== false,
       failover_max: String(g.failover_max ?? 8),
-      failover_on_4xx: !!g.failover_on_4xx,
+      failover_on_4xx: true,
       cooldown_seconds: String(g.cooldown_seconds ?? 30),
       first_token_timeout_sec: String(g.first_token_timeout_sec ?? 0),
       request_first_token_timeout_sec: String(g.request_first_token_timeout_sec ?? 0),
