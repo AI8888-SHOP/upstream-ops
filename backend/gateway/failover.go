@@ -30,9 +30,35 @@ func (svc *Service) isFailoverStatus(code int, failoverOn4xx bool) bool {
 }
 
 // A model/key/quota failure belongs to this upstream, not necessarily to the
-// caller. Recognize only explicit error envelopes; never scan assistant text
-// or tool arguments. Ordinary invalid-input 400s keep the configured policy.
-func upstreamRouteUnavailable(body []byte) bool {
+// caller. Recognize only error envelopes by default; a caller that has already
+// verified an HTTP error status may also opt into plain-text error bodies.
+// Never scan successful assistant text or tool arguments.
+func upstreamRouteUnavailable(body []byte, allowPlainText ...bool) bool {
+	if matchUpstreamErrorEnvelope(body, func(code, message string) bool {
+		if strings.Contains(code, "context_length") || strings.Contains(code, "content_filter") {
+			return false
+		}
+		for _, marker := range []string{"model_not_found", "model_not_available", "model_unavailable", "unsupported_model", "model_not_supported", "invalid_api_key", "authentication_error", "permission_error", "access_denied", "unauthorized", "group_not_allowed", "insufficient_quota", "insufficient_balance"} {
+			if strings.Contains(code, marker) {
+				return true
+			}
+		}
+		return isDeterministicRouteFailure(message)
+	}) {
+		return true
+	}
+	// Only a verified HTTP error may use plain text; malformed/unknown JSON or
+	// successful assistant prose must never affect shared source health.
+	trimmed := bytes.TrimSpace(body)
+	return len(allowPlainText) > 0 && allowPlainText[0] && len(trimmed) > 0 &&
+		trimmed[0] != '{' && trimmed[0] != '[' && !looksLikeSSEBody(trimmed) &&
+		isDeterministicRouteFailure(string(trimmed))
+}
+
+// Match only error/error.response envelopes, never text or arguments emitted
+// by the assistant. In SSE, inspect every event rather than only the first
+// lifecycle event, which commonly precedes the actual failure.
+func matchUpstreamErrorEnvelope(body []byte, match func(code, message string) bool) bool {
 	check := func(payload []byte) bool {
 		var envelope struct {
 			Error    json.RawMessage `json:"error"`
@@ -45,31 +71,20 @@ func upstreamRouteUnavailable(body []byte) bool {
 		}
 		for _, raw := range []json.RawMessage{envelope.Error, envelope.Response.Error} {
 			var failure struct {
-				Code    string `json:"code"`
-				Type    string `json:"type"`
-				Message string `json:"message"`
+				Code    json.RawMessage `json:"code"`
+				Type    string          `json:"type"`
+				Message string          `json:"message"`
 			}
 			if json.Unmarshal(raw, &failure) != nil {
 				if json.Unmarshal(raw, &failure.Message) != nil {
 					continue
 				}
 			}
-			code := strings.ToLower(failure.Code + " " + failure.Type)
-			if strings.Contains(code, "context_length") || strings.Contains(code, "content_filter") {
-				continue
-			}
-			for _, marker := range []string{"model_not_found", "model_not_available", "model_unavailable", "unsupported_model", "model_not_supported", "invalid_api_key", "authentication_error", "insufficient_quota", "insufficient_balance"} {
-				if strings.Contains(code, marker) {
-					return true
-				}
-			}
-			message := strings.ToLower(strings.TrimSpace(failure.Message))
-			for _, marker := range []string{"insufficient account balance", "insufficient balance", "invalid api key", "invalid_api_key", "the requested model is unavailable", "model_not_found", "model not found", "no available channel for model", "模型不存在", "余额不足"} {
-				if strings.Contains(message, marker) {
-					return true
-				}
-			}
-			if strings.Contains(message, "model") && (strings.Contains(message, "does not exist") || strings.Contains(message, "not supported by any configured account") || strings.Contains(message, "not enabled for this group")) {
+			var code string
+			// Providers may use a numeric code. Keep the message available even
+			// when the code is not a string; only named codes affect classification.
+			_ = json.Unmarshal(failure.Code, &code)
+			if match(strings.ToLower(code+" "+failure.Type), strings.TrimSpace(failure.Message)) {
 				return true
 			}
 		}
@@ -78,12 +93,11 @@ func upstreamRouteUnavailable(body []byte) bool {
 	if check(body) {
 		return true
 	}
-	if !bytes.Contains(body, []byte("data:")) {
+	if !looksLikeSSEBody(body) {
 		return false
 	}
-	for _, frame := range bytes.Split(bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
-		_, data := (*Runtime)(nil).parseSSEEventLines(strings.Split(string(frame), "\n"))
-		if check([]byte(data)) {
+	for _, payload := range sseDataPayloads(body) {
+		if check(payload) {
 			return true
 		}
 	}
@@ -96,7 +110,7 @@ func (svc *Service) isFailoverResponse(status int, failoverOn4xx bool, body []by
 	}
 	switch status {
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
-		return upstreamRouteUnavailable(body)
+		return upstreamRouteUnavailable(body, true)
 	}
 	return false
 }
@@ -107,7 +121,23 @@ func (svc *Service) isFailoverResponse(status int, failoverOn4xx bool, body []by
 // it. Saturation and deterministic failures switch sources; other transient
 // transport/HTTP failures retain the configured same-route retry policy.
 func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
-	if upstreamRouteUnavailable([]byte(info.UpstreamBody)) {
+	if upstreamRouteUnavailable([]byte(info.UpstreamBody), status >= 400) {
+		return false
+	}
+	// A deterministic upstream identity/permission/capability failure cannot
+	// improve by replaying the same request on the same source, regardless of
+	// whether an adapter surfaced it as HTTP 4xx or a pre-commit HTTP 200 error.
+	if isDeterministicRouteFailure(info.Summary) {
+		return false
+	}
+	if isUpstreamWaitFailure(info.Summary) || isPreconnectIntegrityFailure(info.Summary) {
+		return false
+	}
+	// Validation errors may retain only a generic rule summary. Extract the
+	// actual error from its envelope, rather than searching assistant content.
+	if matchUpstreamErrorEnvelope([]byte(info.UpstreamBody), func(_ string, message string) bool {
+		return isUpstreamWaitFailure(message) || isPreconnectIntegrityFailure(message)
+	}) {
 		return false
 	}
 	// Retrying a saturated source immediately amplifies its queue. Fail over
@@ -116,43 +146,80 @@ func isSameRouteRetryableUpstreamFailure(status int, info usageErrorInfo) bool {
 		status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout || status == 524 {
 		return false
 	}
-	if status == 0 || status >= 500 {
-		return true
-	}
-	if status < 400 || status >= 500 {
-		return true
-	}
-	text := strings.ToLower(strings.TrimSpace(info.Summary))
-	if body := strings.ToLower(strings.TrimSpace(info.UpstreamBody)); body != "" {
-		if text != "" {
-			text += "\n"
-		}
-		text += body
-	}
+	return true
+}
+
+func isDeterministicRouteFailure(value string) bool {
+	text := strings.ToLower(strings.TrimSpace(value))
 	for _, marker := range []string{
 		"image generation is not enabled",
 		"video generation is not enabled",
 		"not enabled for this group",
 		"insufficient account balance",
+		"insufficient balance",
+		"insufficient_quota",
 		"model_not_found",
 		"model not found",
+		"the requested model is unavailable",
 		"no available channel for model",
+		"no available compatible accounts",
 		"invalid api key",
 		"invalid_api_key",
+		"unauthorized",
 		"permission denied",
 		"not authorized",
+		"access denied",
+		"not allowed to access",
+		"not allowed to use",
+		"does not have permission",
+		"group_not_allowed",
+		"group deleted",
+		"模型不存在",
+		"找不到模型",
+		"无权访问",
+		"无权使用",
+		"无权限",
+		"没有权限",
+		"分组已删除",
+		"分组不再允许当前用户使用",
+		"余额不足",
+		"用户额度不足",
 	} {
 		if strings.Contains(text, marker) {
-			return false
+			return true
 		}
 	}
-	return true
+	return strings.Contains(text, "model") && (strings.Contains(text, "does not exist") ||
+		strings.Contains(text, "was not found") || strings.Contains(text, "not supported by any configured account"))
 }
 
-// Only protocol error envelopes count here. A content rule matching prose
-// about rate limits must never poison shared upstream health.
+// A costly wait should switch source without being classified as a permanent
+// model, credential or permission failure.
+func isUpstreamWaitFailure(value string) bool {
+	text := strings.ToLower(strings.TrimSpace(value))
+	return isFirstTokenBudgetFailure(text) ||
+		strings.Contains(text, "upstream stream idle for ")
+}
+
+func isFirstTokenBudgetFailure(value string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(value)), "request first token budget exhausted")
+}
+
+// Preconnect integrity checks belong to the gateway's stream adapter. They
+// must not disable another gateway group that shares the same upstream model.
+func isPreconnectIntegrityFailure(value string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(value)), "responses preconnect ")
+}
+
+// Only protocol error envelopes count here. A content rule matching ordinary
+// prose must never poison shared upstream health.
 func hasStructuredUpstreamError(body []byte) bool {
 	if upstreamRouteUnavailable(body) {
+		return true
+	}
+	if matchUpstreamErrorEnvelope(body, func(_ string, message string) bool {
+		return isUpstreamWaitFailure(message)
+	}) {
 		return true
 	}
 	check := func(payload []byte) bool {
@@ -168,14 +235,16 @@ func hasStructuredUpstreamError(body []byte) bool {
 		for _, value := range []json.RawMessage{envelope.Error, envelope.Response.Error} {
 			value = bytes.TrimSpace(value)
 			var failure struct {
-				Type    string `json:"type"`
-				Code    string `json:"code"`
-				Message string `json:"message"`
+				Type    string          `json:"type"`
+				Code    json.RawMessage `json:"code"`
+				Message string          `json:"message"`
 			}
 			if json.Unmarshal(value, &failure) != nil {
 				continue
 			}
-			code := strings.ToLower(failure.Type + " " + failure.Code)
+			var namedCode string
+			_ = json.Unmarshal(failure.Code, &namedCode)
+			code := strings.ToLower(failure.Type + " " + namedCode)
 			// Caller errors must not cool a model for unrelated requests.
 			if strings.Contains(code, "invalid_request") || strings.Contains(code, "context_length") || strings.Contains(code, "content_filter") {
 				continue

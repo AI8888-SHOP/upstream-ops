@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -348,8 +349,24 @@ func (s *preconnectResponsesStream) prependReasoning(response map[string]json.Ra
 				Type string `json:"type"`
 			}
 			if err := json.Unmarshal(output[index], &identity); err != nil ||
-				(state.id != "" && identity.ID != state.id) || (state.kind != "" && identity.Type != state.kind) {
+				(state.kind != "" && identity.Type != state.kind) {
 				return errors.New("Responses preconnect terminal output identity changed")
+			}
+			// Some upstreams regenerate an output item's ID in their terminal
+			// response snapshot, despite the item already being streamed under a
+			// stable output index and type. Rewrite it only when the complete item
+			// matches the streamed output_item.done apart from that ID; otherwise
+			// this may be a genuinely different tool call or message.
+			if state.id != "" && identity.ID != state.id {
+				if len(state.done) == 0 || !preconnectResponsesSameItemExceptID(state.done, output[index]) {
+					return errors.New("Responses preconnect terminal output identity changed")
+				}
+				var item map[string]json.RawMessage
+				if err := json.Unmarshal(output[index], &item); err != nil || item == nil {
+					return errors.New("Responses preconnect terminal output identity changed")
+				}
+				item["id"] = preconnectResponsesJSON(state.id)
+				output[index] = preconnectResponsesJSON(item)
 			}
 		}
 		if len(output) == 0 && !s.sawOutput && !preconnectResponsesHasUsage(response["usage"]) {
@@ -358,6 +375,24 @@ func (s *preconnectResponsesStream) prependReasoning(response map[string]json.Ra
 	}
 	response["output"] = preconnectResponsesJSON(append([]json.RawMessage{s.reasoning("completed")}, output...))
 	return nil
+}
+
+func preconnectResponsesSameItemExceptID(streamed, terminal json.RawMessage) bool {
+	var streamedItem, terminalItem map[string]any
+	// Preserve JSON numbers exactly. Converting large integers to float64 can
+	// make two different terminal items appear identical during reconciliation.
+	decode := func(raw json.RawMessage, item *map[string]any) error {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		return decoder.Decode(item)
+	}
+	if decode(streamed, &streamedItem) != nil || decode(terminal, &terminalItem) != nil ||
+		streamedItem == nil || terminalItem == nil {
+		return false
+	}
+	delete(streamedItem, "id")
+	delete(terminalItem, "id")
+	return reflect.DeepEqual(streamedItem, terminalItem)
 }
 
 func (s *preconnectResponsesStream) observeItem(eventType string, index int64, raw json.RawMessage) error {

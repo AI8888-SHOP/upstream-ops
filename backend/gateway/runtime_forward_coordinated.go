@@ -50,10 +50,13 @@ type coordinatedForwardRequest struct {
 }
 
 type coordinatedRoutePlan struct {
-	Candidate        ScoredRoute
-	TryOnRoute       int
-	MaxTries         int
-	ResponseMaxTries int
+	Candidate              ScoredRoute
+	TryOnRoute             int
+	MaxTries               int
+	ResponseMaxTries       int
+	RetryMaxTries          int // retry budget captured when the scheduler reserves this entry
+	ResponseRetry          bool
+	ResponseRetryOriginTry int
 }
 
 func (p coordinatedRoutePlan) responseMaxTries() int {
@@ -72,10 +75,18 @@ func (p coordinatedRoutePlan) responseMaxTries() int {
 // this preserves hedge concurrency without letting a new launch skip the
 // current route's retry ladder.
 type coordinatedPlanScheduler struct {
-	mu          sync.Mutex
-	entries     []coordinatedRoutePlan
-	maxAttempts int
-	started     int
+	mu                 sync.Mutex
+	entries            []coordinatedRoutePlan
+	maxAttempts        int
+	started            int
+	retryBudgetByRoute map[uint]coordinatedRouteRetryBudget
+}
+
+type coordinatedRouteRetryBudget struct {
+	latestTry        int
+	originTry        int
+	maxTries         int
+	responseRejected bool
 }
 
 func newCoordinatedPlanScheduler(plan []coordinatedRoutePlan, maxAttempts int) *coordinatedPlanScheduler {
@@ -83,7 +94,10 @@ func newCoordinatedPlanScheduler(plan []coordinatedRoutePlan, maxAttempts int) *
 	if maxAttempts <= 0 || maxAttempts > len(entries) {
 		maxAttempts = len(entries)
 	}
-	return &coordinatedPlanScheduler{entries: entries, maxAttempts: maxAttempts}
+	return &coordinatedPlanScheduler{
+		entries: entries, maxAttempts: maxAttempts,
+		retryBudgetByRoute: make(map[uint]coordinatedRouteRetryBudget),
+	}
 }
 
 func (s *coordinatedPlanScheduler) reserve(number int) coordinatedRoutePlan {
@@ -98,10 +112,72 @@ func (s *coordinatedPlanScheduler) reserve(number int) coordinatedRoutePlan {
 	if number > len(s.entries) {
 		return coordinatedRoutePlan{}
 	}
-	return s.entries[number-1]
+	entry := s.entries[number-1]
+	entry.RetryMaxTries = entry.MaxTries
+	if budget, ok := s.retryBudgetByRoute[entry.Candidate.Route.ID]; ok && entry.TryOnRoute > budget.latestTry && budget.responseRejected {
+		entry.RetryMaxTries = budget.maxTries
+		entry.ResponseRetry = true
+		entry.ResponseRetryOriginTry = budget.originTry
+	}
+	return entry
+}
+
+// recordRetryOutcome serializes route retry-budget changes in the coordinator.
+// Only a response rejection opens its configured retry ladder. A transport
+// failure consumes that expansion only if it belongs to an attempt launched
+// under the same rejection; unrelated concurrent transport failures cannot
+// revoke it. Newer response rejections supersede older retry generations.
+func (s *coordinatedPlanScheduler) recordRetryOutcome(attempt *coordinatedForwardAttempt, responseRejected bool) {
+	if s == nil || attempt == nil || attempt.Skipped {
+		return
+	}
+	if responseRejected {
+		maxTries := attempt.Plan.responseMaxTries()
+		if maxTries < 1 {
+			maxTries = 1
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		routeID := attempt.Route.ID
+		current, ok := s.retryBudgetByRoute[routeID]
+		if ok && attempt.Plan.TryOnRoute < current.latestTry {
+			return
+		}
+		s.retryBudgetByRoute[routeID] = coordinatedRouteRetryBudget{
+			latestTry: attempt.Plan.TryOnRoute, originTry: attempt.Plan.TryOnRoute,
+			maxTries: maxTries, responseRejected: true,
+		}
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	routeID := attempt.Route.ID
+	current, ok := s.retryBudgetByRoute[routeID]
+	if !ok || !current.responseRejected || !attempt.Plan.ResponseRetry ||
+		current.originTry != attempt.Plan.ResponseRetryOriginTry || attempt.Plan.TryOnRoute <= current.latestTry {
+		return
+	}
+	s.retryBudgetByRoute[routeID] = coordinatedRouteRetryBudget{
+		latestTry: attempt.Plan.TryOnRoute, originTry: current.originTry,
+		maxTries: attempt.Plan.MaxTries, responseRejected: false,
+	}
 }
 
 func (s *coordinatedPlanScheduler) prioritizeRetry(attempt *coordinatedForwardAttempt) {
+	if attempt == nil {
+		return
+	}
+	s.prioritizeRouteRetry(attempt, attempt.Plan.responseMaxTries())
+}
+
+func (s *coordinatedPlanScheduler) prioritizeTransportRetry(attempt *coordinatedForwardAttempt) {
+	if attempt == nil {
+		return
+	}
+	s.prioritizeRouteRetry(attempt, attempt.Plan.MaxTries)
+}
+
+func (s *coordinatedPlanScheduler) prioritizeRouteRetry(attempt *coordinatedForwardAttempt, maxTries int) {
 	if s == nil || attempt == nil {
 		return
 	}
@@ -111,7 +187,7 @@ func (s *coordinatedPlanScheduler) prioritizeRetry(attempt *coordinatedForwardAt
 		return
 	}
 	wantTry := attempt.Plan.TryOnRoute + 1
-	if responseMaxTries := attempt.Plan.responseMaxTries(); responseMaxTries <= wantTry {
+	if maxTries <= wantTry {
 		return
 	}
 	for index := s.started; index < len(s.entries); index++ {
@@ -167,16 +243,17 @@ type coordinatedForwardAttempt struct {
 	Validation   validationResult
 	Recovery     bool
 
-	Gate            *streamPrefixGateWriter
-	Cancel          context.CancelFunc
-	runnerDone      chan struct{}
-	streamDone      chan streamAttemptResult
-	streamMu        sync.Mutex
-	streamResult    streamAttemptResult
-	streamReady     bool
-	gateCommitErr   error
-	upstreamStarted atomic.Bool
-	healthRecorded  bool // coordinator-owned; independent of deferred usage audit
+	Gate             *streamPrefixGateWriter
+	Cancel           context.CancelFunc
+	runnerDone       chan struct{}
+	streamDone       chan streamAttemptResult
+	streamMu         sync.Mutex
+	streamResult     streamAttemptResult
+	streamReady      bool
+	gateCommitErr    error
+	upstreamStarted  atomic.Bool
+	healthRecorded   bool                               // coordinator-owned; independent of deferred usage audit
+	cooldownSnapshot *storage.GatewayRouteModelCooldown // generation written by this request
 }
 
 func (a *coordinatedForwardAttempt) markUpstreamStarted() {
@@ -315,7 +392,6 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 
 	var states sync.Map
 	var excludedRoutes sync.Map
-	var responseRejectedRoutes sync.Map
 	var retrySuppressedRoutes sync.Map
 	run := func(ctx context.Context, info hedgeAttemptInfo) (*coordinatedForwardAttempt, error) {
 		entry := planScheduler.reserve(info.Number)
@@ -328,12 +404,10 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		}
 		states.Store(info.Number, attempt)
 		defer close(attempt.runnerDone)
-		if attempt.Plan.TryOnRoute > 0 {
-			if _, suppressed := retrySuppressedRoutes.Load(attempt.Route.ID); suppressed {
-				attempt.Skipped = true
-				attempt.Err = errSkippedNonRetryableRoute
-				return attempt, attempt.Err
-			}
+		if coordinatedRetrySuppressed(&retrySuppressedRoutes, attempt.Plan) {
+			attempt.Skipped = true
+			attempt.Err = errSkippedNonRetryableRoute
+			return attempt, attempt.Err
 		}
 		if _, excluded := excludedRoutes.Load(attempt.Route.ID); excluded {
 			// Preparation/configuration failures are hard route exclusions. They
@@ -342,16 +416,17 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 			attempt.Err = errSkippedNonRetryableRoute
 			return attempt, attempt.Err
 		}
-		if _, rejected := responseRejectedRoutes.Load(attempt.Route.ID); rejected {
-			responseMaxTries := attempt.Plan.responseMaxTries()
-			if attempt.Plan.TryOnRoute > 0 && attempt.Plan.TryOnRoute < responseMaxTries {
-				// A response-rule rejection excludes a route's primary entry, but it
-				// must not cancel the explicitly planned same-route retry ladder.
-			} else {
-				// Once the response-rule retry budget is exhausted, skip remaining
-				// entries for this route so the scheduler can move to failover.
+		if attempt.Plan.TryOnRoute > 0 {
+			maxTries := attempt.Plan.RetryMaxTries
+			if maxTries <= 0 {
+				maxTries = attempt.Plan.MaxTries
+			}
+			if attempt.Plan.TryOnRoute >= maxTries {
+				// Response-validation and transport retries have independent
+				// budgets. A plain transport failure must never borrow
+				// response-only slots.
 				attempt.Skipped = true
-				attempt.Err = errSkippedRejectedRoute
+				attempt.Err = errSkippedNonRetryableRoute
 				return attempt, attempt.Err
 			}
 		}
@@ -392,9 +467,10 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		suppressSameRouteRetry := coordinatedAttemptSuppressesSameRouteRetries(attempt)
 		validation, status, attemptErr, terminal := attempt.validationSnapshot()
 		failed := runErr != nil || attemptErr != nil || terminal || validation.IsRejected() || status < 200 || status >= 300
-		if failed && coordinatedPreferUntriedAlternative(req.group, planScheduler.snapshot(), info.Number, attempt.Route.ID) {
-			suppressSameRouteRetry = true
-		}
+		// The round-robin plan already tries fresh sources before retrying a
+		// source. Only deterministic failures permanently remove retry slots;
+		// transient failures retain their configured last-resort retries even
+		// when concurrent attempts finish out of order.
 		if suppressSameRouteRetry {
 			retrySuppressedRoutes.Store(attempt.Route.ID, struct{}{})
 		}
@@ -420,16 +496,26 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 					}
 					return attempt, stopHedgeAttempts(runErr)
 				}
+				if failed {
+					// The validation plan also contains other routes, but ordinary
+					// transport failures may only consume this source's retry ladder
+					// when transport failover is disabled.
+					planScheduler.prioritizeTransportRetry(attempt)
+				}
 			}
 		}
 		return attempt, runErr
 	}
 	validate := func(attempt *coordinatedForwardAttempt) (bool, error) {
-		accepted, err := validateCoordinatedAttempt(attempt, &excludedRoutes, &responseRejectedRoutes)
+		accepted, err := validateCoordinatedAttempt(attempt, &excludedRoutes)
 		if !accepted && attempt != nil {
 			validation, _, _, _ := attempt.validationSnapshot()
 			if validation.IsRejected() && !validation.PostCommit {
-				if !coordinatedTransportFailoverEnabled(req.group) && !coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+				planScheduler.recordRetryOutcome(attempt, true)
+				policySwitch := coordinatedPolicyPrefersAlternative(validation) &&
+					coordinatedPlanHasLaterAlternative(planScheduler.snapshot(), attempt.Info.Number, attempt.Route.ID) &&
+					requestAttemptsRemaining(req.c.Request.Context(), req.group.RequestMaxAttempts) != 0
+				if !coordinatedTransportFailoverEnabled(req.group) && !coordinatedAttemptSuppressesSameRouteRetries(attempt) && !policySwitch {
 					planScheduler.prioritizeRetry(attempt)
 				}
 			}
@@ -440,7 +526,13 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		OnComplete: func(result hedgeAttemptResult[*coordinatedForwardAttempt]) {
 			if !result.Accepted && result.Outcome != hedgeOutcomeCanceled && result.Outcome != hedgeOutcomeLost {
 				if attempt := result.Value; attempt != nil {
-					_, status, attemptErr, _, errInfo := attempt.retryFailureSnapshot()
+					validation, status, attemptErr, terminal, errInfo := attempt.retryFailureSnapshot()
+					if !validation.IsRejected() || validation.PostCommit {
+						failed := attemptErr != nil || terminal || status < 200 || status >= 300
+						if failed && !errors.Is(attemptErr, context.Canceled) && !errors.Is(attemptErr, errUpstreamQueueTimeout) && !errors.Is(attemptErr, errRequestFirstTokenBudget) {
+							planScheduler.recordRetryOutcome(attempt, false)
+						}
+					}
 					if !errors.Is(attemptErr, context.Canceled) && !errors.Is(attemptErr, errUpstreamQueueTimeout) && !errors.Is(attemptErr, errRequestFirstTokenBudget) {
 						attempt.UsageMeta.SchedulerObservation.finish(req.c.Request.Context(), false, errInfo.Type, "", status)
 					}
@@ -549,7 +641,7 @@ func buildCoordinatedRoutePlan(candidates []ScoredRoute, group *storage.GatewayG
 	}
 	planRetries := maxInt(transportRetries, responseRetries)
 	plan := make([]coordinatedRoutePlan, 0, routeLimit*(1+planRetries))
-	if hedgeActive || coordinatedTransportFailoverEnabled(group) {
+	if hedgeActive || validationEnabled || coordinatedTransportFailoverEnabled(group) {
 		// Keep distinct routes in the initial hedge rounds. If a response rule
 		// rejects a route, ordinary failover also visits the remaining candidates
 		// before spending scarce request attempts on the same failed source.
@@ -578,9 +670,9 @@ func coordinatedTransportFailoverEnabled(group *storage.GatewayGroup) bool {
 	return group != nil && group.RetryEnabled && group.FailoverEnabled && group.FailoverMax > 0
 }
 
-// Preserve one-source retry behavior, but do not revisit a failed source after
-// electing to fail over to an untried alternative. This also lets health be
-// published immediately instead of waiting for retry slots that will be skipped.
+// Prefer fresh sources before using the last-resort same-source retry ladder.
+// A failed source can publish its cooldown immediately for other requests;
+// this request may still retry it if all available alternatives also fail.
 func coordinatedPreferUntriedAlternative(group *storage.GatewayGroup, plan []coordinatedRoutePlan, number int, routeID uint) bool {
 	if !coordinatedTransportFailoverEnabled(group) || number <= 0 {
 		return false
@@ -614,7 +706,7 @@ func effectiveResponseValidationRetryCount(group *storage.GatewayGroup) int {
 	return retries
 }
 
-func validateCoordinatedAttempt(attempt *coordinatedForwardAttempt, excludedRoutes, responseRejectedRoutes *sync.Map) (bool, error) {
+func validateCoordinatedAttempt(attempt *coordinatedForwardAttempt, excludedRoutes *sync.Map) (bool, error) {
 	if attempt == nil || attempt.Skipped {
 		return false, errSkippedRejectedRoute
 	}
@@ -625,22 +717,8 @@ func validateCoordinatedAttempt(attempt *coordinatedForwardAttempt, excludedRout
 			return false, errSkippedNonRetryableRoute
 		}
 	}
-	if responseRejectedRoutes != nil {
-		if _, rejected := responseRejectedRoutes.Load(attempt.Route.ID); rejected {
-			responseMaxTries := attempt.Plan.responseMaxTries()
-			if attempt.Plan.TryOnRoute == 0 || attempt.Plan.TryOnRoute >= responseMaxTries {
-				// A same-route retry may already be running when another attempt on
-				// that route matches a pre-commit response rule. Only the explicitly
-				// configured response retry ladder remains eligible.
-				return false, errSkippedRejectedRoute
-			}
-		}
-	}
 	validation, status, _, terminal := attempt.validationSnapshot()
 	if validation.IsRejected() && !validation.PostCommit {
-		if responseRejectedRoutes != nil {
-			responseRejectedRoutes.Store(attempt.Route.ID, struct{}{})
-		}
 		return false, &responseRejectedError{Result: validation}
 	}
 	return (status >= 200 && status < 300) || terminal || validation.PostCommit, nil
@@ -946,7 +1024,16 @@ func coordinatedAttemptSuppressesSameRouteRetries(attempt *coordinatedForwardAtt
 		return true
 	}
 	if validation.IsRejected() {
+		// Deterministic auth/group errors cannot improve by replaying on the same
+		// source. A zero-usage or model audit rejection can retain its explicitly
+		// configured retry budget if no alternative works.
+		if coordinatedPolicyRejection(validation) && !coordinatedPolicyPrefersAlternative(validation) {
+			return true
+		}
 		if !coordinatedRejectedUpstreamFailure(attempt) {
+			return false
+		}
+		if coordinatedPolicyPrefersAlternative(validation) {
 			return false
 		}
 		// Matching a rule must not turn a retryable HTTP 500/502 into a
@@ -969,9 +1056,51 @@ func coordinatedAttemptSuppressesSameRouteRetries(attempt *coordinatedForwardAtt
 func coordinatedRejectedUpstreamFailure(attempt *coordinatedForwardAttempt) bool {
 	attempt.streamMu.Lock()
 	defer attempt.streamMu.Unlock()
-	return attempt.Validation.IsRejected() && !attempt.Validation.PostCommit &&
-		(attempt.Status == http.StatusTooManyRequests || attempt.Status >= 500 ||
-			hasStructuredUpstreamError(attempt.UpstreamBody))
+	return coordinatedPolicyRejection(attempt.Validation) ||
+		attempt.Validation.IsRejected() && !attempt.Validation.PostCommit &&
+			(attempt.Status == http.StatusTooManyRequests || attempt.Status >= 500 ||
+				hasStructuredUpstreamError(attempt.UpstreamBody))
+}
+
+// coordinatedPolicyRejection distinguishes a gateway-group's explicit policy
+// checks from generic content rejection. Their cooldown must not affect a
+// different group that applies different validation rules to the same route.
+func coordinatedPolicyRejection(validation validationResult) bool {
+	if !validation.IsRejected() || validation.PostCommit {
+		return false
+	}
+	switch strings.TrimSpace(validation.Target) {
+	case "zero_usage", "response_model":
+		return true
+	case "error_message":
+		return isDeterministicRouteFailure(validation.MatchedOn)
+	default:
+		return false
+	}
+}
+
+func coordinatedPolicyPrefersAlternative(validation validationResult) bool {
+	if !validation.IsRejected() || validation.PostCommit {
+		return false
+	}
+	return validation.Target == "zero_usage" || validation.Target == "response_model"
+}
+
+func coordinatedPlanHasLaterAlternative(plan []coordinatedRoutePlan, number int, routeID uint) bool {
+	for index := number; index < len(plan); index++ {
+		if plan[index].TryOnRoute == 0 && plan[index].Candidate.Route.ID != routeID {
+			return true
+		}
+	}
+	return false
+}
+
+func coordinatedRetrySuppressed(suppressedRoutes *sync.Map, plan coordinatedRoutePlan) bool {
+	if suppressedRoutes == nil || plan.TryOnRoute <= 0 {
+		return false
+	}
+	_, suppressed := suppressedRoutes.Load(plan.Candidate.Route.ID)
+	return suppressed
 }
 
 // Publish as soon as an attempt fails, before another winner's potentially
@@ -981,7 +1110,19 @@ func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, att
 		return
 	}
 	validation, status, attemptErr, terminal, errInfo := attempt.retryFailureSnapshot()
-	if req.c.Request.Context().Err() != nil || (errors.Is(attemptErr, context.Canceled) && !validation.IsRejected()) ||
+	adapterFailure := isPreconnectIntegrityFailure(errInfo.Summary) ||
+		(attemptErr != nil && isPreconnectIntegrityFailure(attemptErr.Error()))
+	// Only our own adapter's recorded protocol error may override a canceled
+	// request. An upstream error message with the same wording is not proof
+	// that the cancellation originated here rather than at the client.
+	localAdapterFailure := false
+	if writer := streamPreconnectFor(req.c); writer != nil {
+		writer.mu.Lock()
+		localAdapterFailure = writer.protocolErr != nil && errors.Is(attemptErr, writer.protocolErr)
+		writer.mu.Unlock()
+	}
+	adapterFailure = adapterFailure || localAdapterFailure
+	if (req.c.Request.Context().Err() != nil && !localAdapterFailure) || (errors.Is(attemptErr, context.Canceled) && !validation.IsRejected()) ||
 		errors.Is(attemptErr, errUpstreamQueueTimeout) || errors.Is(attemptErr, errRequestFirstTokenBudget) {
 		return
 	}
@@ -996,24 +1137,43 @@ func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, att
 	} else if attemptErr == nil && !terminal && status >= 200 && status < 300 {
 		return
 	}
-	firstTokenTimedOut := rt.isFirstTokenTimeout(attemptErr)
-	suppress := coordinatedAttemptSuppressesSameRouteRetries(attempt) || coordinatedPreferUntriedAlternative(req.group, plan, number, attempt.Route.ID)
-	if !req.group.RetryEnabled || req.group.CooldownSeconds <= 0 ||
-		(firstTokenTimedOut && !req.group.FirstTokenTimeoutCooldownEnabled) ||
-		(!suppress && requestAttemptsRemaining(req.c.Request.Context(), req.group.RequestMaxAttempts) != 0 &&
-			coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
-		return
-	}
-	if strings.TrimSpace(errInfo.Summary) == "" || validation.IsRejected() {
+	// Rule summaries omit the upstream payload. Reconstruct it before deciding
+	// cooldown scope so an upstream first-token budget error obeys the group's
+	// timeout cooldown switch even when a regex rejected that response.
+	if strings.TrimSpace(errInfo.Summary) == "" || (validation.IsRejected() && !coordinatedPolicyRejection(validation)) {
 		attempt.streamMu.Lock()
 		errInfo = rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), attemptErr, status, attempt.Headers, attempt.UpstreamBody, attempt.UpstreamURL, req.c.Request.Method)
 		attempt.streamMu.Unlock()
 	}
+	firstTokenTimedOut := rt.isFirstTokenTimeout(attemptErr)
+	firstTokenBudgetFailed := isFirstTokenBudgetFailure(errInfo.Summary) ||
+		matchUpstreamErrorEnvelope([]byte(errInfo.UpstreamBody), func(_ string, message string) bool {
+			return isFirstTokenBudgetFailure(message)
+		})
+	suppress := coordinatedAttemptSuppressesSameRouteRetries(attempt) || coordinatedPreferUntriedAlternative(req.group, plan, number, attempt.Route.ID) ||
+		coordinatedPolicyPrefersAlternative(validation) &&
+			coordinatedPlanHasLaterAlternative(plan, number, attempt.Route.ID) &&
+			requestAttemptsRemaining(req.c.Request.Context(), req.group.RequestMaxAttempts) != 0
+	if !req.group.RetryEnabled || req.group.CooldownSeconds <= 0 ||
+		((firstTokenTimedOut || firstTokenBudgetFailed) && !req.group.FirstTokenTimeoutCooldownEnabled) ||
+		(!suppress && requestAttemptsRemaining(req.c.Request.Context(), req.group.RequestMaxAttempts) != 0 &&
+			coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
+		return
+	}
+	adapterFailure = adapterFailure || isPreconnectIntegrityFailure(errInfo.Summary)
 	now := time.Now()
 	until := now.Add(time.Duration(req.group.CooldownSeconds) * time.Second)
 	probe := rt.gatewayRuntime().ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(req.path, req.kind)
 	var err error
-	if firstTokenTimedOut {
+	scope := storage.GatewayModelCooldownScopeShared
+	if firstTokenTimedOut || firstTokenBudgetFailed {
+		scope = storage.GatewayModelCooldownScopeGroup
+		err = rt.Routes.SetGroupModelTempUnschedulableWithProbeProtocol(attempt.Route.ID, attempt.UpstreamModel, until, errInfo.Summary, now, req.requestID, probe, string(req.kind))
+	} else if coordinatedPolicyRejection(validation) || adapterFailure {
+		// Response validation is configured per gateway group. Keep this
+		// cooldown local so stricter policies or preconnect adapter failures do
+		// not disable the same upstream for other groups.
+		scope = storage.GatewayModelCooldownScopeGroup
 		err = rt.Routes.SetGroupModelTempUnschedulableWithProbeProtocol(attempt.Route.ID, attempt.UpstreamModel, until, errInfo.Summary, now, req.requestID, probe, string(req.kind))
 	} else {
 		err = rt.Routes.SetModelTempUnschedulableWithProbeProtocol(attempt.Route.ID, attempt.UpstreamModel, until, errInfo.Summary, now, req.requestID, probe, string(req.kind))
@@ -1021,6 +1181,12 @@ func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, att
 	if err == nil {
 		attempt.healthRecorded = true
 		attempt.UsageMeta.CooldownUntil = &until
+		attempt.cooldownSnapshot = &storage.GatewayRouteModelCooldown{
+			RouteID: attempt.Route.ID, Model: storage.NormalizeGatewayModel(attempt.UpstreamModel),
+			CooldownScope: scope, TempUnschedulableUntil: &until,
+			TempUnschedulableAt: &now, TempUnschedulableRequestID: req.requestID,
+			TempUnschedulableReason: errInfo.Summary,
+		}
 	}
 }
 
@@ -1199,7 +1365,7 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			attemptKind = storage.GatewayAttemptKindRegexReject
 			attemptStatus = storage.GatewayAttemptStatusRejected
 			errInfo = validationErrorInfo(validation)
-			if coordinatedRejectedUpstreamFailure(attempt) {
+			if coordinatedRejectedUpstreamFailure(attempt) && !coordinatedPolicyRejection(validation) {
 				errInfo = rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), nil, status, headers, upstreamBody, attempt.UpstreamURL, req.c.Request.Method)
 				if status < 400 {
 					errInfo.Type = "upstream_error"
@@ -1293,7 +1459,45 @@ func (rt *Runtime) auditCoordinatedAttempts(req *coordinatedForwardRequest, plan
 			winnerUsageID = usageID
 		}
 	}
+	if result.Winner != nil {
+		retainCoordinatedWinnerCooldown(result.Winner.Value, attempts)
+	}
 	return winnerUsageID
+}
+
+// A fallback can fail and leave this request to retry its original source.
+// Carry this request's exact cooldown generation into the successful winner
+// so normal settlement can recover it. Never load a newer database snapshot:
+// that could erase another request's failure instead of our own.
+func retainCoordinatedWinnerCooldown(winner *coordinatedForwardAttempt, attempts map[int]*coordinatedForwardAttempt) {
+	if winner == nil {
+		return
+	}
+	model := storage.NormalizeGatewayModel(winner.UpstreamModel)
+	var latest *storage.GatewayRouteModelCooldown
+	for _, attempt := range attempts {
+		if attempt == nil || !attempt.healthRecorded || attempt.Route.ID != winner.Route.ID {
+			continue
+		}
+		cooldown := attempt.cooldownSnapshot
+		if cooldown == nil || cooldown.Model != model || cooldown.TempUnschedulableAt == nil {
+			continue
+		}
+		if latest == nil || cooldown.TempUnschedulableAt.After(*latest.TempUnschedulableAt) {
+			latest = cooldown
+		}
+	}
+	if latest == nil {
+		return
+	}
+	// Routes in the plan share the original read-cache snapshot. Copy its map
+	// before adding request-local state, leaving other attempts untouched.
+	cooldowns := make(map[string]storage.GatewayRouteModelCooldown, len(winner.Route.ModelCooldowns)+1)
+	for key, cooldown := range winner.Route.ModelCooldowns {
+		cooldowns[key] = cooldown
+	}
+	cooldowns[model] = *latest
+	winner.Route.ModelCooldowns = cooldowns
 }
 
 func planEntryForAttempt(plan []coordinatedRoutePlan, number int) coordinatedRoutePlan {

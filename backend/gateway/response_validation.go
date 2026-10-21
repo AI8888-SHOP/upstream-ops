@@ -2180,7 +2180,8 @@ func extractErrorMessageObject(object map[string]any) string {
 
 func looksLikeSSEBody(body []byte) bool {
 	trimmed := bytes.TrimSpace(body)
-	return bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte(":"))
+	return bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) ||
+		bytes.HasPrefix(trimmed, []byte("id:")) || bytes.HasPrefix(trimmed, []byte("retry:")) || bytes.HasPrefix(trimmed, []byte(":"))
 }
 
 func sseDataPayloads(body []byte) [][]byte {

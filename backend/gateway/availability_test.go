@@ -18,40 +18,172 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestSourceFailureClassificationUsesOnlyErrorEnvelopes(t *testing.T) {
+func TestSourceFailureClassificationRequiresErrorEnvelopeOrHTTPFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name, body  string
 		status      int
 		unavailable bool
+		structured  bool
 	}{
-		{"model code", `{"error":{"code":"model_not_found","type":"invalid_request_error","message":"model missing"}}`, 400, true},
-		{"model unavailable", `{"error":{"message":"The requested model is unavailable. Please select a supported model."}}`, 400, true},
-		{"model access", `{"error":{"message":"The model 'gpt-test' does not exist or you do not have access to it."}}`, 400, true},
-		{"model group", `{"error":{"message":"Model gpt-test is not supported by any configured account in this group"}}`, 404, true},
-		{"balance string", `{"error":"Insufficient account balance"}`, 403, true},
-		{"key", `{"error":{"code":"invalid_api_key"}}`, 401, true},
-		{"nested model", `{"type":"response.failed","response":{"error":{"code":"model_not_found"}}}`, 400, true},
-		{"SSE model", "event: response.failed\ndata: {\"response\":{\"error\":{\"code\":\"model_not_found\"}}}\n\n", 404, true},
-		{"invalid content", `{"error":{"type":"invalid_request_error","message":"input_item_not_supported"}}`, 400, false},
-		{"length", `{"error":{"code":"context_length_exceeded","message":"model input too long"}}`, 400, false},
-		{"generic 404", `{"error":{"message":"Not found"}}`, 404, false},
-		{"null error", `{"error":null}`, 400, false},
-		{"assistant prose", `{"choices":[{"message":{"content":"model_not_found and insufficient balance"}}]}`, 400, false},
-		{"tool arguments", `{"output":[{"type":"function_call","arguments":"{\"error\":{\"code\":\"model_not_found\"}}"}]}`, 400, false},
+		{"model code", `{"error":{"code":"model_not_found","type":"invalid_request_error","message":"model missing"}}`, 400, true, true},
+		{"model unavailable", `{"error":{"message":"The requested model is unavailable. Please select a supported model."}}`, 400, true, true},
+		{"model access", `{"error":{"message":"The model 'gpt-test' does not exist or you do not have access to it."}}`, 400, true, true},
+		{"model group", `{"error":{"message":"Model gpt-test is not supported by any configured account in this group"}}`, 404, true, true},
+		{"balance string", `{"error":"Insufficient account balance"}`, 403, true, true},
+		{"media capability", `{"error":{"message":"Image generation is not enabled for this group"}}`, 403, true, true},
+		{"Chinese JSON permission", `{"error":{"message":"无权访问 pro 分组"}}`, 403, true, true},
+		{"Chinese group permission", `无权访问 pro 分组`, 403, true, false},
+		{"deleted group", `API Key 所属分组已删除`, 403, true, false},
+		{"Chinese missing model", `模型不存在`, 404, true, false},
+		{"Chinese model not found", `找不到模型 gpt-test`, 404, true, false},
+		{"numeric error code", `{"error":{"code":404,"message":"model not found"}}`, 404, true, true},
+		{"numeric code and permission", `{"error":{"code":403,"message":"无权访问 pro 分组"}}`, 403, true, true},
+		{"numeric code and invalid input", `{"error":{"code":400,"type":"invalid_request_error","message":"invalid input"}}`, 400, false, false},
+		{"key", `{"error":{"code":"invalid_api_key"}}`, 401, true, true},
+		{"nested model", `{"type":"response.failed","response":{"error":{"code":"model_not_found"}}}`, 400, true, true},
+		{"SSE model", "event: response.failed\ndata: {\"response\":{\"error\":{\"code\":\"model_not_found\"}}}\n\n", 404, true, true},
+		{"SSE id before error", "id: 1\nevent: error\ndata: {\"error\":{\"code\":\"model_not_found\"}}\n\n", 404, true, true},
+		{"SSE retry before error", "retry: 1000\nevent: error\ndata: {\"error\":{\"code\":404,\"message\":\"model not found\"}}\n\n", 404, true, true},
+		{"invalid content", `{"error":{"type":"invalid_request_error","message":"input_item_not_supported"}}`, 400, false, false},
+		{"length", `{"error":{"code":"context_length_exceeded","message":"model input too long"}}`, 400, false, false},
+		{"generic 404", `{"error":{"message":"Not found"}}`, 404, false, false},
+		{"null error", `{"error":null}`, 400, false, false},
+		{"assistant prose", `{"choices":[{"message":{"content":"model_not_found and insufficient balance"}}]}`, 400, false, false},
+		{"tool arguments", `{"output":[{"type":"function_call","arguments":"{\"error\":{\"code\":\"model_not_found\"}}"}]}`, 400, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(tc.body)
-			if got := upstreamRouteUnavailable(body); got != tc.unavailable {
+			if got := upstreamRouteUnavailable(body, tc.status >= http.StatusBadRequest); got != tc.unavailable {
 				t.Fatalf("unavailable=%v want=%v", got, tc.unavailable)
+			}
+			if got := upstreamRouteUnavailable(body); got != tc.structured {
+				t.Fatalf("envelope-only unavailable=%v want=%v", got, tc.structured)
+			}
+			if got := hasStructuredUpstreamError(body); got != tc.structured {
+				t.Fatalf("structured=%v want=%v", got, tc.structured)
 			}
 			if got := (*Service)(nil).isFailoverResponse(tc.status, false, body); got != tc.unavailable {
 				t.Fatalf("failover=%v want=%v", got, tc.unavailable)
 			}
 			info := (*Service)(nil).buildUpstreamErrorInfo(nil, tc.status, nil, body, "", http.MethodPost)
-			if tc.unavailable && (info.Type != "upstream_error" || isSameRouteRetryableUpstreamFailure(tc.status, info) || !hasStructuredUpstreamError(body)) {
+			wantType := "http"
+			if tc.unavailable {
+				wantType = "upstream_error"
+			}
+			if info.Type != wantType {
+				t.Fatalf("error type=%q want=%q", info.Type, wantType)
+			}
+			if tc.unavailable && isSameRouteRetryableUpstreamFailure(tc.status, info) {
 				t.Fatalf("source-local error was not classified consistently: %+v", info)
 			}
 		})
+	}
+}
+
+func TestSourceFailureClassificationDoesNotScanSuccessfulContent(t *testing.T) {
+	prose := "permission denied; 无权访问 pro 分组; 模型不存在; request first token budget exhausted; upstream stream idle for 2m0s; Responses preconnect terminal output identity changed"
+	arguments := fmt.Sprintf(`{"error":{"message":%q}}`, prose)
+	for _, tc := range []struct {
+		name, body string
+	}{
+		{"assistant prose", fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, prose)},
+		{"tool arguments", fmt.Sprintf(`{"output":[{"type":"function_call","arguments":%q}]}`, arguments)},
+		{"SSE assistant prose", fmt.Sprintf("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":%q}\n\n", prose)},
+		{"SSE id before assistant prose", fmt.Sprintf("id: 1\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":%q}\n\n", prose)},
+		{"SSE retry before assistant prose", fmt.Sprintf("retry: 1000\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":%q}\n\n", prose)},
+		{"SSE tool arguments", fmt.Sprintf("event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":%q}\n\n", arguments)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(tc.body)
+			if upstreamRouteUnavailable(body) || hasStructuredUpstreamError(body) {
+				t.Fatal("ordinary content was classified as a structured upstream failure")
+			}
+			for _, status := range []int{http.StatusOK, http.StatusBadRequest} {
+				if upstreamRouteUnavailable(body, status >= http.StatusBadRequest) || (*Service)(nil).isFailoverResponse(status, false, body) {
+					t.Fatalf("ordinary content triggered source failover for HTTP %d", status)
+				}
+				info := (*Service)(nil).buildUpstreamErrorInfo(nil, status, nil, body, "", http.MethodPost)
+				if info.Type != "http" {
+					t.Fatalf("ordinary content changed error type for HTTP %d: %+v", status, info)
+				}
+			}
+		})
+	}
+	for _, body := range []string{"无权访问 pro 分组", "模型不存在", prose} {
+		if upstreamRouteUnavailable([]byte(body)) || hasStructuredUpstreamError([]byte(body)) || (*Service)(nil).isFailoverResponse(http.StatusOK, false, []byte(body)) {
+			t.Errorf("successful plain text was classified as an upstream failure: %q", body)
+		}
+		info := (*Service)(nil).buildUpstreamErrorInfo(nil, http.StatusOK, nil, []byte(body), "", http.MethodPost)
+		if info.Type != "http" {
+			t.Errorf("successful plain text changed error type: %+v", info)
+		}
+	}
+}
+
+func TestSameRouteRetrySuppressionIncludesChinesePermissionAndAdapterIntegrity(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		message string
+	}{
+		{http.StatusForbidden, "HTTP 403: 无权访问 pro 分组"},
+		{http.StatusForbidden, "API Key 所属分组已删除"},
+		{http.StatusBadGateway, "HTTP 502: permission denied for pro group"},
+		{http.StatusBadGateway, "request first token budget exhausted"},
+		{http.StatusBadGateway, "upstream stream idle for 2m0s"},
+		{http.StatusOK, "Responses preconnect terminal output identity changed"},
+	} {
+		info := usageErrorInfo{Summary: tc.message}
+		if isSameRouteRetryableUpstreamFailure(tc.status, info) {
+			t.Errorf("same-route retry unexpectedly allowed for %q", tc.message)
+		}
+	}
+	if isSameRouteRetryableUpstreamFailure(http.StatusBadGateway, usageErrorInfo{Summary: "temporary gateway failure"}) == false {
+		t.Fatal("transient HTTP 502 should retain its same-route retry")
+	}
+}
+
+func TestRetryOnlyFailuresDoNotMarkRouteUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		message    string
+		structured bool
+	}{
+		{"request first token budget exhausted", true},
+		{"upstream stream idle for 2m0s", true},
+		{"Responses preconnect terminal output identity changed", false},
+		{"Responses preconnect output item identity changed", false},
+	} {
+		t.Run(tc.message, func(t *testing.T) {
+			if isDeterministicRouteFailure(tc.message) {
+				t.Fatal("wait or adapter failure was classified as a route identity failure")
+			}
+			for _, body := range []string{
+				fmt.Sprintf(`{"error":{"message":%q}}`, tc.message),
+				fmt.Sprintf("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\nevent: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":%q}}}\n\n", tc.message),
+			} {
+				if upstreamRouteUnavailable([]byte(body), true) {
+					t.Fatal("wait or adapter failure was classified as a route identity failure")
+				}
+				if got := hasStructuredUpstreamError([]byte(body)); got != tc.structured {
+					t.Fatalf("structured failure=%v want=%v; waits are upstream errors, adapter integrity failures are local", got, tc.structured)
+				}
+				info := usageErrorInfo{Summary: "response matched rejection rule", UpstreamBody: body}
+				if isSameRouteRetryableUpstreamFailure(http.StatusBadGateway, info) {
+					t.Fatal("wait or adapter error envelope did not suppress same-route retry")
+				}
+			}
+		})
+	}
+}
+
+func TestStructuredUpstreamFailurePreservesNumericCodeMessage(t *testing.T) {
+	for _, prefix := range []string{"", "id: 1\n", "retry: 1000\n"} {
+		body := `{"error":{"code":503,"message":"service unavailable"}}`
+		if prefix != "" {
+			body = prefix + "event: error\ndata: " + body + "\n\n"
+		}
+		if !hasStructuredUpstreamError([]byte(body)) {
+			t.Errorf("numeric error code hid the upstream error message: %q", body)
+		}
 	}
 }
 

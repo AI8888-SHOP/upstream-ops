@@ -55,9 +55,9 @@ func TestFinalizeStreamPreconnectProtocolErrorIsNotClientDisconnect(t *testing.T
 		if _, err := writer.Write([]byte(wire[:terminal])); err != nil {
 			t.Fatal(err)
 		}
-		badTerminal := strings.ReplaceAll(wire[terminal:], "msg_real", "msg_other")
+		badTerminal := strings.ReplaceAll(wire[terminal:], `"type":"message"`, `"type":"function_call"`)
 		if _, err := writer.Write([]byte(badTerminal)); err == nil || writer.protocolErr == nil {
-			t.Fatal("inconsistent terminal identity was not rejected")
+			t.Fatal("inconsistent terminal item type was not rejected")
 		}
 		// Lower layers can report the adapter-triggered context cancellation as a
 		// client disconnect. Finalization must retain the upstream protocol cause.

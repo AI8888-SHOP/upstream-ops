@@ -171,7 +171,7 @@ func (w *streamPreconnectWriter) finish() {
 	if w.responses != nil && w.preconnected && !w.responses.done() && w.writeErr == nil && w.ctx.Err() == nil {
 		// An incomplete synthetic lifecycle must not look like a successful
 		// response. This bypasses real-output timing just like writeFinalError.
-		w.failResponsesLocked(io.ErrUnexpectedEOF)
+		w.failResponsesLocked(errors.Join(errors.New("Responses preconnect stream ended without terminal event"), io.ErrUnexpectedEOF))
 	}
 }
 

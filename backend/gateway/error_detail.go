@@ -108,7 +108,7 @@ func (svc *Service) buildUpstreamErrorInfoCfg(
 	}
 
 	info.Type = "http"
-	if status >= 400 && status < 500 && upstreamRouteUnavailable(respBody) {
+	if status >= 400 && status < 500 && upstreamRouteUnavailable(respBody, true) {
 		// Unlike a caller's malformed payload, a missing model or exhausted
 		// upstream account must contribute to that source's failure statistics.
 		info.Type = "upstream_error"

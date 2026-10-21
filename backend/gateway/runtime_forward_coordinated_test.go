@@ -617,11 +617,11 @@ func TestBuildCoordinatedRoutePlanValidationIgnoresZeroTransportBudget(t *testin
 	if len(plan) != 6 {
 		t.Fatalf("validation plan length=%d, want 6", len(plan))
 	}
-	wantRoutes := []uint{1, 1, 1, 2, 2, 2}
+	wantRoutes := []uint{1, 2, 1, 2, 1, 2}
 	for i, entry := range plan {
-		if entry.Candidate.Route.ID != wantRoutes[i] || entry.TryOnRoute != i%3 || entry.MaxTries != 3 {
+		if entry.Candidate.Route.ID != wantRoutes[i] || entry.TryOnRoute != i/2 || entry.MaxTries != 3 {
 			t.Fatalf("plan[%d]=route %d try %d max %d, want route %d try %d max 3", i,
-				entry.Candidate.Route.ID, entry.TryOnRoute, entry.MaxTries, wantRoutes[i], i%3)
+				entry.Candidate.Route.ID, entry.TryOnRoute, entry.MaxTries, wantRoutes[i], i/2)
 		}
 	}
 }
@@ -687,7 +687,7 @@ func TestValidateCoordinatedAttemptSkipsExcludedPrimary(t *testing.T) {
 	}
 	var excluded sync.Map
 	excluded.Store(uint(7), struct{}{})
-	accepted, err := validateCoordinatedAttempt(attempt, &excluded, nil)
+	accepted, err := validateCoordinatedAttempt(attempt, &excluded)
 	if accepted || !errors.Is(err, errSkippedNonRetryableRoute) {
 		t.Fatalf("accepted=%v err=%v, want excluded primary", accepted, err)
 	}
@@ -701,7 +701,7 @@ func TestValidateCoordinatedAttemptAllowsPlannedSameRouteRetryAfterRejection(t *
 	}
 	var excluded sync.Map
 	excluded.Store(uint(7), struct{}{})
-	accepted, err := validateCoordinatedAttempt(attempt, nil, &excluded)
+	accepted, err := validateCoordinatedAttempt(attempt, nil)
 	if !accepted || err != nil {
 		t.Fatalf("accepted=%v err=%v, want same-route retry to remain eligible", accepted, err)
 	}
@@ -715,7 +715,7 @@ func TestValidateCoordinatedAttemptDoesNotRetryHardExcludedRoute(t *testing.T) {
 	}
 	var excluded sync.Map
 	excluded.Store(uint(7), struct{}{})
-	accepted, err := validateCoordinatedAttempt(attempt, &excluded, nil)
+	accepted, err := validateCoordinatedAttempt(attempt, &excluded)
 	if accepted || !errors.Is(err, errSkippedNonRetryableRoute) {
 		t.Fatalf("accepted=%v err=%v, want hard exclusion", accepted, err)
 	}
@@ -749,6 +749,65 @@ func TestCoordinatedPlanSchedulerPromotesSameRouteRetry(t *testing.T) {
 	third := scheduler.reserve(3)
 	if third.Candidate.Route.ID != 2 || third.TryOnRoute != 0 {
 		t.Fatalf("third=%+v, want route 2 primary after retry", third)
+	}
+}
+
+func TestCoordinatedPlanSchedulerKeepsResponseBudgetAcrossHedgeCompletionOrder(t *testing.T) {
+	group := &storage.GatewayGroup{
+		RetryEnabled:                 true,
+		RetryCount:                   1,
+		ResponseValidationRetryCount: 3,
+	}
+	plan := buildCoordinatedRoutePlan([]ScoredRoute{
+		{Route: storage.GatewayRoute{ID: 1}},
+		{Route: storage.GatewayRoute{ID: 2}},
+	}, group, true, true)
+	scheduler := newCoordinatedPlanScheduler(plan, len(plan))
+	first := scheduler.reserve(1)
+	if first.Candidate.Route.ID != 1 || first.TryOnRoute != 0 {
+		t.Fatalf("first=%+v, want route 1 primary", first)
+	}
+	// Reserve the next same-route attempt before the primary response is
+	// validated, which is the ordering that occurs with concurrent hedges.
+	_ = scheduler.reserve(2)
+	inFlightRetry := scheduler.reserve(3)
+	if inFlightRetry.Candidate.Route.ID != 1 || inFlightRetry.TryOnRoute != 1 || inFlightRetry.ResponseRetry {
+		t.Fatalf("in-flight retry=%+v, want ordinary retry reserved before rejection", inFlightRetry)
+	}
+	scheduler.recordRetryOutcome(&coordinatedForwardAttempt{Route: first.Candidate.Route, Plan: first}, true)
+	// The older in-flight transport failure must not erase the response retry
+	// budget opened by the primary rejection.
+	scheduler.recordRetryOutcome(&coordinatedForwardAttempt{Route: inFlightRetry.Candidate.Route, Plan: inFlightRetry}, false)
+	next := scheduler.reserve(4)
+	if next.Candidate.Route.ID != 2 || next.TryOnRoute != 1 {
+		t.Fatalf("next=%+v, want route 2 retry slot", next)
+	}
+	responseRetry := scheduler.reserve(5)
+	if responseRetry.Candidate.Route.ID != 1 || responseRetry.TryOnRoute != 2 || !responseRetry.ResponseRetry || responseRetry.RetryMaxTries != first.ResponseMaxTries {
+		t.Fatalf("response retry=%+v, want response budget %d", responseRetry, first.ResponseMaxTries)
+	}
+	// A transport failure from a retry that was actually launched under the
+	// response budget returns later, not-yet-reserved slots to ordinary limits.
+	scheduler.recordRetryOutcome(&coordinatedForwardAttempt{Route: responseRetry.Candidate.Route, Plan: responseRetry}, false)
+	_ = scheduler.reserve(6)
+	ordinaryRetry := scheduler.reserve(7)
+	if ordinaryRetry.Candidate.Route.ID != 1 || ordinaryRetry.TryOnRoute != 3 || ordinaryRetry.ResponseRetry || ordinaryRetry.RetryMaxTries != ordinaryRetry.MaxTries {
+		t.Fatalf("ordinary retry=%+v, want transport-only budget %d", ordinaryRetry, ordinaryRetry.MaxTries)
+	}
+
+	// Also cover the reverse completion order: a primary response that is
+	// validated after a later hedge transport failure must still open its
+	// response-specific retries.
+	lateScheduler := newCoordinatedPlanScheduler(plan, len(plan))
+	latePrimary := lateScheduler.reserve(1)
+	_ = lateScheduler.reserve(2)
+	earlierRetry := lateScheduler.reserve(3)
+	lateScheduler.recordRetryOutcome(&coordinatedForwardAttempt{Route: earlierRetry.Candidate.Route, Plan: earlierRetry}, false)
+	lateScheduler.recordRetryOutcome(&coordinatedForwardAttempt{Route: latePrimary.Candidate.Route, Plan: latePrimary}, true)
+	_ = lateScheduler.reserve(4)
+	lateResponseRetry := lateScheduler.reserve(5)
+	if lateResponseRetry.Candidate.Route.ID != 1 || !lateResponseRetry.ResponseRetry {
+		t.Fatalf("late response retry=%+v, want response-specific budget", lateResponseRetry)
 	}
 }
 

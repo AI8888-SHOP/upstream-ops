@@ -556,6 +556,111 @@ func TestPreconnectResponsesReconstructsOmittedTerminalOutput(t *testing.T) {
 	}
 }
 
+func TestPreconnectResponsesReconcilesTerminalSnapshotItemID(t *testing.T) {
+	const eventItem = `{"id":"msg_stream","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}`
+	const terminalItem = `{"id":"msg_snapshot","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}`
+	stream, wire, _, reasoningID := preconnectResponsesTestStart(t)
+	payload := `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_stream","type":"message","role":"assistant","content":[]}}` + "\n\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":` + eventItem + `}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_up","status":"completed","usage":{"input_tokens":10,"output_tokens":1},"output":[` + terminalItem + `]}}` + "\n\n"
+	if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err != nil {
+		t.Fatalf("matching terminal snapshot type should be recoverable: %v", err)
+	}
+	events := parsePreconnectResponsesTestEvents(t, wire.Bytes())
+	last := events[len(events)-1]
+	response := preconnectResponsesTestObject(t, last.root["response"])
+	var output []json.RawMessage
+	if err := json.Unmarshal(response["output"], &output); err != nil || len(output) != 2 {
+		t.Fatalf("terminal snapshot output is invalid: %s: %v", response["output"], err)
+	}
+	real := preconnectResponsesTestObject(t, output[1])
+	if last.name != "response.completed" || preconnectResponsesTestString(t, real["id"]) != "msg_stream" || preconnectResponsesTestString(t, preconnectResponsesTestObject(t, output[0])["id"]) != reasoningID {
+		t.Fatalf("terminal snapshot did not preserve streamed item identity: %s", last.data)
+	}
+}
+
+func TestPreconnectResponsesStillRejectsTerminalItemTypeChange(t *testing.T) {
+	stream, wire, _, _ := preconnectResponsesTestStart(t)
+	payload := "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item_stream\",\"type\":\"message\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1},\"output\":[{\"id\":\"item_snapshot\",\"type\":\"function_call\"}]}}\n\n"
+	if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err == nil {
+		t.Fatal("terminal item type change must remain a protocol error")
+	}
+}
+
+func TestPreconnectResponsesTerminalIDComparisonPreservesContent(t *testing.T) {
+	for _, tc := range []struct {
+		name, streamed, terminal string
+		wantSame                 bool
+	}{
+		{
+			name: "field ordering only", wantSame: true,
+			streamed: `{"id":"a","type":"message","content":[{"text":"answer","type":"output_text"}]}`,
+			terminal: `{"type":"message","id":"b","content":[{"type":"output_text","text":"answer"}]}`,
+		},
+		{
+			name:     "different message text",
+			streamed: `{"id":"a","type":"message","content":[{"type":"output_text","text":"answer"}]}`,
+			terminal: `{"id":"b","type":"message","content":[{"type":"output_text","text":"different answer"}]}`,
+		},
+		{
+			name:     "large numeric metadata differs",
+			streamed: `{"id":"a","type":"message","metadata":{"value":9007199254740992}}`,
+			terminal: `{"id":"b","type":"message","metadata":{"value":9007199254740993}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preconnectResponsesSameItemExceptID([]byte(tc.streamed), []byte(tc.terminal)); got != tc.wantSame {
+				t.Fatalf("same item=%v, want %v", got, tc.wantSame)
+			}
+		})
+	}
+}
+
+func TestPreconnectResponsesOnlyRewritesTerminalIDForIdenticalToolCall(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		callID    string
+		arguments string
+		wantError bool
+	}{
+		{name: "same call", callID: "call_1", arguments: `{"q":1}`},
+		{name: "different call ID", callID: "call_2", arguments: `{"q":1}`, wantError: true},
+		{name: "different arguments", callID: "call_1", arguments: `{"q":2}`, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream, wire, _, _ := preconnectResponsesTestStart(t)
+			streamedItem := preconnectResponsesJSON(map[string]any{
+				"id": "fc_stream", "type": "function_call", "call_id": "call_1",
+				"name": "lookup", "arguments": `{"q":1}`,
+			})
+			terminalItem := preconnectResponsesJSON(map[string]any{
+				"id": "fc_snapshot", "type": "function_call", "call_id": tc.callID,
+				"name": "lookup", "arguments": tc.arguments,
+			})
+			payload := `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_stream","type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}` + "\n\n" +
+				`data: {"type":"response.output_item.done","output_index":0,"item":` + string(streamedItem) + `}` + "\n\n" +
+				`data: {"type":"response.completed","response":{"id":"resp_up","status":"completed","usage":{"input_tokens":10,"output_tokens":1},"output":[` + string(terminalItem) + `]}}` + "\n\n"
+			err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire))
+			if (err != nil) != tc.wantError {
+				t.Fatalf("feed error=%v, wantError=%v", err, tc.wantError)
+			}
+			if !tc.wantError {
+				events := parsePreconnectResponsesTestEvents(t, wire.Bytes())
+				response := preconnectResponsesTestObject(t, events[len(events)-1].root["response"])
+				var output []json.RawMessage
+				if err := json.Unmarshal(response["output"], &output); err != nil || len(output) != 2 {
+					t.Fatalf("invalid terminal output: %s: %v", response["output"], err)
+				}
+				toolCall := preconnectResponsesTestObject(t, output[1])
+				if preconnectResponsesTestString(t, toolCall["id"]) != "fc_stream" || preconnectResponsesTestString(t, toolCall["call_id"]) != "call_1" {
+					t.Fatalf("tool call identity changed: %s", output[1])
+				}
+			}
+		})
+	}
+}
+
 func TestPreconnectResponsesRejectsIncompleteTerminalItemState(t *testing.T) {
 	const added = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_up\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n"
 	const item = "{\"id\":\"msg_up\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"

@@ -168,7 +168,7 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 									return
 								}
 								if tc.corrupt == "identity" {
-									_, _ = io.WriteString(w, strings.ReplaceAll(payload[terminal:], "msg_real", "msg_other"))
+									_, _ = io.WriteString(w, strings.ReplaceAll(payload[terminal:], `"type":"message"`, `"type":"function_call"`))
 								}
 								return
 							}

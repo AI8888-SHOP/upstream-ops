@@ -544,10 +544,14 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				lastTryOnRoute := tryOnRoute >= maxTriesOnRoute-1 || requestAttemptsRemaining(c.Request.Context(), group.RequestMaxAttempts) == 0
 				var cooldownUntil *time.Time
 				firstTokenTimedOut := rt.isFirstTokenTimeout(fwdErr)
+				firstTokenBudgetFailed := isFirstTokenBudgetFailure(errInfo.Summary) ||
+					matchUpstreamErrorEnvelope(respBody, func(_ string, message string) bool {
+						return isFirstTokenBudgetFailure(message)
+					})
 				firstTokenCooldownEnabled := group.FirstTokenTimeoutCooldownEnabled
 				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && !clientCanceled && !requestTimedOut &&
 					!errors.Is(fwdErr, errUpstreamQueueTimeout) &&
-					(!firstTokenTimedOut || firstTokenCooldownEnabled) {
+					(!(firstTokenTimedOut || firstTokenBudgetFailed) || firstTokenCooldownEnabled) {
 					until := time.Now().Add(time.Duration(cooldownSec) * time.Second)
 					cooldownUntil = &until
 					pauseReason := errInfo.Summary
@@ -556,7 +560,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					}
 					var cooldownErr error
 					probeEnabled := gwCfg.ModelCooldownProbeEnabled && modelCooldownProbeSupportedRequest(path, kind)
-					if firstTokenTimedOut {
+					if firstTokenTimedOut || firstTokenBudgetFailed {
 						cooldownErr = rt.Routes.SetGroupModelTempUnschedulableWithProbeProtocol(
 							route.ID, upstreamModel, until, pauseReason, time.Now(), reqID,
 							probeEnabled, string(kind),

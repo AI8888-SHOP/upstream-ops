@@ -36,16 +36,15 @@ func TestResponseModelAuditAndRejectionThroughGateway(t *testing.T) {
 					Name: "model-audit", Status: storage.GatewayGroupStatusActive, RateSortDirection: "asc",
 					ModelMappingJSON: `{"public-main":"sent-main"}`,
 					RetryEnabled:     true, FailoverEnabled: true, FailoverMax: 3, RequestMaxAttempts: 3,
-					ResponseValidationEnabled: reject, ResponseValidationRetryCount: 0,
+					ResponseValidationEnabled: reject, ResponseValidationRetryCount: 4,
 					ResponseValidationStreamMode: "prefix", RequestFirstTokenTimeoutSec: 5,
 				}
 				if err := groups.Create(group); err != nil {
 					t.Fatal(err)
 				}
-				// Persist zero explicitly rather than letting GORM's -1 default apply.
-				if err := db.Model(group).Update("response_validation_retry_count", 0).Error; err != nil {
-					t.Fatal(err)
-				}
+				// Keep a generous validation retry budget: the scheduler should try
+				// the fresh source first, then retain the configured retry ladder as
+				// a last resort if all alternative sources fail.
 				key := &storage.GatewayKey{GroupID: group.ID, Name: "client", KeyHash: HashAPIKey("client-secret"), KeyCipher: ciphertext, Status: storage.GatewayKeyStatusActive}
 				if err := keys.Create(key); err != nil {
 					t.Fatal(err)
