@@ -934,6 +934,7 @@ export function GatewayPage() {
         g.cache_hit_rate_minimum_requests == null
           ? ""
           : String(g.cache_hit_rate_minimum_requests),
+      cache_hit_rate_priority_enabled: g.cache_hit_rate_priority_enabled === true,
       response_validation_enabled: !!g.response_validation_enabled,
       response_validation_virtual_cache_enabled:
         !!g.response_validation_virtual_cache_enabled,
@@ -1137,6 +1138,7 @@ export function GatewayPage() {
       cache_hit_rate_threshold_percent: cacheHitRateThresholdPercent,
       cache_hit_rate_blacklist_minutes: cacheHitRateBlacklistMinutes,
       cache_hit_rate_minimum_requests: cacheHitRateMinimumRequests,
+      cache_hit_rate_priority_enabled: groupForm.cache_hit_rate_priority_enabled,
       response_validation_enabled: groupForm.response_validation_enabled,
       response_validation_virtual_cache_enabled:
         groupForm.response_validation_virtual_cache_enabled,

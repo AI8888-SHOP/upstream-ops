@@ -192,6 +192,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	for {
 		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity, requestedModel)
 		candidates = rt.orderAdaptiveCandidates(candidates, adaptive, &affinity, routesTried == 0, time.Now())
+		candidates = rt.applyCacheHitRatePriority(candidates, group, affinity.PreferredRouteID)
 		if len(candidates) == 0 {
 			if routesTried == 0 {
 				rt.failNoRoutes(c, key, group, diagnosticRoutes, requestedModel, path, kind, stream, "no schedulable routes", adaptive)

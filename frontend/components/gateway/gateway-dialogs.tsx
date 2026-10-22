@@ -1100,6 +1100,21 @@ export function GroupFormDialog({
                 />
               </div>
             </div>
+            <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
+              <div className="min-w-0 flex-1">
+                <Label>缓存命中率调度优先</Label>
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  开启后，同一层级内优先使用上游缓存命中率高的渠道；样本不足的渠道按中性处理，兜底渠道仍排在最后。价格上限与冷却过滤不受影响。
+                </p>
+              </div>
+              <Switch
+                className="shrink-0"
+                checked={groupForm.cache_hit_rate_priority_enabled}
+                onCheckedChange={(v) =>
+                  setGroupForm({ ...groupForm, cache_hit_rate_priority_enabled: v })
+                }
+              />
+            </div>
           </div>
 
           <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">

@@ -716,6 +716,8 @@ export interface GatewayGroup {
   cache_hit_rate_threshold_percent?: number | null
   cache_hit_rate_blacklist_minutes?: number | null
   cache_hit_rate_minimum_requests?: number | null
+  /** 缓存命中率调度优先：同一层级内优先使用上游缓存命中率高的渠道 */
+  cache_hit_rate_priority_enabled?: boolean
   /** 是否启用响应内容正则校验 */
   response_validation_enabled?: boolean
   /** 正则预提交拒绝并切换其它渠道后，将 winner 输入按虚拟缓存读取计费 */

@@ -609,6 +609,8 @@ type GatewayGroup struct {
 	CacheHitRateThresholdPercent *float64 `gorm:"default:null" json:"cache_hit_rate_threshold_percent,omitempty"`
 	CacheHitRateBlacklistMinutes *int     `gorm:"default:null" json:"cache_hit_rate_blacklist_minutes,omitempty"`
 	CacheHitRateMinimumRequests  *int     `gorm:"default:null" json:"cache_hit_rate_minimum_requests,omitempty"`
+	// CacheHitRatePriorityEnabled 开启后在同一排序层级内按回源缓存命中率优先调度。
+	CacheHitRatePriorityEnabled bool `gorm:"not null;default:false" json:"cache_hit_rate_priority_enabled"`
 	// 响应校验按组启用；流式响应只在提交客户端前检查 prefix。
 	ResponseValidationEnabled             bool `gorm:"not null;default:false" json:"response_validation_enabled"`
 	ResponseValidationVirtualCacheEnabled bool `gorm:"not null;default:false" json:"response_validation_virtual_cache_enabled"`

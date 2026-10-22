@@ -63,6 +63,10 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.FirstTokenTimeoutCooldownEnabled != nil {
 		firstTokenTimeoutCooldownEnabled = *in.FirstTokenTimeoutCooldownEnabled
 	}
+	cacheHitRatePriority := false
+	if in.CacheHitRatePriorityEnabled != nil {
+		cacheHitRatePriority = *in.CacheHitRatePriorityEnabled
+	}
 	hedgeEnabled := gwDefaults.Hedge.Enabled
 	if in.HedgeEnabled != nil {
 		hedgeEnabled = *in.HedgeEnabled
@@ -182,6 +186,7 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		CacheHitRateThresholdPercent:          cacheThreshold,
 		CacheHitRateBlacklistMinutes:          cacheBlacklist,
 		CacheHitRateMinimumRequests:           cacheMinimum,
+		CacheHitRatePriorityEnabled:           cacheHitRatePriority,
 		ResponseValidationEnabled:             validationEnabled,
 		ResponseValidationVirtualCacheEnabled: validationVirtualCache,
 		ResponseValidationRetryCount:          validationRetryCount,
@@ -392,6 +397,9 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	}
 	if in.FirstTokenTimeoutCooldownEnabled != nil {
 		item.FirstTokenTimeoutCooldownEnabled = *in.FirstTokenTimeoutCooldownEnabled
+	}
+	if in.CacheHitRatePriorityEnabled != nil {
+		item.CacheHitRatePriorityEnabled = *in.CacheHitRatePriorityEnabled
 	}
 	if in.HedgeEnabled != nil {
 		item.HedgeEnabled = *in.HedgeEnabled
