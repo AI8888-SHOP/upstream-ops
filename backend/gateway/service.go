@@ -74,6 +74,9 @@ type Service struct {
 	httpTransports    map[string]*http.Transport
 	loadBalanceMu     sync.RWMutex
 	loadBalanceStates map[loadBalancePoolKey]*loadBalancePoolState
+	// cachePriorityRot 记录缓存命中率优先调度的轮转槽位，用于限制优先渠道占比。
+	cachePriorityMu  sync.Mutex
+	cachePriorityRot map[uint]uint64
 
 	mu          sync.RWMutex
 	proxyConfig config.ProxyConfig

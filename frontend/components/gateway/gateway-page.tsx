@@ -935,6 +935,10 @@ export function GatewayPage() {
           ? ""
           : String(g.cache_hit_rate_minimum_requests),
       cache_hit_rate_priority_enabled: g.cache_hit_rate_priority_enabled === true,
+      cache_hit_rate_priority_share_percent:
+        g.cache_hit_rate_priority_share_percent == null
+          ? ""
+          : String(g.cache_hit_rate_priority_share_percent),
       response_validation_enabled: !!g.response_validation_enabled,
       response_validation_virtual_cache_enabled:
         !!g.response_validation_virtual_cache_enabled,
@@ -1033,6 +1037,19 @@ export function GatewayPage() {
       cacheBlacklistText === "" ? null : Number(cacheBlacklistText)
     const cacheHitRateMinimumRequests =
       cacheMinimumText === "" ? null : Number(cacheMinimumText)
+    const cachePriorityShareText =
+      groupForm.cache_hit_rate_priority_share_percent.trim()
+    const cacheHitRatePrioritySharePercent =
+      cachePriorityShareText === "" ? null : Number(cachePriorityShareText)
+    if (
+      cacheHitRatePrioritySharePercent != null &&
+      (!Number.isInteger(cacheHitRatePrioritySharePercent) ||
+        cacheHitRatePrioritySharePercent < 0 ||
+        cacheHitRatePrioritySharePercent > 100)
+    ) {
+      toast.error("缓存优先占比必须是 0 到 100 的整数")
+      return
+    }
     if (
       cacheHitRateWindowMinutes != null &&
       (!Number.isInteger(cacheHitRateWindowMinutes) ||
@@ -1139,6 +1156,7 @@ export function GatewayPage() {
       cache_hit_rate_blacklist_minutes: cacheHitRateBlacklistMinutes,
       cache_hit_rate_minimum_requests: cacheHitRateMinimumRequests,
       cache_hit_rate_priority_enabled: groupForm.cache_hit_rate_priority_enabled,
+      cache_hit_rate_priority_share_percent: cacheHitRatePrioritySharePercent,
       response_validation_enabled: groupForm.response_validation_enabled,
       response_validation_virtual_cache_enabled:
         groupForm.response_validation_virtual_cache_enabled,

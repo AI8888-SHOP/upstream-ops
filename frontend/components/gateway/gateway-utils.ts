@@ -67,6 +67,7 @@ export type GroupFormState = {
   cache_hit_rate_blacklist_minutes: string
   cache_hit_rate_minimum_requests: string
   cache_hit_rate_priority_enabled: boolean
+  cache_hit_rate_priority_share_percent: string
   response_validation_enabled: boolean
   response_validation_virtual_cache_enabled: boolean
   response_validation_prefix_bytes: string
@@ -720,6 +721,7 @@ export const emptyGroupForm = (): GroupFormState => ({
   cache_hit_rate_blacklist_minutes: "",
   cache_hit_rate_minimum_requests: "",
   cache_hit_rate_priority_enabled: false,
+  cache_hit_rate_priority_share_percent: "",
   response_validation_enabled: false,
   response_validation_virtual_cache_enabled: false,
   response_validation_prefix_bytes: "8192",

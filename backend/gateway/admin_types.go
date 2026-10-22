@@ -91,6 +91,7 @@ type CreateGroupInput struct {
 	CacheHitRateBlacklistMinutes          *int     `json:"cache_hit_rate_blacklist_minutes"`
 	CacheHitRateMinimumRequests           *int     `json:"cache_hit_rate_minimum_requests"`
 	CacheHitRatePriorityEnabled           *bool    `json:"cache_hit_rate_priority_enabled"`
+	CacheHitRatePrioritySharePercent      *int     `json:"cache_hit_rate_priority_share_percent"`
 	ResponseValidationEnabled             *bool    `json:"response_validation_enabled"`
 	ResponseValidationVirtualCacheEnabled *bool    `json:"response_validation_virtual_cache_enabled"`
 	ResponseValidationStreamMode          *string  `json:"response_validation_stream_mode"`
@@ -138,6 +139,7 @@ type UpdateGroupInput struct {
 	CacheHitRateBlacklistMinutes          optionalInt     `json:"cache_hit_rate_blacklist_minutes"`
 	CacheHitRateMinimumRequests           optionalInt     `json:"cache_hit_rate_minimum_requests"`
 	CacheHitRatePriorityEnabled           *bool           `json:"cache_hit_rate_priority_enabled"`
+	CacheHitRatePrioritySharePercent      *int            `json:"cache_hit_rate_priority_share_percent"`
 	ResponseValidationEnabled             *bool           `json:"response_validation_enabled"`
 	ResponseValidationVirtualCacheEnabled *bool           `json:"response_validation_virtual_cache_enabled"`
 	ResponseValidationStreamMode          *string         `json:"response_validation_stream_mode"`

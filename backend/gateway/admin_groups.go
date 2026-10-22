@@ -67,6 +67,11 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.CacheHitRatePriorityEnabled != nil {
 		cacheHitRatePriority = *in.CacheHitRatePriorityEnabled
 	}
+	var cacheHitRatePriorityShare *int
+	if in.CacheHitRatePrioritySharePercent != nil {
+		share := clampCachePriorityShare(*in.CacheHitRatePrioritySharePercent)
+		cacheHitRatePriorityShare = &share
+	}
 	hedgeEnabled := gwDefaults.Hedge.Enabled
 	if in.HedgeEnabled != nil {
 		hedgeEnabled = *in.HedgeEnabled
@@ -187,6 +192,7 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		CacheHitRateBlacklistMinutes:          cacheBlacklist,
 		CacheHitRateMinimumRequests:           cacheMinimum,
 		CacheHitRatePriorityEnabled:           cacheHitRatePriority,
+		CacheHitRatePrioritySharePercent:      cacheHitRatePriorityShare,
 		ResponseValidationEnabled:             validationEnabled,
 		ResponseValidationVirtualCacheEnabled: validationVirtualCache,
 		ResponseValidationRetryCount:          validationRetryCount,
@@ -401,6 +407,10 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 	if in.CacheHitRatePriorityEnabled != nil {
 		item.CacheHitRatePriorityEnabled = *in.CacheHitRatePriorityEnabled
 	}
+	if in.CacheHitRatePrioritySharePercent != nil {
+		share := clampCachePriorityShare(*in.CacheHitRatePrioritySharePercent)
+		item.CacheHitRatePrioritySharePercent = &share
+	}
 	if in.HedgeEnabled != nil {
 		item.HedgeEnabled = *in.HedgeEnabled
 	}
@@ -526,3 +536,14 @@ func (a *AdminService) GetGroup(id uint) (*storage.GatewayGroup, error) {
 }
 
 // ---------- admin: keys ----------
+
+// clampCachePriorityShare 把优先渠道占比限制在 0..100；0 表示不限制。
+func clampCachePriorityShare(value int) int {
+	if value <= 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}

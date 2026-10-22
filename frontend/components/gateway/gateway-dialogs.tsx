@@ -1115,6 +1115,28 @@ export function GroupFormDialog({
                 }
               />
             </div>
+            {groupForm.cache_hit_rate_priority_enabled ? (
+              <div className="space-y-1">
+                <Label>优先渠道流量上限（%）</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={groupForm.cache_hit_rate_priority_share_percent}
+                  onChange={(e) =>
+                    setGroupForm({
+                      ...groupForm,
+                      cache_hit_rate_priority_share_percent: e.target.value,
+                    })
+                  }
+                  placeholder="留空或 0 表示不限制"
+                />
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  例如填 70，命中率最高的渠道最多承担 70% 的请求，其余请求按顺序轮转给后面的渠道，避免其它渠道完全没有流量。
+                </p>
+              </div>
+            ) : null}
           </div>
 
           <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">

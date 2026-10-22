@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"testing"
 
 	"github.com/bejix/upstream-ops/backend/storage"
@@ -73,4 +74,34 @@ func TestCacheHitRatePriorityKeepsAffinityFirst(t *testing.T) {
 	rt := (&Service{}).runtime()
 	group := &storage.GatewayGroup{Name: "cache-priority", CacheHitRatePriorityEnabled: true}
 	assertRouteOrder(t, rt.applyCacheHitRatePriority(cachePriorityCandidates(10, 90, 60), group, 1), []uint{1, 2, 3})
+}
+
+// 并发打满的渠道即使命中率最高也要让位。
+func TestCacheHitRatePriorityYieldsWhenSaturated(t *testing.T) {
+	rt := (&Service{}).runtime()
+	group := &storage.GatewayGroup{Name: "cache-priority", CacheHitRatePriorityEnabled: true}
+	candidates := cachePriorityCandidates(95, 40)
+	registry := rt.upstreamConcurrencyRegistry()
+	identity := loadBalanceIdentity(&candidates[0].Route)
+	release, err := registry.acquire(context.Background(), upstreamConcurrencyKey{Kind: identity.Kind, ID: identity.ID}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	assertRouteOrder(t, rt.applyCacheHitRatePriority(candidates, group, 0), []uint{2, 1})
+}
+
+// 占比上限：优先渠道不会被独占，超出部分轮转到后面的渠道。
+func TestCacheHitRatePriorityShareCapRotates(t *testing.T) {
+	rt := (&Service{}).runtime()
+	share := 60
+	group := &storage.GatewayGroup{ID: 7, Name: "cache-priority", CacheHitRatePriorityEnabled: true, CacheHitRatePrioritySharePercent: &share}
+	lead := map[uint]int{}
+	for i := 0; i < 100; i++ {
+		ordered := rt.applyCacheHitRatePriority(cachePriorityCandidates(90, 30), group, 0)
+		lead[ordered[0].Route.ID]++
+	}
+	if lead[1] != 60 || lead[2] != 40 {
+		t.Fatalf("lead distribution=%v want route1=60 route2=40", lead)
+	}
 }
