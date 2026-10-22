@@ -559,10 +559,13 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 						return isFirstTokenBudgetFailure(message)
 					})
 				firstTokenCooldownEnabled := group.FirstTokenTimeoutCooldownEnabled
+				// 首字超时白名单：勾选后该渠道不因首字超时进入冷却。
+				firstTokenCoolable := !(firstTokenTimedOut || firstTokenBudgetFailed) ||
+					(firstTokenCooldownEnabled && !firstTokenCooldownExempt(&route))
 				cooldownEligible := shouldCooldownUpstreamFailure(status, errInfo, fwdErr)
 				if retryEnabled && lastTryOnRoute && cooldownSec > 0 && cooldownEligible && !clientCanceled && !requestTimedOut &&
 					!errors.Is(fwdErr, errUpstreamQueueTimeout) &&
-					(!(firstTokenTimedOut || firstTokenBudgetFailed) || firstTokenCooldownEnabled) {
+					firstTokenCoolable {
 					until := time.Now().Add(time.Duration(cooldownSec) * time.Second)
 					cooldownUntil = &until
 					pauseReason := errInfo.Summary

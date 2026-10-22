@@ -1197,6 +1197,7 @@ func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, att
 			requestAttemptsRemaining(req.c.Request.Context(), req.group.RequestMaxAttempts) != 0
 	if !req.group.RetryEnabled || req.group.CooldownSeconds <= 0 ||
 		((firstTokenTimedOut || firstTokenBudgetFailed) && !req.group.FirstTokenTimeoutCooldownEnabled) ||
+		((firstTokenTimedOut || firstTokenBudgetFailed) && firstTokenCooldownExempt(&attempt.Route)) ||
 		(!suppress && requestAttemptsRemaining(req.c.Request.Context(), req.group.RequestMaxAttempts) != 0 &&
 			coordinatedPlanHasLaterRoute(plan, number, attempt.Route.ID)) {
 		return

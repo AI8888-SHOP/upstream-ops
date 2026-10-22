@@ -729,8 +729,13 @@ export function RoutesPanel({
                     ) : null}
                     <label className="flex items-center gap-1 text-[11px] text-muted-foreground" title="普通渠道无候选或失败后使用；对冲开启时可作为后续备选。仍遵守组倍率上限、支持模型及质量限制，不受普通渠道相对溢价限制。保存后生效。">
                       <Switch checked={r.fallback_only === true} aria-label="保底渠道"
-                        onCheckedChange={(v) => setRouteDrafts((prev) => prev.map((route, i) => i === idx ? { ...route, fallback_only: v } : route))} />
+                        onCheckedChange={(v) => setRouteDrafts((prev) => prev.map((route, i) => i === idx ? { ...route, fallback_only: v, first_token_cooldown_exempt: v ? true : route.first_token_cooldown_exempt === true } : route))} />
                       保底
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] text-muted-foreground" title="勾选后该渠道不会因首字超时/首字预算失败被冷却（兜底渠道建议勾选）；其它错误照常冷却。保存后生效。">
+                      <Switch checked={r.first_token_cooldown_exempt === true} aria-label="首字超时免冷却"
+                        onCheckedChange={(v) => setRouteDrafts((prev) => prev.map((route, i) => i === idx ? { ...route, first_token_cooldown_exempt: v } : route))} />
+                      免冷却
                     </label>
                   </div>
                 </TableCell>

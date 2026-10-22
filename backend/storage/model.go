@@ -653,6 +653,8 @@ type GatewayRoute struct {
 	// Reserve routes are tried after normal candidates, within the same group
 	// price ceiling, model policy and health/quality restrictions.
 	FallbackOnly bool `gorm:"not null;default:false" json:"fallback_only"`
+	// FirstTokenCooldownExempt 首字超时冷却白名单：勾选后该路由不会因首字超时/首字预算失败进入模型冷却。
+	FirstTokenCooldownExempt bool `gorm:"not null;default:false" json:"first_token_cooldown_exempt"`
 	CandyCheck *GatewayRouteCandyCheck `gorm:"-" json:"candy_check,omitempty"`
 	// Request-local provider identity; populated by the availability filter.
 	SchedulerCredential string `gorm:"-" json:"-"`
