@@ -32,6 +32,22 @@ func ValidateModelPrice(item *ModelPriceOverride) error {
 		return fmt.Errorf("模型名不能为空且不可超过 256 字节")
 	}
 	valid := func(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= 1000 }
+	switch item.BillingMode = strings.ToLower(strings.TrimSpace(item.BillingMode)); item.BillingMode {
+	case "", "token":
+		item.BillingMode = "token"
+		// 按 token 计价的条目即使带上按次价也不生效，避免两套价并存产生歧义。
+		item.PerRequestPrice = nil
+	case "per_request":
+		if item.PerRequestPrice == nil {
+			zero := 0.0
+			item.PerRequestPrice = &zero
+		}
+		if !valid(*item.PerRequestPrice) {
+			return fmt.Errorf("按次单价必须是 0 到 1000 之间的有限数值")
+		}
+	default:
+		return fmt.Errorf("计费方式只能是 token 或 per_request")
+	}
 	for _, v := range []float64{item.InputPricePerToken, item.OutputPricePerToken, item.CacheCreationPricePerToken, item.CacheReadPricePerToken} {
 		if !valid(v) {
 			return fmt.Errorf("单价必须是 0 到 1000 之间的有限 per-token 数值")

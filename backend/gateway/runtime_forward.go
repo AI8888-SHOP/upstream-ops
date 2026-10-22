@@ -47,6 +47,12 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	}
 	requestInfo := analyzeRequestBody(body)
 	requestedModel, stream := requestInfo.Model, requestInfo.Stream
+	formModel := ""
+	if requestedModel == "" {
+		// 图片编辑等 multipart 请求没有 JSON 体，模型名在表单字段里。
+		formModel = extractMultipartModel(c.GetHeader("Content-Type"), body)
+		requestedModel = formModel
+	}
 	serviceTier, reasoningEffort := requestInfo.ServiceTier, requestInfo.ReasoningEffort
 	thinkingEnabled := requestInfo.ThinkingEnabled
 	finishTiming := beginForwardRequest(c, requestStarted, group, kind, stream, rt.gatewayRuntime().ForwardTimeout())
@@ -73,9 +79,15 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	if strings.TrimSpace(requestedModel) != "" && len(filteredRoutes) == 0 {
-		rt.failNoRoutes(c, key, group, diagnosticRoutes, requestedModel, path, kind, stream,
-			fmt.Sprintf("no available channel for model %s", requestedModel), nil)
-		return
+		if formModel != "" {
+			// 图片等 multipart 接口以前看不到模型、从不按模型过滤。表单里的模型
+			// 只用于定价与统计，不能因为路由白名单没列它就把请求拒掉。
+			filteredRoutes = routes
+		} else {
+			rt.failNoRoutes(c, key, group, diagnosticRoutes, requestedModel, path, kind, stream,
+				fmt.Sprintf("no available channel for model %s", requestedModel), nil)
+			return
+		}
 	}
 	routes = filteredRoutes
 	// Automatic restrictions must never empty an otherwise valid route pool.

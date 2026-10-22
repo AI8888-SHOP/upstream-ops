@@ -117,6 +117,21 @@ export function PricesPanel({
               />
             </div>
             <div className="space-y-1">
+              <Label className="text-xs">计费方式</Label>
+              <div className="flex gap-2">
+                <Button type="button" size="sm" variant={priceForm.billing_mode === "token" ? "default" : "outline"} onClick={() => setPriceForm({ ...priceForm, billing_mode: "token" })}>按 token</Button>
+                <Button type="button" size="sm" variant={priceForm.billing_mode === "per_request" ? "default" : "outline"} onClick={() => setPriceForm({ ...priceForm, billing_mode: "per_request" })}>按次收费</Button>
+              </div>
+              <p className="text-[11px] text-muted-foreground">按次：每次请求固定收费，token 不参与计费（图片等无用量接口适用）。</p>
+            </div>
+            {priceForm.billing_mode === "per_request" && (
+              <div className="space-y-1">
+                <Label className="text-xs">按次单价 $/次</Label>
+                <Input type="number" min="0" step="0.0001" placeholder="0.04" value={priceForm.per_request_price} onChange={(e) => setPriceForm({ ...priceForm, per_request_price: e.target.value })} />
+                <p className="text-[11px] text-muted-foreground">成功交付时收一次，仍乘网关组倍率。</p>
+              </div>
+            )}
+            <div className="space-y-1">
               <Label className="text-xs">Input $/MTok</Label>
               <Input
                 type="number"
@@ -175,6 +190,7 @@ export function PricesPanel({
               </div>
             </div>
           </div>
+          {priceForm.billing_mode === "token" && (
           <div className="space-y-3 rounded-md border p-3">
             <div className="flex items-center justify-between gap-2"><Label>上下文分档价格（$/MTok）</Label><Button size="sm" variant="outline" disabled={priceForm.context_tiers.length >= 32} onClick={() => setPriceForm({ ...priceForm, context_tiers: [...priceForm.context_tiers, emptyPriceTier()] })}>添加档位</Button></div>
             <p className="text-xs text-muted-foreground">以新鲜输入 + 真实缓存读 + 缓存写的总量选档，应用于整次请求，而非只计算超出部分。空价格沿用上一档；0 表示该项免费。</p>
@@ -185,6 +201,7 @@ export function PricesPanel({
               <Button size="sm" variant="ghost" onClick={() => setPriceForm({ ...priceForm, context_tiers: priceForm.context_tiers.filter((_, i) => i !== index) })}>删除档位</Button>
             </div>)}
           </div>
+          )}
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => void onSavePrice()} disabled={busy}>
               保存价格覆盖
@@ -209,6 +226,7 @@ export function PricesPanel({
             <TableHeader>
               <TableRow>
                 <TableHead>模型</TableHead>
+                <TableHead>计费方式</TableHead>
                 <TableHead>Input $/MTok</TableHead>
                 <TableHead>Output $/MTok</TableHead>
                 <TableHead>缓存写 5m / 1h · 读</TableHead>
@@ -226,15 +244,18 @@ export function PricesPanel({
                 >
                   <TableCell>{p.model_name}</TableCell>
                   <TableCell className="text-xs">
-                    {perTokenToMTok(p.input_price_per_token)}
+                    {p.billing_mode === "per_request" ? `按次 $${p.per_request_price ?? 0}/次` : "按 token"}
                   </TableCell>
                   <TableCell className="text-xs">
-                    {perTokenToMTok(p.output_price_per_token)}
+                    {p.billing_mode === "per_request" ? "—" : perTokenToMTok(p.input_price_per_token)}
                   </TableCell>
                   <TableCell className="text-xs">
-                    {perTokenToMTok(p.cache_creation_price_per_token)} /{" "}
+                    {p.billing_mode === "per_request" ? "—" : perTokenToMTok(p.output_price_per_token)}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {p.billing_mode === "per_request" ? "—" : <>{perTokenToMTok(p.cache_creation_price_per_token)} /{" "}
                     {perTokenToMTok(p.cache_creation_1h_price_per_token ?? p.cache_creation_price_per_token)} ·{" "}
-                    {perTokenToMTok(p.cache_read_price_per_token)}
+                    {perTokenToMTok(p.cache_read_price_per_token)}</>}
                   </TableCell>
                   <TableCell className="text-xs">{p.source === "sub2api" ? "sub2api 同步" : "手动覆盖"} · {priceTiersFromJSON(p.context_tiers_json).length} 档</TableCell>
                   <TableCell>
@@ -268,7 +289,7 @@ export function PricesPanel({
               ))}
               {visiblePrices.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-muted-foreground">
+                  <TableCell colSpan={8} className="text-center text-muted-foreground">
                     {prices.length === 0 ? "暂无价格覆盖，计费使用系统内置默认价" : "没有匹配的模型"}
                   </TableCell>
                 </TableRow>

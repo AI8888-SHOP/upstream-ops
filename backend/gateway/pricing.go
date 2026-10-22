@@ -22,6 +22,23 @@ type ModelPricing struct {
 	CacheCreation1hPricePerToken float64
 	CacheCreation1hPriceExplicit bool
 	ContextTiers                 []storage.ModelPriceContextTier
+	// BillingMode 为空或 token 时按 token 计价；per_request 时按 PerRequestPrice
+	// 每次请求固定收费，token 单价不参与（图片等无用量接口同样适用）。
+	BillingMode     string
+	PerRequestPrice *float64
+}
+
+// IsPerRequest 是否按次收费。
+func (p ModelPricing) IsPerRequest() bool {
+	return strings.EqualFold(strings.TrimSpace(p.BillingMode), "per_request")
+}
+
+// PerRequestAmount 按次单价（USD/次），未配置或非法时为 0。
+func (p ModelPricing) PerRequestAmount() float64 {
+	if p.PerRequestPrice == nil || *p.PerRequestPrice < 0 {
+		return 0
+	}
+	return *p.PerRequestPrice
 }
 
 // HasTokenPrice 是否具备 token 计费单价（对齐 sub2api TokenPricingAbsent 语义）。
@@ -439,7 +456,6 @@ func (p ModelPricing) Cost(tokens UsageTokens, rateMultiplier, billingRateMultip
 // （原值时即源 ratio，不是强制 1）。优先用 billingRateMultiplier 作为账号计费倍率；
 // 无效时回退 rateMultiplier。只乘一次，避免「有效倍率 × 计费倍率」双重放大。
 func CalculateCost(p ModelPricing, tokens UsageTokens, rateMultiplier, billingRateMultiplier float64) CostBreakdown {
-	p = p.forTokens(tokens)
 	accountRate := billingRateMultiplier
 	if accountRate <= 0 {
 		accountRate = rateMultiplier
@@ -447,6 +463,12 @@ func CalculateCost(p ModelPricing, tokens UsageTokens, rateMultiplier, billingRa
 	if accountRate <= 0 {
 		accountRate = 1
 	}
+	// 按次收费：一次请求一个价，token 桶（含缓存/图片）不再参与计算。
+	if p.IsPerRequest() {
+		total := p.PerRequestAmount()
+		return CostBreakdown{TotalCost: total, ActualCost: total * accountRate}
+	}
+	p = p.forTokens(tokens)
 	in := float64(tokens.InputTokens) * p.InputPricePerToken
 	out := float64(tokens.OutputTokens) * p.OutputPricePerToken
 	fiveMinute, oneHour := storage.NormalizePriceCacheCreation(tokens.CacheCreationTokens, tokens.CacheCreation5mTokens, tokens.CacheCreation1hTokens)

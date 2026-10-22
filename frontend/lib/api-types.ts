@@ -1272,6 +1272,10 @@ export interface ModelPriceOverride {
   cache_creation_price_per_token: number
   cache_read_price_per_token: number
   cache_creation_1h_price_per_token?: number | null
+  /** token（默认）| per_request：按次收费，token 单价不参与 */
+  billing_mode?: "token" | "per_request"
+  /** 按次单价（美元/次），仅 billing_mode=per_request 生效 */
+  per_request_price?: number | null
   context_tiers_json?: string
   source?: "manual" | "sub2api"
   source_url?: string

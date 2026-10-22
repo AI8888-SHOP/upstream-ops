@@ -94,6 +94,10 @@ export type KeyFormState = {
 
 export type PriceFormState = {
   model_name: string
+  /** token：按 token 计价；per_request：按次收费 */
+  billing_mode: "token" | "per_request"
+  /** 按次单价（美元/次），billing_mode=per_request 时使用 */
+  per_request_price: string
   input_mtok: string
   output_mtok: string
   cache_create_mtok: string
@@ -735,6 +739,8 @@ export const emptyKeyForm = (): KeyFormState => ({
 
 export const emptyPriceForm = (): PriceFormState => ({
   model_name: "",
+  billing_mode: "token",
+  per_request_price: "",
   input_mtok: "0",
   output_mtok: "0",
   cache_create_mtok: "0",

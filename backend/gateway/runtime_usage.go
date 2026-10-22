@@ -43,7 +43,10 @@ func (rt *Runtime) recordUsage(
 		reqType = storage.GatewayRequestTypeStream
 	}
 	billingMode := "token"
-	if tokens.ImageOutputTokens > 0 {
+	if pricing.IsPerRequest() {
+		// 按次收费：一次请求一个固定价，与 token 桶无关（图片/无用量接口同样适用）。
+		billingMode = "per_request"
+	} else if tokens.ImageOutputTokens > 0 {
 		billingMode = "image"
 	}
 	sourceGroupName := strings.TrimSpace(route.SourceGroupName)
@@ -254,6 +257,16 @@ func (rt *Runtime) buildVirtualCacheSettlement(req *coordinatedForwardRequest, w
 	if rt == nil || req == nil || req.group == nil || winner == nil || winner.Tokens.ImageOutputTokens > 0 {
 		return storage.GatewayFinalizeRequestInput{}
 	}
+	if rt.Pricing != nil {
+		model := strings.TrimSpace(winner.UpstreamModel)
+		if model == "" {
+			model = strings.TrimSpace(req.requestedModel)
+		}
+		if rt.Pricing.Resolve(model).IsPerRequest() {
+			// 按次计价的请求不因虚拟缓存改写账单。
+			return storage.GatewayFinalizeRequestInput{}
+		}
+	}
 	reason := strings.TrimSpace(req.virtualCacheReason)
 	if reason == "" && req.group.HedgeVirtualCacheEnabled && req.hedgeTriggered {
 		// Keep direct helper callers and older runtime tests compatible.
@@ -346,6 +359,9 @@ func (rt *Runtime) buildProviderVirtualCacheSettlement(
 	group *storage.GatewayGroup,
 ) storage.GatewayFinalizeRequestInput {
 	if rt == nil || provider == nil || !eligible || tokens.ImageOutputTokens > 0 {
+		return storage.GatewayFinalizeRequestInput{}
+	}
+	if rt.Pricing != nil && rt.Pricing.Resolve(model).IsPerRequest() {
 		return storage.GatewayFinalizeRequestInput{}
 	}
 	percent := providerVirtualCachePercentForGroup(provider, model, group)

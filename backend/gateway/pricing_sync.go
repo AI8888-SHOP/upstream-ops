@@ -30,7 +30,7 @@ func contextTiersJSON(tiers []storage.ModelPriceContextTier) string {
 }
 
 func pricingFromOverride(item storage.ModelPriceOverride) ModelPricing {
-	p := ModelPricing{InputPricePerToken: item.InputPricePerToken, OutputPricePerToken: item.OutputPricePerToken, CacheCreationPricePerToken: item.CacheCreationPricePerToken, CacheReadPricePerToken: item.CacheReadPricePerToken}
+	p := ModelPricing{InputPricePerToken: item.InputPricePerToken, OutputPricePerToken: item.OutputPricePerToken, CacheCreationPricePerToken: item.CacheCreationPricePerToken, CacheReadPricePerToken: item.CacheReadPricePerToken, BillingMode: item.BillingMode, PerRequestPrice: item.PerRequestPrice}
 	if item.CacheCreation1hPricePerToken != nil {
 		p.CacheCreation1hPricePerToken = *item.CacheCreation1hPricePerToken
 		p.CacheCreation1hPriceExplicit = true
@@ -353,10 +353,41 @@ func (s *Service) runPriceRepricing(ctx context.Context) {
 	}
 }
 
+// perRequestReferencePrices rebuilds a fixed per-request charge from the
+// current catalog. Token buckets never participate, so rows without any usage
+// (image edits and similar) can still be repriced.
+func perRequestReferencePrices(catalog *PricingCatalog, row storage.GatewayUsageLog) map[string]any {
+	unknown := map[string]any{"reference_sales_base": nil, "reference_pricing_version": storage.ReferencePricingVersion}
+	model := strings.TrimSpace(row.UpstreamModel)
+	if model == "" {
+		model = row.RequestedModel
+	}
+	price, known := catalog.resolveKnown(model)
+	if !known || !price.IsPerRequest() {
+		// The model is no longer billed per request: keep the settled cost
+		// instead of rewriting it with token math that never applied.
+		return nil
+	}
+	cost := CalculateCost(price, UsageTokens{}, row.RateMultiplier, row.BillingRateMultiplier)
+	if math.IsNaN(cost.TotalCost) || math.IsInf(cost.TotalCost, 0) || cost.TotalCost < 0 ||
+		math.IsNaN(cost.ActualCost) || math.IsInf(cost.ActualCost, 0) || cost.ActualCost < 0 {
+		return unknown
+	}
+	extra := cost.ActualCost
+	if row.Winner {
+		extra = 0
+	}
+	return map[string]any{"input_cost": cost.InputCost, "output_cost": cost.OutputCost, "cache_creation_cost": cost.CacheCreationCost, "cache_read_cost": cost.CacheReadCost, "image_output_cost": cost.ImageOutputCost, "total_cost": cost.TotalCost, "actual_cost": cost.ActualCost, "estimated_cost": cost.ActualCost, "estimated_extra_cost": extra, "account_stats_cost": cost.TotalCost, "reference_sales_base": cost.TotalCost, "reference_pricing_version": storage.ReferencePricingVersion}
+}
+
 // Historical reports use current prices, not the old debit. Reuse the live
 // bucket/tier/TTL calculator, but keep the original virtual token count: today's
 // group settings must not rewrite what was presented to the client yesterday.
 func historicalReferencePrices(catalog *PricingCatalog, row storage.GatewayUsageLog) map[string]any {
+	mode := strings.ToLower(strings.TrimSpace(row.BillingMode))
+	if mode == "per_request" {
+		return perRequestReferencePrices(catalog, row)
+	}
 	if row.BillingMode != "" && row.BillingMode != "token" && row.BillingMode != "image" {
 		return nil
 	}

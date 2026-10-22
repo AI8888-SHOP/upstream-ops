@@ -1024,6 +1024,10 @@ type ModelPriceOverride struct {
 	CacheCreationPricePerToken   float64   `gorm:"not null;default:0" json:"cache_creation_price_per_token"`
 	CacheReadPricePerToken       float64   `gorm:"not null;default:0" json:"cache_read_price_per_token"`
 	CacheCreation1hPricePerToken *float64  `json:"cache_creation_1h_price_per_token"`
+	// BillingMode token（默认）| per_request（按次收费，token 单价不参与）。
+	BillingMode string `gorm:"size:16;not null;default:'token'" json:"billing_mode"`
+	// PerRequestPrice 按次单价（USD/次），仅 BillingMode=per_request 时生效。
+	PerRequestPrice              *float64  `json:"per_request_price"`
 	ContextTiersJSON             string    `gorm:"type:text;not null;default:'[]'" json:"context_tiers_json"`
 	Source                       string    `gorm:"size:32;not null;default:'manual'" json:"source"`
 	SourceURL                    string    `gorm:"size:512;not null;default:''" json:"source_url,omitempty"`

@@ -3,6 +3,9 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"mime"
+	"mime/multipart"
 	"strings"
 )
 
@@ -325,6 +328,44 @@ func ExtractModelFromBody(body []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(info.Model)
+}
+
+// extractMultipartModel 从 multipart/form-data 请求体读取 model 字段。
+// 图片编辑/生成上传二进制分片，JSON 解析看不到 model，定价与路由都会退化成
+// 空模型名（表现为「获取不到模型无法定价」）。
+func extractMultipartModel(contentType string, body []byte) string {
+	if len(body) == 0 || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/form-data") {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	boundary := strings.TrimSpace(params["boundary"])
+	if boundary == "" {
+		return ""
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	// 图片请求分片很少；上限只用于挡住畸形/恶意请求，正常请求远达不到。
+	for parts := 0; parts < 64; parts++ {
+		part, err := reader.NextPart()
+		if err != nil {
+			return ""
+		}
+		name := strings.ToLower(strings.TrimSpace(part.FormName()))
+		if name != "model" {
+			_ = part.Close()
+			continue
+		}
+		// model 字段只有几十字节，限读避免把整张图片读进内存。
+		value, err := io.ReadAll(io.LimitReader(part, 512))
+		_ = part.Close()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(value))
+	}
+	return ""
 }
 
 // ExtractStreamFlag 从请求体判断是否 stream。

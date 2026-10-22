@@ -1666,6 +1666,8 @@ export function GatewayPage() {
   function applyDefaultAsOverride(p: ModelDefaultPrice) {
     setPriceForm({
       model_name: p.model_name,
+      billing_mode: "token",
+      per_request_price: "",
       input_mtok: perTokenToMTok(p.input_price_per_token),
       output_mtok: perTokenToMTok(p.output_price_per_token),
       cache_create_mtok: perTokenToMTok(p.cache_creation_price_per_token),
@@ -1681,6 +1683,8 @@ export function GatewayPage() {
   function fillPriceFormFromOverride(p: ModelPriceOverride) {
     setPriceForm({
       model_name: p.model_name,
+      billing_mode: p.billing_mode === "per_request" ? "per_request" : "token",
+      per_request_price: p.per_request_price == null ? "" : String(p.per_request_price),
       input_mtok: perTokenToMTok(p.input_price_per_token),
       output_mtok: perTokenToMTok(p.output_price_per_token),
       cache_create_mtok: perTokenToMTok(p.cache_creation_price_per_token),
@@ -1851,10 +1855,17 @@ export function GatewayPage() {
       for (const value of [priceForm.input_mtok, priceForm.output_mtok, priceForm.cache_create_mtok, priceForm.cache_create_1h_mtok, priceForm.cache_read_mtok]) {
         if (!Number.isFinite(Number(value)) || Number(value) < 0) throw new Error("价格必须是有效非负数")
       }
+      const perRequest = priceForm.billing_mode === "per_request"
+      if (perRequest) {
+        const price = Number(priceForm.per_request_price)
+        if (!Number.isFinite(price) || price < 0) throw new Error("按次单价必须是有效非负数")
+      }
       await apiFetch("/gateway/prices", {
         method: "PUT",
         body: JSON.stringify({
           model_name: model,
+          billing_mode: perRequest ? "per_request" : "token",
+          per_request_price: perRequest ? Number(priceForm.per_request_price) : null,
           input_price_per_token: mTokToPerToken(priceForm.input_mtok),
           output_price_per_token: mTokToPerToken(priceForm.output_mtok),
           cache_creation_price_per_token: mTokToPerToken(priceForm.cache_create_mtok),
