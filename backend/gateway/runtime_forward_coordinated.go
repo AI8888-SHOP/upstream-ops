@@ -464,7 +464,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 		} else {
 			_, runErr = rt.runCoordinatedNonStreamAttempt(ctx, &req, attempt, attemptTimeout)
 		}
-		suppressSameRouteRetry := coordinatedAttemptSuppressesSameRouteRetries(attempt)
+		suppressSameRouteRetry := coordinatedShouldSuppressSameRouteRetry(attempt, planScheduler.snapshot())
 		validation, status, _, terminal := attempt.validationSnapshot()
 		// The round-robin plan already tries fresh sources before retrying a
 		// source. Only deterministic failures permanently remove retry slots;
@@ -1016,6 +1016,32 @@ func (a *coordinatedForwardAttempt) retryFailureSnapshot() (validationResult, in
 	a.streamMu.Lock()
 	defer a.streamMu.Unlock()
 	return a.Validation, a.Status, a.Err, a.Terminal, a.ErrInfo
+}
+
+// coordinatedShouldSuppressSameRouteRetry closes the same-route retry ladder
+// for this attempt. Switching sources is still preferred whenever the plan has
+// an untried route left. When this is the last source, a transient failure
+// declared inside an HTTP 200 stream (an overloaded upstream, for example)
+// keeps its configured retry ladder instead of failing the caller at once;
+// deterministic policy rejections (auth, group, unsupported model) stay
+// suppressed because replaying them cannot change the outcome.
+func coordinatedShouldSuppressSameRouteRetry(attempt *coordinatedForwardAttempt, plan []coordinatedRoutePlan) bool {
+	if !coordinatedAttemptSuppressesSameRouteRetries(attempt) {
+		return false
+	}
+	if coordinatedPlanHasLaterAlternative(plan, attempt.Info.Number, attempt.Route.ID) {
+		return true
+	}
+	validation, status, _, _ := attempt.validationSnapshot()
+	// Only an error the upstream itself declared (a rule targeting the upstream
+	// error message) is worth replaying on the last source. A content rejection
+	// would just burn attempts without changing the answer.
+	if validation.IsRejected() && !coordinatedPolicyRejection(validation) &&
+		strings.EqualFold(strings.TrimSpace(validation.Target), "error_message") &&
+		status > 0 && status < http.StatusBadRequest {
+		return false
+	}
+	return true
 }
 
 func coordinatedAttemptSuppressesSameRouteRetries(attempt *coordinatedForwardAttempt) bool {
@@ -1783,9 +1809,9 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 	}
 	message := "all upstream routes failed"
 	if finalValidation.IsRejected() {
-		// A configured response rule is safe to report; the rejected upstream
-		// payload itself is intentionally never replayed to the client.
-		message = validationErrorInfo(finalValidation).Summary
+		// Client-visible text stays generic: rule ids, patterns and matched
+		// content belong to the usage record, never to the downstream caller.
+		message = "upstream response rejected"
 	}
 	// Never pass an exhausted source's raw HTTP body/status downstream. The
 	// complete upstream detail remains available in per-attempt usage records.

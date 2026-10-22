@@ -534,8 +534,11 @@ func TestWriteCoordinatedFailureDoesNotReplayRejectedResponse(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), `"content":"blocked"`) {
 		t.Fatalf("rejected response was replayed: %s", recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "response matched rejection rule") {
+	if !strings.Contains(recorder.Body.String(), "upstream response rejected") {
 		t.Fatalf("gateway did not return a sanitized rule failure: %s", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), rejection.RuleName) || strings.Contains(recorder.Body.String(), "rejection rule") {
+		t.Fatalf("rule identity leaked to the client: %s", recorder.Body.String())
 	}
 }
 
@@ -569,8 +572,11 @@ func TestWriteCoordinatedFailureDoesNotReplayPostCommitMatch(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), `"content":"blocked"`) {
 		t.Fatalf("post-commit rejected response was replayed: %s", recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "response matched rejection rule") {
+	if !strings.Contains(recorder.Body.String(), "upstream response rejected") {
 		t.Fatalf("gateway did not return a sanitized rule failure: %s", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), postCommit.RuleName) || strings.Contains(recorder.Body.String(), "rejection rule") {
+		t.Fatalf("rule identity leaked to the client: %s", recorder.Body.String())
 	}
 }
 

@@ -925,7 +925,8 @@ func (rt *Runtime) forwardStreamIncrementalWithRecovery(
 					if clientCtx.Err() != nil {
 						result.ClientDisconnected = true
 					}
-					sendTerminalError("invalid_upstream_usage", validationErrorInfo(rejected.Result).Summary)
+					// 规则名/模式只进用量记录，不下发给客户端。
+					sendTerminalError("invalid_upstream_usage", "upstream response rejected")
 				} else {
 					result.ValidationRejection = rejected.Result
 				}
