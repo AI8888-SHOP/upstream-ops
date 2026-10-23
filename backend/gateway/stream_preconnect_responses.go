@@ -48,6 +48,10 @@ type preconnectResponsesStream struct {
 	itemBytes   int
 	sawOutput   bool
 	multihop    bool
+	// degraded 表示上游帧与已发出的合成生命周期对不上。假首字一旦发出就
+	// 收不回来，此时只能以客户端已经看到的内容为准继续往下走，不能因为
+	// 上游的复述不一致就把整个响应判死。
+	degraded bool
 }
 
 type preconnectResponsesItem struct {
@@ -348,29 +352,30 @@ func (s *preconnectResponsesStream) prependReasoning(response map[string]json.Ra
 				ID   string `json:"id"`
 				Type string `json:"type"`
 			}
-			if err := json.Unmarshal(output[index], &identity); err != nil ||
-				(state.kind != "" && identity.Type != state.kind) {
-				return errors.New("Responses preconnect terminal output identity changed")
+			if err := json.Unmarshal(output[index], &identity); err != nil {
+				return errors.New("invalid Responses preconnect terminal output identity")
+			}
+			if state.kind != "" && identity.Type != state.kind {
+				// 终止快照换了类型，说明上游把整条重写了。客户端已经收到
+				// 流式版本，这里只能以已发出内容为准继续，不能判死。
+				s.degraded = true
 			}
 			// Some upstreams regenerate an output item's ID in their terminal
 			// response snapshot, despite the item already being streamed under a
 			// stable output index and type. Rewrite it only when the complete item
 			// matches the streamed output_item.done apart from that ID; otherwise
 			// this may be a genuinely different tool call or message.
-			if state.id != "" && identity.ID != state.id {
+			if state.id != "" && (identity.ID != state.id || s.degraded) {
 				if len(state.done) == 0 {
-					return errors.New("Responses preconnect terminal output identity changed")
+					// 没有可用的流式 done 帧，只能保留上游终止快照。
+					continue
 				}
-				// 部分上游（如 o10.top 的 DeepSeek）会在终止快照里重新生成条目
-				// ID，并省略流式 done 帧里的 status。两者都不代表内容身份：类型
-				// 与正文一致时，直接沿用客户端已经看到的那份 done 帧。
-				//
-				// 工具调用仍然要求内容完全一致：call_id 或 arguments 变了就是
-				// 另一个调用，静默替换会让客户端执行一段它没见过的参数。正文与
-				// reasoning 相反，客户端已经收到流式版本，终止快照只是尾部复述，
-				// 两者不一致时以已发送的为准才不会让整个响应作废。
-				if identity.Type == "function_call" && !preconnectResponsesSameItemExceptID(state.done, output[index]) {
-					return errors.New("Responses preconnect terminal output identity changed")
+				// 上游会在终止快照里重新生成条目 ID、省略 status、甚至重写正文。
+				// 这些都不代表内容身份：客户端已经收到流式 done 帧，它以最终
+				// 形态发出，所以一律沿用已发送的那份。用终止快照替换反而会让
+				// 客户端执行一段它没见过的参数。
+				if !preconnectResponsesSameItemExceptID(state.done, output[index]) {
+					s.degraded = true
 				}
 				output[index] = state.done
 			}
@@ -456,23 +461,20 @@ func (s *preconnectResponsesStream) observeItem(eventType string, index int64, r
 	if err := json.Unmarshal(raw, &identity); err != nil || identity.Type == "" {
 		return errors.New("invalid Responses preconnect output item")
 	}
-	// type 变了就是另一个条目，必须失败；id 则不然——上游常在 done 帧里把
-	// added 阶段的条目 ID 重新生成一遍（DeepSeek 系尤其明显）。只要还没收到
-	// done，就接受这次重写并沿用新身份；已经收到 done 之后再出现不同 ID 才是
-	// 真的重复条目。
+	// 上游会在 done 帧里重写 added 阶段的 id，偶尔连 type 一起换。假首字
+	// 已经发出，这些差异都不能让响应作废：标记降级并按最新身份继续。
 	if state.kind != "" && identity.Type != state.kind {
-		return errors.New("Responses preconnect output item identity changed")
+		s.degraded = true
+		return nil
 	}
 	if state.id != "" && identity.ID != state.id {
-		if len(state.done) > 0 {
-			return errors.New("Responses preconnect output item identity changed")
-		}
 		s.itemBytes += len(identity.ID) - len(state.id)
 		state.id = identity.ID
 	}
 	if eventType == "response.output_item.added" {
 		if state.added || len(state.done) > 0 {
-			return errors.New("duplicate Responses preconnect output index")
+			s.degraded = true
+			return nil
 		}
 		state.added = true
 	}
@@ -481,7 +483,12 @@ func (s *preconnectResponsesStream) observeItem(eventType string, index int64, r
 		state.id, state.kind = identity.ID, identity.Type
 	}
 	if eventType == "response.output_item.done" {
-		s.itemBytes += len(raw) - len(state.done)
+		if len(state.done) > 0 {
+			// 同一索引重复下发完成帧：以先到的为准，后者忽略并降级。
+			s.degraded = true
+			return nil
+		}
+		s.itemBytes += len(raw)
 		state.done = raw
 	}
 	if s.itemBytes > maxSSELineSize {

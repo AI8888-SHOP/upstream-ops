@@ -168,7 +168,9 @@ func TestStreamPreconnectThroughForwardingAndSettlement(t *testing.T) {
 									return
 								}
 								if tc.corrupt == "identity" {
-									_, _ = io.WriteString(w, strings.ReplaceAll(payload[terminal:], `"type":"message"`, `"type":"function_call"`))
+									// 条目类型漂移现在只降级，不再算协议错误；用非法 JSON
+									// 触发真正的协议失败路径。
+									_, _ = io.WriteString(w, strings.ReplaceAll(payload[terminal:], `"type":"message"`, `"type":`))
 								}
 								return
 							}

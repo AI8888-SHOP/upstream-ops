@@ -579,12 +579,20 @@ func TestPreconnectResponsesReconcilesTerminalSnapshotItemID(t *testing.T) {
 	}
 }
 
-func TestPreconnectResponsesStillRejectsTerminalItemTypeChange(t *testing.T) {
+// 终止快照把条目类型整条换掉时不作废响应：假首字已经发出，客户端看到的是
+// 流式版本，这里只降级并以已发送内容为准。
+func TestPreconnectResponsesDegradesOnTerminalItemTypeChange(t *testing.T) {
 	stream, wire, _, _ := preconnectResponsesTestStart(t)
 	payload := "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item_stream\",\"type\":\"message\"}}\n\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1},\"output\":[{\"id\":\"item_snapshot\",\"type\":\"function_call\"}]}}\n\n"
-	if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err == nil {
-		t.Fatal("terminal item type change must remain a protocol error")
+	if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err != nil {
+		t.Fatalf("terminal type change must degrade instead of aborting: %v", err)
+	}
+	if !stream.degraded {
+		t.Fatal("type change should be recorded as degraded")
+	}
+	if !stream.done() {
+		t.Fatal("stream did not reach a terminal state")
 	}
 }
 
@@ -625,8 +633,8 @@ func TestPreconnectResponsesOnlyRewritesTerminalIDForIdenticalToolCall(t *testin
 		wantError bool
 	}{
 		{name: "same call", callID: "call_1", arguments: `{"q":1}`},
-		{name: "different call ID", callID: "call_2", arguments: `{"q":1}`, wantError: true},
-		{name: "different arguments", callID: "call_1", arguments: `{"q":2}`, wantError: true},
+		{name: "different call ID", callID: "call_2", arguments: `{"q":1}`},
+		{name: "different arguments", callID: "call_1", arguments: `{"q":2}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stream, wire, _, _ := preconnectResponsesTestStart(t)
@@ -884,12 +892,16 @@ func TestPreconnectResponsesAcceptsItemIDRewriteBetweenAddedAndDone(t *testing.T
 }
 
 // 已经收到 done 之后再冒出不同 ID，才是真的重复条目，必须继续失败。
-func TestPreconnectResponsesStillRejectsDuplicateDoneWithNewIdentity(t *testing.T) {
+// 同一索引收到重复帧时只降级，不打断已建立的流。
+func TestPreconnectResponsesDegradesOnDuplicateDone(t *testing.T) {
 	stream, wire, _, _ := preconnectResponsesTestStart(t)
 	payload := `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}` + "\n\n" +
 		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}` + "\n\n" +
 		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}` + "\n\n"
-	if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err == nil {
-		t.Fatal("duplicate done with a new identity must remain an error")
+	if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err != nil {
+		t.Fatalf("duplicate done must degrade instead of aborting: %v", err)
+	}
+	if !stream.degraded {
+		t.Fatal("duplicate done should be recorded as degraded")
 	}
 }

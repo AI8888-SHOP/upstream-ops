@@ -55,9 +55,11 @@ func TestFinalizeStreamPreconnectProtocolErrorIsNotClientDisconnect(t *testing.T
 		if _, err := writer.Write([]byte(wire[:terminal])); err != nil {
 			t.Fatal(err)
 		}
-		badTerminal := strings.ReplaceAll(wire[terminal:], `"type":"message"`, `"type":"function_call"`)
+		// 用真正畸形的终止帧触发协议错误：条目类型漂移现在只降级放行，
+		// 不再算协议错误（上游常态），但非法 JSON 必须仍然被拒绝。
+		badTerminal := strings.ReplaceAll(wire[terminal:], `"status":"completed"`, `"status":`)
 		if _, err := writer.Write([]byte(badTerminal)); err == nil || writer.protocolErr == nil {
-			t.Fatal("inconsistent terminal item type was not rejected")
+			t.Fatal("malformed terminal JSON was not rejected")
 		}
 		// Lower layers can report the adapter-triggered context cancellation as a
 		// client disconnect. Finalization must retain the upstream protocol cause.
