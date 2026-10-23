@@ -63,6 +63,11 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.GET("/groups/:id/routes/:route_id/models/preview", func(c *gin.Context) { previewGatewayRouteModels(c, d) })
 		gp.POST("/groups/:id/routes/ensure-keys", func(c *gin.Context) { ensureGatewayGroupRouteKeys(c, d) })
 
+		// 一键优化：先出方案，人工确认后再应用
+		gp.GET("/optimizer/plan", func(c *gin.Context) { gatewayOptimizerPlan(c, d) })
+		gp.POST("/optimizer/apply", func(c *gin.Context) { gatewayOptimizerApply(c, d) })
+		gp.POST("/optimizer/explain", func(c *gin.Context) { gatewayOptimizerExplain(c, d) })
+
 		// models
 		gp.GET("/groups/:id/models/preview", func(c *gin.Context) { previewGatewayGroupModels(c, d) })
 		gp.POST("/groups/:id/models/sync", func(c *gin.Context) { syncGatewayGroupModels(c, d) })

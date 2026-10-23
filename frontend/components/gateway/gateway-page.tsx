@@ -9,6 +9,7 @@ import {
   Route,
   ScrollText,
   KeyRound,
+  Sparkles,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -16,6 +17,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useConfirm } from "@/components/ui/confirm-dialog"
 import { apiFetch } from "@/lib/api"
+import { OptimizerDialog } from "@/components/gateway/optimizer-dialog"
 import { useChannels, useSystemConfig } from "@/lib/queries"
 import { cn } from "@/lib/utils"
 import type {
@@ -97,6 +99,8 @@ export function GatewayPage() {
   const [groups, setGroups] = useState<GatewayGroup[]>([])
   const [selectedGroupID, setSelectedGroupID] = useState<number | null>(null)
   const [mainTab, setMainTab] = useState<MainTab>("gateway")
+  /** 一键优化面板：只出方案，确认后才落配置 */
+  const [optimizerOpen, setOptimizerOpen] = useState(false)
   const [configTab, setConfigTab] = useState<ConfigTab>("keys")
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -1936,10 +1940,16 @@ export function GatewayPage() {
               组 · 密钥 · 路由
             </Badge>
           </div>
-          <Button variant="outline" size="sm" onClick={() => void refreshAll()} disabled={loading}>
-            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-            刷新
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setOptimizerOpen(true)}>
+              <Sparkles className="size-3.5" />
+              一键优化
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void refreshAll()} disabled={loading}>
+              <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+              刷新
+            </Button>
+          </div>
         </div>
         <div className="max-w-3xl space-y-1.5 text-sm leading-6 text-muted-foreground">
           <p>
@@ -2355,6 +2365,12 @@ export function GatewayPage() {
       <CreatedSecretDialog
         createdSecret={createdSecret}
         onClose={() => setCreatedSecret(null)}
+      />
+
+      <OptimizerDialog
+        open={optimizerOpen}
+        onOpenChange={setOptimizerOpen}
+        onApplied={() => void refreshAll()}
       />
     </section>
   )

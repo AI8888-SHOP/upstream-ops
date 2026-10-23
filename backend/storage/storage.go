@@ -250,6 +250,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&GatewayProvider{},
 		&GatewayResponseRule{},
 		&GatewayUsageLog{},
+		&GatewayOptimizerRun{},
 		&GatewayRequestFinalization{},
 		&GatewayWinnerSettlement{},
 		&ModelPriceOverride{},
