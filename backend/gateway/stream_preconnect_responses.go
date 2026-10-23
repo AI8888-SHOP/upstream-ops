@@ -388,12 +388,16 @@ func preconnectResponsesSameItemExceptID(streamed, terminal json.RawMessage) boo
 		streamedItem == nil || terminalItem == nil {
 		return false
 	}
-	// id 与 status 是易变元数据：上游会在终止快照里重写 id，也可能只在一侧
-	// 带 status。真正决定身份的是 type 与正文/summary。
-	for _, volatile := range []string{"id", "status"} {
+	// 下列字段是易变元数据：上游会在终止快照里重写 id，也可能只在一侧带
+	// status、phase、encrypted_content，或在末尾补 annotations。真正决定身份
+	// 的是 type 与正文/summary/参数。
+	for _, volatile := range []string{"id", "status", "phase", "encrypted_content"} {
 		delete(streamedItem, volatile)
 		delete(terminalItem, volatile)
 	}
+	// annotations 位于 content 分片内部，且常在终止快照里才补上。
+	stripPreconnectAnnotations(streamedItem)
+	stripPreconnectAnnotations(terminalItem)
 	return reflect.DeepEqual(streamedItem, terminalItem)
 }
 
@@ -586,4 +590,20 @@ func preconnectResponsesJSON(value any) json.RawMessage {
 	// No arbitrary application value or float is serialized by this adapter.
 	encoded, _ := json.Marshal(value)
 	return encoded
+}
+
+// stripPreconnectAnnotations 递归删除 content 分片上的 annotations：它只在终止
+// 快照里补齐，不参与条目身份判定。
+func stripPreconnectAnnotations(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		delete(typed, "annotations")
+		for _, nested := range typed {
+			stripPreconnectAnnotations(nested)
+		}
+	case []any:
+		for _, nested := range typed {
+			stripPreconnectAnnotations(nested)
+		}
+	}
 }

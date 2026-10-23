@@ -788,3 +788,36 @@ func TestPreconnectResponsesAcceptsRegeneratedReasoningIdentity(t *testing.T) {
 		t.Fatalf("message id=%s", got)
 	}
 }
+
+// 上游可能在终止快照里改写 id、丢掉 status/phase/encrypted_content，或补上
+// annotations；这些都不改变条目身份，必须按同一项处理。
+func TestPreconnectResponsesIgnoresVolatileItemMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, streamed, terminal string
+		wantSame                 bool
+	}{
+		{
+			name:     "phase and encrypted content dropped",
+			wantSame: true,
+			streamed: `{"id":"a","type":"reasoning","status":"completed","phase":"final","encrypted_content":"xyz","summary":[{"type":"summary_text","text":"t"}]}`,
+			terminal: `{"type":"reasoning","id":"b","summary":[{"type":"summary_text","text":"t"}]}`,
+		},
+		{
+			name:     "annotations added at terminal",
+			wantSame: true,
+			streamed: `{"id":"a","type":"message","content":[{"type":"output_text","text":"t"}]}`,
+			terminal: `{"id":"b","type":"message","content":[{"type":"output_text","text":"t","annotations":[{"type":"url_citation"}]}]}`,
+		},
+		{
+			name:     "different text still fails",
+			streamed: `{"id":"a","type":"message","content":[{"type":"output_text","text":"t"}]}`,
+			terminal: `{"id":"b","type":"message","content":[{"type":"output_text","text":"other"}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preconnectResponsesSameItemExceptID([]byte(tc.streamed), []byte(tc.terminal)); got != tc.wantSame {
+				t.Fatalf("same item=%v, want %v", got, tc.wantSame)
+			}
+		})
+	}
+}
