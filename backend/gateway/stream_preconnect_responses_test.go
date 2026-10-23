@@ -867,3 +867,29 @@ func TestPreconnectResponsesAcceptsDeepSeekTerminalShapeDrift(t *testing.T) {
 		})
 	}
 }
+
+// 上游会在 done 帧里重写 added 阶段分配的条目 ID。这不是重复条目，
+// 而是同一项的新身份；旧逻辑会因此让整个响应失败。
+func TestPreconnectResponsesAcceptsItemIDRewriteBetweenAddedAndDone(t *testing.T) {
+	stream, wire, _, _ := preconnectResponsesTestStart(t)
+	payload := `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_added","type":"message","role":"assistant","content":[]}}` + "\n\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_rewritten","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_up","status":"completed","usage":{"input_tokens":10,"output_tokens":1},"output":[{"id":"msg_terminal","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}}` + "\n\n"
+	if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err != nil {
+		t.Fatalf("item id rewrite must not abort the response: %v", err)
+	}
+	if !stream.done() {
+		t.Fatal("stream did not reach a terminal state")
+	}
+}
+
+// 已经收到 done 之后再冒出不同 ID，才是真的重复条目，必须继续失败。
+func TestPreconnectResponsesStillRejectsDuplicateDoneWithNewIdentity(t *testing.T) {
+	stream, wire, _, _ := preconnectResponsesTestStart(t)
+	payload := `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}` + "\n\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}` + "\n\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}` + "\n\n"
+	if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err == nil {
+		t.Fatal("duplicate done with a new identity must remain an error")
+	}
+}

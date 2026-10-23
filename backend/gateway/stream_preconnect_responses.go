@@ -456,8 +456,19 @@ func (s *preconnectResponsesStream) observeItem(eventType string, index int64, r
 	if err := json.Unmarshal(raw, &identity); err != nil || identity.Type == "" {
 		return errors.New("invalid Responses preconnect output item")
 	}
-	if (state.id != "" && identity.ID != state.id) || (state.kind != "" && identity.Type != state.kind) {
+	// type 变了就是另一个条目，必须失败；id 则不然——上游常在 done 帧里把
+	// added 阶段的条目 ID 重新生成一遍（DeepSeek 系尤其明显）。只要还没收到
+	// done，就接受这次重写并沿用新身份；已经收到 done 之后再出现不同 ID 才是
+	// 真的重复条目。
+	if state.kind != "" && identity.Type != state.kind {
 		return errors.New("Responses preconnect output item identity changed")
+	}
+	if state.id != "" && identity.ID != state.id {
+		if len(state.done) > 0 {
+			return errors.New("Responses preconnect output item identity changed")
+		}
+		s.itemBytes += len(identity.ID) - len(state.id)
+		state.id = identity.ID
 	}
 	if eventType == "response.output_item.added" {
 		if state.added || len(state.done) > 0 {
