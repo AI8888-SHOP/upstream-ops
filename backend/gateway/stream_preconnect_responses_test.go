@@ -821,3 +821,49 @@ func TestPreconnectResponsesIgnoresVolatileItemMetadata(t *testing.T) {
 		})
 	}
 }
+
+// DeepSeek 系上游在终止快照里重写条目 ID，并省略流式 done 帧里的空集合字段
+// （"summary":[] / "content":[]）。内容其实一致，不应据此作废整个响应。
+func TestPreconnectResponsesAcceptsDeepSeekTerminalShapeDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		added    string
+		done     string
+		terminal string
+		wantID   string
+	}{
+		{
+			name:     "reasoning summary dropped at terminal",
+			added:    `{"id":"rs_stream","type":"reasoning","summary":[]}`,
+			done:     `{"id":"rs_stream","type":"reasoning","summary":[],"content":[],"status":"completed"}`,
+			terminal: `{"id":"rs_snapshot","type":"reasoning"}`,
+			wantID:   "rs_stream",
+		},
+		{
+			name:     "message keeps streamed body",
+			added:    `{"id":"msg_stream","type":"message","role":"assistant","content":[]}`,
+			done:     `{"id":"msg_stream","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}`,
+			terminal: `{"id":"msg_snapshot","type":"message","role":"assistant","content":[{"type":"output_text","text":"regenerated"}]}`,
+			wantID:   "msg_stream",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream, wire, _, _ := preconnectResponsesTestStart(t)
+			payload := `data: {"type":"response.output_item.added","output_index":0,"item":` + tc.added + "}\n\n" +
+				`data: {"type":"response.output_item.done","output_index":0,"item":` + tc.done + "}\n\n" +
+				`data: {"type":"response.completed","response":{"id":"resp_up","status":"completed","usage":{"input_tokens":10,"output_tokens":1},"output":[` + tc.terminal + "]}}\n\n"
+			if err := stream.feed([]byte(payload), preconnectResponsesTestEmit(wire)); err != nil {
+				t.Fatalf("terminal shape drift must not abort the response: %v", err)
+			}
+			events := parsePreconnectResponsesTestEvents(t, wire.Bytes())
+			response := preconnectResponsesTestObject(t, events[len(events)-1].root["response"])
+			var output []json.RawMessage
+			if err := json.Unmarshal(response["output"], &output); err != nil || len(output) != 2 {
+				t.Fatalf("invalid terminal output: %s: %v", response["output"], err)
+			}
+			if got := preconnectResponsesTestString(t, preconnectResponsesTestObject(t, output[1])["id"]); got != tc.wantID {
+				t.Fatalf("terminal item id=%s, want streamed %s", got, tc.wantID)
+			}
+		})
+	}
+}

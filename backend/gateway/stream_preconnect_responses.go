@@ -358,12 +358,20 @@ func (s *preconnectResponsesStream) prependReasoning(response map[string]json.Ra
 			// matches the streamed output_item.done apart from that ID; otherwise
 			// this may be a genuinely different tool call or message.
 			if state.id != "" && identity.ID != state.id {
-				if len(state.done) == 0 || !preconnectResponsesSameItemExceptID(state.done, output[index]) {
+				if len(state.done) == 0 {
 					return errors.New("Responses preconnect terminal output identity changed")
 				}
 				// 部分上游（如 o10.top 的 DeepSeek）会在终止快照里重新生成条目
 				// ID，并省略流式 done 帧里的 status。两者都不代表内容身份：类型
 				// 与正文一致时，直接沿用客户端已经看到的那份 done 帧。
+				//
+				// 工具调用仍然要求内容完全一致：call_id 或 arguments 变了就是
+				// 另一个调用，静默替换会让客户端执行一段它没见过的参数。正文与
+				// reasoning 相反，客户端已经收到流式版本，终止快照只是尾部复述，
+				// 两者不一致时以已发送的为准才不会让整个响应作废。
+				if identity.Type == "function_call" && !preconnectResponsesSameItemExceptID(state.done, output[index]) {
+					return errors.New("Responses preconnect terminal output identity changed")
+				}
 				output[index] = state.done
 			}
 		}
@@ -398,7 +406,30 @@ func preconnectResponsesSameItemExceptID(streamed, terminal json.RawMessage) boo
 	// annotations 位于 content 分片内部，且常在终止快照里才补上。
 	stripPreconnectAnnotations(streamedItem)
 	stripPreconnectAnnotations(terminalItem)
+	// 空集合与缺字段是同一件事：流式 done 帧常带 "summary":[] / "content":[]，
+	// 而终止快照直接省略该键。reflect.DeepEqual 会把 nil 与 []any{} 判成不同，
+	// 于是内容完全一致也被当成身份变化（DeepSeek 系上游尤其明显）。
+	stripPreconnectEmptyCollections(streamedItem)
+	stripPreconnectEmptyCollections(terminalItem)
 	return reflect.DeepEqual(streamedItem, terminalItem)
+}
+
+// stripPreconnectEmptyCollections 递归删除空数组字段，让「空」与「缺失」等价。
+func stripPreconnectEmptyCollections(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if items, ok := nested.([]any); ok && len(items) == 0 {
+				delete(typed, key)
+				continue
+			}
+			stripPreconnectEmptyCollections(nested)
+		}
+	case []any:
+		for _, nested := range typed {
+			stripPreconnectEmptyCollections(nested)
+		}
+	}
 }
 
 func (s *preconnectResponsesStream) observeItem(eventType string, index int64, raw json.RawMessage) error {
