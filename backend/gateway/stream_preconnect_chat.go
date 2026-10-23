@@ -37,7 +37,8 @@ func newPreconnectChatStream(model string, multihop bool) (*preconnectChatStream
 		model:   model,
 		space:   multihop,
 	}
-	delta := map[string]any{"role": "assistant"}
+	// 与 OpenAI 原生首帧一致：显式给空 content，拼装结果仍是零字符。
+	delta := map[string]any{"role": "assistant", "content": ""}
 	if s.space {
 		delta["content"] = " "
 	}

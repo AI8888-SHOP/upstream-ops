@@ -361,12 +361,10 @@ func (s *preconnectResponsesStream) prependReasoning(response map[string]json.Ra
 				if len(state.done) == 0 || !preconnectResponsesSameItemExceptID(state.done, output[index]) {
 					return errors.New("Responses preconnect terminal output identity changed")
 				}
-				var item map[string]json.RawMessage
-				if err := json.Unmarshal(output[index], &item); err != nil || item == nil {
-					return errors.New("Responses preconnect terminal output identity changed")
-				}
-				item["id"] = preconnectResponsesJSON(state.id)
-				output[index] = preconnectResponsesJSON(item)
+				// 部分上游（如 o10.top 的 DeepSeek）会在终止快照里重新生成条目
+				// ID，并省略流式 done 帧里的 status。两者都不代表内容身份：类型
+				// 与正文一致时，直接沿用客户端已经看到的那份 done 帧。
+				output[index] = state.done
 			}
 		}
 		if len(output) == 0 && !s.sawOutput && !preconnectResponsesHasUsage(response["usage"]) {
@@ -390,8 +388,12 @@ func preconnectResponsesSameItemExceptID(streamed, terminal json.RawMessage) boo
 		streamedItem == nil || terminalItem == nil {
 		return false
 	}
-	delete(streamedItem, "id")
-	delete(terminalItem, "id")
+	// id 与 status 是易变元数据：上游会在终止快照里重写 id，也可能只在一侧
+	// 带 status。真正决定身份的是 type 与正文/summary。
+	for _, volatile := range []string{"id", "status"} {
+		delete(streamedItem, volatile)
+		delete(terminalItem, volatile)
+	}
 	return reflect.DeepEqual(streamedItem, terminalItem)
 }
 

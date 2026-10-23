@@ -744,3 +744,47 @@ func TestPreconnectResponsesValidatesSuccessfulTerminalStatus(t *testing.T) {
 		}
 	}
 }
+
+// o10.top 的 DeepSeek 会在终止快照里重写 reasoning 项的 id，并省略流式 done
+// 帧里的 status。类型与 summary 一致时必须沿用流式帧，而不是判成身份变化。
+func TestPreconnectResponsesAcceptsRegeneratedReasoningIdentity(t *testing.T) {
+	stream, wire, _, _ := preconnectResponsesTestStart(t)
+	streamedReasoning := `{"id":"item_streamed","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"need 3 hours"}]}`
+	terminalReasoning := `{"type":"reasoning","id":"item_regenerated","summary":[{"type":"summary_text","text":"need 3 hours"}]}`
+	message := `{"id":"item_msg","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"7pm","annotations":[]}]}`
+	payloads := []string{
+		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"item_streamed","type":"reasoning","status":"in_progress","summary":[]}}`,
+		`{"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":` + streamedReasoning + `}`,
+		`{"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"id":"item_msg","type":"message","role":"assistant","status":"in_progress","content":[]}}`,
+		`{"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":` + message + `}`,
+		`{"type":"response.completed","sequence_number":5,"response":{"id":"resp_real","object":"response","status":"completed","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30},"output":[` + terminalReasoning + `,` + message + `]}}`,
+	}
+	for _, payload := range payloads {
+		if err := stream.feed([]byte("data: "+payload+"\n\n"), preconnectResponsesTestEmit(wire)); err != nil {
+			t.Fatalf("feed failed: %v", err)
+		}
+	}
+	events := parsePreconnectResponsesTestEvents(t, wire.Bytes())
+	last := events[len(events)-1]
+	if last.name != "response.completed" {
+		t.Fatalf("last=%s", last.name)
+	}
+	response := preconnectResponsesTestObject(t, last.root["response"])
+	var output []map[string]json.RawMessage
+	if err := json.Unmarshal(response["output"], &output); err != nil {
+		t.Fatal(err)
+	}
+	// 第 0 项是合成 reasoning，第 1 项是上游 reasoning，第 2 项是 message。
+	if len(output) != 3 {
+		t.Fatalf("output len=%d", len(output))
+	}
+	if got := preconnectResponsesTestString(t, output[1]["id"]); got != "item_streamed" {
+		t.Fatalf("reasoning id=%s, want streamed id", got)
+	}
+	if got := preconnectResponsesTestString(t, output[1]["status"]); got != "completed" {
+		t.Fatalf("reasoning status=%s", got)
+	}
+	if got := preconnectResponsesTestString(t, output[2]["id"]); got != "item_msg" {
+		t.Fatalf("message id=%s", got)
+	}
+}
