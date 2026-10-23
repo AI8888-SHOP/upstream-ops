@@ -41,6 +41,7 @@ type streamPreconnectWriter struct {
 	kind            protocolKind
 	requestID       string
 	responses       *preconnectResponsesStream // used only after the first early write
+	chat            *preconnectChatStream      // Chat Completions synthetic first event
 }
 
 func streamPreconnectFor(c *gin.Context) *streamPreconnectWriter {
@@ -99,6 +100,11 @@ func beginStreamPreconnect(c *gin.Context, group *storage.GatewayGroup, kind pro
 		// On entropy failure retain the ordinary transport-only mode. Never
 		// substitute a predictable response ID or alter stateful requests.
 		w.responses, _ = newPreconnectResponsesStream(group.StreamPreconnectMultihopEnabled)
+	} else if group.StreamPreconnectSub2apiEnabled && path == "/v1/chat/completions" &&
+		protocol.NormalizeKind(kind) == protocol.KindOpenAIChat && len(requestBody) == 1 {
+		// Chat Completions 没有可容纳隐形内容的协议元素：只下发 assistant 角色
+		// （多层模式带一个空格），正文、用量与结束原因仍全部来自真实上游。
+		w.chat, _ = newPreconnectChatStream(streamPreconnectChatModel(requestBody[0]), group.StreamPreconnectMultihopEnabled)
 	}
 	c.Request = c.Request.WithContext(context.WithValue(ctx, streamPreconnectKey{}, w))
 	if hasTiming {
@@ -218,6 +224,8 @@ func (w *streamPreconnectWriter) keepalive() bool {
 	payload := []byte(": upstream-ops keepalive\n\n")
 	if w.responses != nil && !w.preconnected {
 		payload = w.responses.preamble()
+	} else if w.chat != nil && !w.preconnected {
+		payload = w.chat.bytes()
 	}
 	n, err := w.ResponseWriter.Write(payload)
 	w.preconnected = true
@@ -270,6 +278,9 @@ func (w *streamPreconnectWriter) Write(payload []byte) (int, error) {
 		return 0, nil
 	}
 	w.prepareWriteLocked()
+	if w.chat != nil && w.preconnected {
+		payload = w.chat.rewriteFirst(payload)
+	}
 	if w.responses != nil && w.preconnected {
 		err := w.responses.feed(payload, w.writeResponsesFrameLocked)
 		if err != nil {

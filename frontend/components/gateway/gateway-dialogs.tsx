@@ -1277,9 +1277,9 @@ export function GroupFormDialog({
               </div>
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <Label>sub2api 首字统计兼容（Responses / semantic）</Label>
+                  <Label>sub2api 首字统计兼容（Responses / Chat Completions）</Label>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    无需修改 sub2api 源码。未开启下方多层模式时，其首字统计需使用 semantic；visible 口径仍等待真实输出，多层转发也可能缓冲空事件。仅在 Responses 请求明确设置 store:false，且不使用续接、会话或后台模式时，提前发送生命周期事件与空 reasoning 项；其他请求仅发送普通保活注释。
+                    无需修改 sub2api 源码。未开启下方多层模式时，其首字统计需使用 semantic；visible 口径仍等待真实输出，多层转发也可能缓冲空事件。Responses 请求需明确设置 store:false 且不使用续接、会话或后台模式，此时提前发送生命周期事件与空 reasoning 项；Chat Completions 请求会提前发送一个仅含 assistant 角色、不含正文的合法 chunk（客户端拼装正文时贡献零字符）；其他请求仅发送普通保活注释。
                   </p>
                   <p className="text-[11px] leading-5 text-muted-foreground">
                     启用后，提前建流的响应使用网关生成的响应 ID，并多出 reasoning 项，不能用于 previous_response_id 续接。未开启多层模式时该项为空；开启后包含下方说明的合成空格。不会降低本程序真实首字、改变真实回答正文、Token 用量或计费；实际下游计时还包含网络与代理耗时，不保证等于设置的毫秒数。
