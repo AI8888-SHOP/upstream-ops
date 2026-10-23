@@ -184,6 +184,10 @@ func runGatewayDailyReportProfitRegression(t *testing.T, db *gorm.DB) {
 		{name: "snapshot explicit bill rate wins", sell: reportProfitPointer(.4), usage: GatewayUsageLog{ActualCost: 4, RateMultiplier: .5, BillingRateMultiplier: .2}, snapshot: &GatewayRequestFinalization{ActualCost: 2, BilledCost: 1}, wantRevenue: 2},
 		{name: "unknown per-request mode", sell: reportProfitPointer(.4), usage: GatewayUsageLog{ActualCost: 2, BillingMode: "request"}, snapshot: &GatewayRequestFinalization{ActualCost: 2, BilledCost: 2}, wantUnpriced: 1},
 		{name: "image token pricing", sell: reportProfitPointer(.4), usage: GatewayUsageLog{ActualCost: 2, BillingMode: "image", ImageOutputTokens: 10}, snapshot: &GatewayRequestFinalization{ActualCost: 2, BilledCost: 2}, wantRevenue: .8},
+		// 按次计费同样写入了 billed_cost，必须计入收入；否则一条按次记录就会
+		// 让整张日报的利润变成「无法计算」。
+		{name: "per-request billing is priced", sell: reportProfitPointer(.4), usage: GatewayUsageLog{ActualCost: 2, BillingMode: "per_request"}, snapshot: &GatewayRequestFinalization{ActualCost: 2, BilledCost: 2}, wantRevenue: .8},
+		{name: "per-request billing without snapshot", sell: reportProfitPointer(.4), usage: GatewayUsageLog{ActualCost: .5, TotalCost: .5, BillingMode: "per_request"}, wantRevenue: .2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := newTx(t)

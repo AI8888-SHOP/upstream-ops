@@ -208,7 +208,10 @@ const gatewayDailyReportSQL = `WITH report_base AS (
 		(COALESCE(u.total_cost,0) = 0 AND COALESCE(u.actual_cost,0) = 0 AND COALESCE(u.billed_cost,0) = 0
 			AND COALESCE(f.actual_cost,0) = 0 AND COALESCE(f.billed_cost,0) = 0) AS zero_recorded_cost,
 		CASE
-			WHEN COALESCE(u.billing_mode,'') NOT IN ('','token','image') THEN NULL
+			-- 只有真正未知的计费模式才放弃定价。per_request（按次收费）同样会
+			-- 写入 billed_cost/actual_cost，必须参与收入，否则整张日报的利润
+			-- 会因为一条按次记录而变成「无法计算」。
+			WHEN COALESCE(u.billing_mode,'') NOT IN ('','token','image','per_request') THEN NULL
 			WHEN u.reference_pricing_version > 0 THEN u.reference_sales_base
 			WHEN f.request_id IS NOT NULL THEN
 				CASE WHEN f.billed_cost > 0 OR (f.billed_cost = 0 AND f.actual_cost > 0 AND f.virtual_cache_read_tokens > 0)
