@@ -1,11 +1,13 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/bejix/upstream-ops/backend/storage"
@@ -69,6 +71,36 @@ func TestChatPreconnectAdoptsFirstRealChunkIdentity(t *testing.T) {
 	}
 	if got := stream.rewriteFirst(upstream); string(got) != string(upstream) {
 		t.Fatalf("later chunks must pass through, got %s", got)
+	}
+}
+
+func TestChatPreconnectWriterReportsOriginalPayloadLengthAfterIDRewrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+	w := newStreamPreconnectWriter(ctx, c.Writer, protocol.KindOpenAIChat, "preconnect-test", cancel)
+	chat, err := newPreconnectChatStream("m", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.chat = chat
+	w.preconnected = true
+	state := &forwardRequestTiming{started: time.Now()}
+	timingWriter := &requestTimingWriter{ResponseWriter: w, state: state, kind: protocol.KindOpenAIChat}
+	c.Writer = timingWriter
+	payload := []byte("data: " + `{"id":"chatcmpl-upstream","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n")
+	n, writeErr := c.Writer.Write(payload)
+	if writeErr != nil || n != len(payload) || timingWriter.failed {
+		t.Fatalf("rewritten first chunk write = %d/%d, err=%v failed=%v", n, len(payload), writeErr, timingWriter.failed)
+	}
+	if !chat.rewrote {
+		t.Fatal("first real chunk was not rewritten")
+	}
+	if got := rec.Body.Len(); got == len(payload) {
+		t.Fatalf("fixture must exercise changed wire length: got=%d input=%d", got, len(payload))
 	}
 }
 

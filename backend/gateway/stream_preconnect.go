@@ -277,6 +277,7 @@ func (w *streamPreconnectWriter) Write(payload []byte) (int, error) {
 	if len(payload) == 0 {
 		return 0, nil
 	}
+	inputLen := len(payload)
 	w.prepareWriteLocked()
 	if w.chat != nil && w.preconnected {
 		payload = w.chat.rewriteFirst(payload)
@@ -300,8 +301,13 @@ func (w *streamPreconnectWriter) Write(payload []byte) (int, error) {
 	}
 	if err != nil {
 		w.failLocked(err)
+		return n, err
 	}
-	return n, err
+	// Chat preconnect rewrites the first real chunk's response ID. The raw
+	// writer reports bytes from the rewritten payload, but callers of this
+	// writer supplied the original payload. Return the original input length so
+	// requestTimingWriter does not mistake a successful transform for io.ErrShortWrite.
+	return inputLen, nil
 }
 
 func (w *streamPreconnectWriter) writeResponsesFrameLocked(frame []byte) error {
