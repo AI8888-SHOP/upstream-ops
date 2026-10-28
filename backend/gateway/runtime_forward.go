@@ -458,6 +458,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					if errors.Is(streamErr, errUpstreamStreamFailure) {
 						errInfo = rt.buildUpstreamErrorInfoCfg(gwCfg, streamErr, status, respHeaders, respBody, upstreamFullURL, c.Request.Method)
 					}
+					appendStreamFailureDiagnostics(&errInfo, streamCommitted, firstTokenMS, streamErr, respHeaders, respBody)
 				}
 				if success {
 					rt.noteRouteModelSuccess(&route, upstreamModel)
@@ -471,11 +472,21 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 						rt.finishRouteAffinityProbe(&affinity, route.ID, false, blockUntil, time.Now())
 					}
 					if rt.Log != nil {
+						upstreamResponseID, upstreamErrorCode := upstreamStreamFailureMetadata(respBody)
 						rt.Log.Warn("gateway stream ended with error after commit",
 							"request_id", reqID,
 							"attempt", attemptNo,
 							"route_id", route.ID,
+							"status", status,
 							"upstream_url", upstreamFullURL,
+							"upstream_request_ids", upstreamRequestIDs(respHeaders),
+							"upstream_client_request_id", sanitizeDiagnosticValue(respHeaders.Get("X-Client-Request-Id"), 256),
+							"upstream_response_id", upstreamResponseID,
+							"upstream_error_code", upstreamErrorCode,
+							"failure_phase", streamFailurePhase(streamCommitted, firstTokenMS),
+							"failure_kind", streamFailureKind(streamErr),
+							"first_token_ms", firstTokenMS,
+							"failure_frame_bytes", len(respBody),
 							"err", errInfo.Summary,
 							"client_disconnected", clientDisconnected,
 							"input_tokens", streamTokens.InputTokens,
@@ -529,6 +540,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 						errInfo.UpstreamHeaders = rt.formatDebugHeaders(respHeaders, gwCfg.UsageErrorHeadersJSONBytes, gwCfg.UsageErrorHeaderValueRunes)
 					}
 					errInfo.Detail = detail.String()
+				}
+				if stream && fwdErr != nil {
+					appendStreamFailureDiagnostics(&errInfo, false, firstTokenMS, fwdErr, respHeaders, respBody)
 				}
 				// 客户端断开 / 请求 context 已取消：父 context 污染会导致后续重试/顺延全部变成
 				// "context canceled"，且误伤路由冷却。此类错误应立刻停止，不再重试/顺延/冷却。

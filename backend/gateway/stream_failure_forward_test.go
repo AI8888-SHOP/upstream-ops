@@ -73,6 +73,9 @@ func TestStreamFailuresThroughGatewayAuditAndSettlement(t *testing.T) {
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					calls[index].Add(1)
 					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Add("X-Request-Id", fmt.Sprintf("upstream-%d-a", index))
+					w.Header().Add("X-Request-Id", fmt.Sprintf("upstream-%d-b", index))
+					w.Header().Set("X-Client-Request-Id", "upstream-client-test")
 					if index == 1 {
 						_, _ = io.WriteString(w, zeroUsageTestBody(protocol.KindOpenAIResponses, true, "fallback answer", 2, true, true))
 						return
@@ -133,6 +136,25 @@ func TestStreamFailuresThroughGatewayAuditAndSettlement(t *testing.T) {
 			}
 			if tc.late && (!failed.ValidationPostCommit || failed.ValidationRuleName != "overloaded") {
 				t.Fatalf("late regex audit lost: %+v", failed)
+			}
+			if tc.output {
+				wants := []string{
+					"failure_phase: after_upstream_first_token_committed",
+					"failure_kind: upstream_terminal_error",
+					"upstream_request_ids: upstream-0-a,upstream-0-b",
+					"upstream_client_request_id: upstream-client-test",
+				}
+				if strings.Contains(failed.UpstreamErrorBody, "resp_0") {
+					wants = append(wants, "upstream_response_id: resp_0")
+				}
+				if strings.Contains(failed.UpstreamErrorBody, "server_error") {
+					wants = append(wants, "upstream_error_code: server_error")
+				}
+				for _, want := range wants {
+					if !strings.Contains(failed.ErrorDetail, want) {
+						t.Fatalf("stream diagnostics missing %q: %s", want, failed.ErrorDetail)
+					}
+				}
 			}
 			if tc.name == "failed-with-real-usage" && (failed.InputTokens != 7 || failed.OutputTokens != 2) {
 				t.Fatalf("failure usage lost: %+v", failed)

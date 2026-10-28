@@ -900,6 +900,34 @@ func (rt *Runtime) runCoordinatedStreamAttempt(ctx context.Context, req *coordin
 			result.PostCommitValidation = late
 			validation = late
 		}
+		if result.StreamErr != nil && !rt.isClientDisconnectAfterCommit(result.ClientDisconnected, result.StreamErr) {
+			if strings.TrimSpace(errInfo.Summary) == "" {
+				errInfo = rt.buildUpstreamErrorInfoCfg(
+					rt.gatewayRuntime(), result.StreamErr, result.Status, result.Headers, result.Body,
+					attempt.UpstreamURL, req.c.Request.Method,
+				)
+			}
+			appendStreamFailureDiagnostics(&errInfo, result.Committed, result.FirstTokenMS, result.StreamErr, result.Headers, result.Body)
+			if rt.Log != nil {
+				responseID, errorCode := upstreamStreamFailureMetadata(result.Body)
+				rt.Log.Warn("gateway coordinated stream attempt failed",
+					"request_id", req.requestID,
+					"attempt", attempt.Info.Number,
+					"route_id", attempt.Route.ID,
+					"status", result.Status,
+					"upstream_url", attempt.UpstreamURL,
+					"upstream_request_ids", upstreamRequestIDs(result.Headers),
+					"upstream_client_request_id", sanitizeDiagnosticValue(result.Headers.Get("X-Client-Request-Id"), 256),
+					"upstream_response_id", responseID,
+					"upstream_error_code", errorCode,
+					"failure_phase", streamFailurePhase(result.Committed, result.FirstTokenMS),
+					"failure_kind", streamFailureKind(result.StreamErr),
+					"first_token_ms", result.FirstTokenMS,
+					"failure_frame_bytes", len(result.Body),
+					"err", result.StreamErr.Error(),
+				)
+			}
+		}
 		attempt.streamMu.Lock()
 		attempt.applyStreamResultLocked(result)
 		attempt.ClientBody = clientBody
