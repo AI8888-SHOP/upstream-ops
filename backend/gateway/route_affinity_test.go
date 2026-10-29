@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
@@ -134,6 +135,76 @@ func TestRequestRouteAffinityUsesAnalyzedPromptCacheKeyWithoutBodyScan(t *testin
 	want := []string{routeAffinityDigest("body:id\x00codex-cache-key")}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("analyzed affinity fingerprints=%v, want %v", got, want)
+	}
+}
+
+func TestRequestRouteFailureKeysRequireStableIDAndBindBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	request := func(id string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		if id != "" {
+			c.Request.Header.Set("X-Client-Request-Id", id)
+		}
+		return c
+	}
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}]}`)
+	first := requestRouteFailureKeys(request("logical-1"), body, 7, 3, "openai_chat", "m")
+	retry := requestRouteFailureKeys(request("logical-1"), body, 7, 3, "openai_chat", "m")
+	if !reflect.DeepEqual(first, retry) || len(first) != 1 {
+		t.Fatalf("stable retry keys mismatch: first=%v retry=%v", first, retry)
+	}
+	if got := requestRouteFailureKeys(request("logical-2"), body, 7, 3, "openai_chat", "m"); reflect.DeepEqual(first, got) {
+		t.Fatalf("different logical ID reused retry key: %v", got)
+	}
+	if got := requestRouteFailureKeys(request("logical-1"), append(append([]byte(nil), body...), ' '), 7, 3, "openai_chat", "m"); reflect.DeepEqual(first, got) {
+		t.Fatalf("different body reused retry key: %v", got)
+	}
+	if got := requestRouteFailureKeys(request(""), body, 7, 3, "openai_chat", "m"); len(got) != 0 {
+		t.Fatalf("request without stable ID produced retry keys: %v", got)
+	}
+}
+
+func TestRequestRouteFailureStoreExpiresAndScopesFailures(t *testing.T) {
+	svc := &Service{}
+	key := routeAffinityKey{GatewayKeyID: 7, GroupID: 3, Protocol: "openai_chat", Model: "m", Fingerprint: "digest"}
+	now := time.Now()
+	svc.rememberRequestRouteFailure([]routeAffinityKey{key}, 11, now)
+	if got := svc.lookupRequestRouteFailures([]routeAffinityKey{key}, now.Add(time.Minute)); len(got) != 1 {
+		t.Fatalf("active failure routes=%v, want route 11", got)
+	}
+	otherScope := key
+	otherScope.GroupID++
+	if got := svc.lookupRequestRouteFailures([]routeAffinityKey{otherScope}, now.Add(time.Minute)); len(got) != 0 {
+		t.Fatalf("failure crossed group boundary: %v", got)
+	}
+	if got := svc.lookupRequestRouteFailures([]routeAffinityKey{key}, now.Add(requestRouteFailureTTL+time.Second)); len(got) != 0 {
+		t.Fatalf("expired failure routes=%v, want none", got)
+	}
+}
+
+func TestFilterPreviouslyFailedRequestRoutesPrefersAlternativesAndFallsBack(t *testing.T) {
+	svc := &Service{}
+	rt := svc.runtime()
+	key := routeAffinityKey{GatewayKeyID: 1, GroupID: 2, Protocol: "openai_chat", Model: "m", Fingerprint: "digest"}
+	affinity := routeAffinityContext{RetryKeys: []routeAffinityKey{key}}
+	now := time.Now()
+	svc.rememberRequestRouteFailure(affinity.RetryKeys, 1, now)
+	candidates := []ScoredRoute{{Route: storage.GatewayRoute{ID: 1}}, {Route: storage.GatewayRoute{ID: 2}}}
+	got := rt.filterPreviouslyFailedRequestRoutes(candidates, &affinity)
+	if len(got) != 2 || got[0].Route.ID != 2 || got[1].Route.ID != 1 {
+		t.Fatalf("failed route was not deprioritized: %+v", got)
+	}
+	allFailed := []ScoredRoute{{Route: storage.GatewayRoute{ID: 1}}}
+	got = rt.filterPreviouslyFailedRequestRoutes(allFailed, &affinity)
+	if len(got) != 1 || got[0].Route.ID != 1 {
+		t.Fatalf("all-failed fallback=%+v, want original candidate", got)
+	}
+	if got := svc.lookupRequestRouteFailures(affinity.RetryKeys, now); len(got) != 1 {
+		t.Fatalf("successful fallback cleared prior failure state: %v", got)
+	}
+	if got := svc.lookupRequestRouteFailures(affinity.RetryKeys, now.Add(requestRouteFailureTTL+time.Second)); len(got) != 0 {
+		t.Fatalf("failure state survived its TTL: %v", got)
 	}
 }
 

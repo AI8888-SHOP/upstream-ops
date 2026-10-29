@@ -193,6 +193,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity, requestedModel)
 		candidates = rt.orderAdaptiveCandidates(candidates, adaptive, &affinity, routesTried == 0, time.Now())
 		candidates = rt.applyCacheHitRatePriority(candidates, group, affinity.PreferredRouteID)
+		candidates = rt.filterPreviouslyFailedRequestRoutes(candidates, &affinity)
 		if len(candidates) == 0 {
 			if routesTried == 0 {
 				rt.failNoRoutes(c, key, group, diagnosticRoutes, requestedModel, path, kind, stream, "no schedulable routes", adaptive)
@@ -508,12 +509,19 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				usageMeta.DeferSettlement = settlement.VirtualCacheReadEnabled
 				usageID := rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, streamTokens, cand.EffectiveRate, cand.BillingRate, stream, status, success, errInfo, duration, firstTokenMS, c, usageMeta)
 				if !success {
+					if streamErr != nil && !onlyClientDisconnect && !clientDisconnected &&
+						!errors.Is(streamErr, context.Canceled) && !errors.Is(streamErr, errRequestFirstTokenBudget) &&
+						!errors.Is(context.Cause(c.Request.Context()), errRequestFirstTokenBudget) {
+						rt.rememberRequestRouteFailure(&affinity, route.ID)
+					}
 					rt.finalizeUsageFailure(reqID, key)
-				} else if settlement.VirtualCacheReadEnabled {
-					if usageID == 0 {
-						rt.finalizeUsageFailure(reqID, key)
-					} else if err := rt.finalizeUsageWinnerWithSettlement(reqID, key, attemptNo, usageID, settlement); err != nil {
-						_ = rt.finalizeUsageWinner(reqID, key, attemptNo, usageID)
+				} else {
+					if settlement.VirtualCacheReadEnabled {
+						if usageID == 0 {
+							rt.finalizeUsageFailure(reqID, key)
+						} else if err := rt.finalizeUsageWinnerWithSettlement(reqID, key, attemptNo, usageID, settlement); err != nil {
+							_ = rt.finalizeUsageWinner(reqID, key, attemptNo, usageID)
+						}
 					}
 				}
 				return
@@ -556,6 +564,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				} else {
 					lastStatus = status
 					lastErr = fmt.Errorf("upstream status %d: %s", status, errInfo.Summary)
+				}
+				if !clientCanceled && !requestTimedOut && !errors.Is(fwdErr, errUpstreamQueueTimeout) &&
+					(status == 0 || shouldCooldownUpstreamFailure(status, errInfo, fwdErr)) {
+					rt.rememberRequestRouteFailure(&affinity, route.ID)
 				}
 				// 最后一次同路由尝试失败才进入冷却（客户端取消 / 重试关闭时不写冷却）
 				// Permanent capability/auth/balance errors do not benefit from

@@ -350,6 +350,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	adaptive := newAdaptiveRequest(req.group, req.requestedModel, req.reasoningEffort, req.path, req.requestID, req.thinkingEnabled, len(req.body), req.stream && req.virtualCacheEligible)
 	candidates = rt.orderAdaptiveCandidates(candidates, adaptive, &req.affinity, true, time.Now())
 	candidates = rt.applyCacheHitRatePriority(candidates, req.group, req.affinity.PreferredRouteID)
+	candidates = rt.filterPreviouslyFailedRequestRoutes(candidates, &req.affinity)
 	if req.affinity.Recovery && req.hedgeActive {
 		// A cooled route must complete its single recovery probe before any
 		// concurrent hedge is launched; fallback resumes after that probe fails.
@@ -532,6 +533,9 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 						if failed && !errors.Is(attemptErr, context.Canceled) && !errors.Is(attemptErr, errUpstreamQueueTimeout) && !errors.Is(attemptErr, errRequestFirstTokenBudget) {
 							planScheduler.recordRetryOutcome(attempt, false)
 						}
+					}
+					if coordinatedRequestFailureIsSourceSpecific(attempt, validation, status, attemptErr, terminal) {
+						rt.rememberRequestRouteFailure(&req.affinity, attempt.Route.ID)
 					}
 					if !errors.Is(attemptErr, context.Canceled) && !errors.Is(attemptErr, errUpstreamQueueTimeout) && !errors.Is(attemptErr, errRequestFirstTokenBudget) {
 						attempt.UsageMeta.SchedulerObservation.finish(req.c.Request.Context(), false, errInfo.Type, "", status)
@@ -1161,6 +1165,32 @@ func coordinatedRetrySuppressed(suppressedRoutes *sync.Map, plan coordinatedRout
 	return suppressed
 }
 
+func coordinatedRequestFailureIsSourceSpecific(attempt *coordinatedForwardAttempt, validation validationResult, status int, attemptErr error, terminal bool) bool {
+	if attempt == nil || attempt.Skipped || errors.Is(attemptErr, context.Canceled) ||
+		errors.Is(attemptErr, errClientDisconnected) || errors.Is(attemptErr, errUpstreamQueueTimeout) ||
+		errors.Is(attemptErr, errRequestFirstTokenBudget) {
+		return false
+	}
+	if validation.IsRejected() && !validation.PostCommit {
+		return coordinatedRejectedUpstreamFailure(attempt)
+	}
+	if validation.PostCommit {
+		attempt.streamMu.Lock()
+		streamResult, streamReady := attempt.streamResult, attempt.streamReady
+		attempt.streamMu.Unlock()
+		return streamReady && streamResult.Committed && !streamResult.ClientDisconnected &&
+			!errors.Is(streamResult.StreamErr, errClientDisconnected)
+	}
+	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+		_, _, _, _, info := attempt.retryFailureSnapshot()
+		return shouldCooldownUpstreamFailure(status, info, attemptErr)
+	}
+	if status >= http.StatusOK && status < http.StatusMultipleChoices && attemptErr == nil && !terminal {
+		return false
+	}
+	return attemptErr != nil || terminal || status < http.StatusOK || status >= http.StatusMultipleChoices
+}
+
 // Publish as soon as an attempt fails, before another winner's potentially
 // long stream. OnComplete is serialized by the coordinator, including hedges.
 func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, attempt *coordinatedForwardAttempt, plan []coordinatedRoutePlan, number int) {
@@ -1780,6 +1810,9 @@ func (rt *Runtime) finishCoordinatedStream(req *coordinatedForwardRequest, winne
 		winner.Status >= 200 && winner.Status < 300 && streamResult.Err == nil &&
 		(streamResult.StreamErr == nil || onlyClientDisconnect)
 	if !success || usageID == 0 {
+		if streamResult.StreamErr != nil && !onlyClientDisconnect && streamResult.Committed && !streamResult.ClientDisconnected {
+			rt.rememberRequestRouteFailure(&req.affinity, winner.Route.ID)
+		}
 		rt.finalizeUsageFailure(req.requestID, req.key)
 		return
 	}

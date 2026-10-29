@@ -106,6 +106,11 @@ type Service struct {
 	routeAffinities          map[routeAffinityKey]routeAffinityEntry
 	routeAffinityLastCleanup time.Time
 
+	// requestRouteFailures keeps transient, hashed request/session fingerprints
+	// mapped to failed sources so client retries can prefer a different route.
+	requestRouteFailureMu sync.Mutex
+	requestRouteFailures  map[routeAffinityKey]map[uint]time.Time
+
 	// cacheHealthPending coalesces evaluator jobs so a burst of requests on a
 	// channel never turns the usage write path into a query storm.
 	cacheHealthMu      sync.Mutex
@@ -170,6 +175,7 @@ func NewService(
 		channelGroupsCache:     map[uint]channelGroupsCacheEntry{},
 		channelGroupsFetches:   map[uint]*channelGroupsFetchCall{},
 		routeAffinities:        map[routeAffinityKey]routeAffinityEntry{},
+		requestRouteFailures:   map[routeAffinityKey]map[uint]time.Time{},
 		cacheHealthPending:     map[cacheHealthSourceKey]time.Time{},
 		upstreamConcurrency:    newUpstreamConcurrencyRegistry(),
 		httpTransports:         map[string]*http.Transport{},

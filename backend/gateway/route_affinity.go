@@ -19,6 +19,9 @@ const (
 	routeAffinityCleanupInterval = time.Minute
 	maxRouteAffinityEntries      = 4096
 	maxRouteAffinityPrefixes     = 64
+
+	requestRouteFailureTTL     = 5 * time.Minute
+	maxRequestRouteFailureKeys = 4096
 )
 
 type routeAffinityKey struct {
@@ -41,6 +44,7 @@ type routeAffinityEntry struct {
 type routeAffinityContext struct {
 	Keys                  []routeAffinityKey
 	LookupKey             routeAffinityKey
+	RetryKeys             []routeAffinityKey
 	PreferredRouteID      uint
 	RecoveryRouteID       uint
 	Recovery              bool
@@ -60,9 +64,12 @@ func (rt *Runtime) routeAffinityForAnalyzedRequest(c *gin.Context, keyID, groupI
 	if rt == nil || rt.Service == nil || keyID == 0 || groupID == 0 {
 		return routeAffinityContext{}
 	}
+	ctx := routeAffinityContext{
+		RetryKeys: requestRouteFailureKeys(c, body, keyID, groupID, protocolName, model),
+	}
 	fingerprints := requestRouteAffinityFingerprintsWithID(c, body, model, affinityID)
 	if len(fingerprints) == 0 {
-		return routeAffinityContext{}
+		return ctx
 	}
 	keys := make([]routeAffinityKey, 0, len(fingerprints))
 	for _, fingerprint := range fingerprints {
@@ -74,9 +81,142 @@ func (rt *Runtime) routeAffinityForAnalyzedRequest(c *gin.Context, keyID, groupI
 			Fingerprint:  fingerprint,
 		})
 	}
-	ctx := routeAffinityContext{Keys: keys}
+	ctx.Keys = keys
 	ctx.PreferredRouteID, ctx.LookupKey = rt.lookupRouteAffinity(keys, time.Now())
 	return ctx
+}
+
+func requestRouteFailureKeys(c *gin.Context, body []byte, keyID, groupID uint, protocolName, model string) []routeAffinityKey {
+	if keyID == 0 || groupID == 0 || len(body) == 0 {
+		return nil
+	}
+	fingerprints := make([]string, 0, 4)
+	scope := strings.ToLower(strings.TrimSpace(protocolName))
+	var stableIDs []string
+	if c == nil || c.Request == nil {
+		return nil
+	}
+	if c.Request.URL != nil {
+		scope += " " + strings.ToUpper(c.Request.Method) + " " + c.Request.URL.Path
+	}
+	for _, header := range []string{"Idempotency-Key", "X-Request-Id", "Request-Id", "X-Client-Request-Id", "X-Openai-Request-Id", "X-Correlation-Id"} {
+		value := strings.TrimSpace(c.GetHeader(header))
+		if value != "" && len(value) <= 512 {
+			stableIDs = append(stableIDs, "header:"+strings.ToLower(header)+"\x00"+value)
+		}
+	}
+	if len(stableIDs) == 0 {
+		return nil
+	}
+	bodyHash := sha256.New()
+	_, _ = bodyHash.Write([]byte(scope + "\x00" + strings.TrimSpace(model) + "\x00"))
+	_, _ = bodyHash.Write(body)
+	bodyFingerprint := hex.EncodeToString(bodyHash.Sum(nil))
+	for _, stableID := range stableIDs {
+		fingerprints = appendUniqueString(fingerprints, routeAffinityDigest(stableID+"\x00"+bodyFingerprint))
+	}
+	keys := make([]routeAffinityKey, 0, len(fingerprints))
+	for _, fingerprint := range fingerprints {
+		keys = append(keys, routeAffinityKey{
+			GatewayKeyID: keyID,
+			GroupID:      groupID,
+			Protocol:     scope,
+			Model:        strings.TrimSpace(model),
+			Fingerprint:  fingerprint,
+		})
+	}
+	return keys
+}
+
+func (s *Service) lookupRequestRouteFailures(keys []routeAffinityKey, now time.Time) map[uint]struct{} {
+	if s == nil || len(keys) == 0 {
+		return nil
+	}
+	s.requestRouteFailureMu.Lock()
+	defer s.requestRouteFailureMu.Unlock()
+	if s.requestRouteFailures == nil {
+		s.requestRouteFailures = make(map[routeAffinityKey]map[uint]time.Time)
+	}
+	failed := make(map[uint]struct{})
+	for _, key := range keys {
+		routes := s.requestRouteFailures[key]
+		for routeID, until := range routes {
+			if !until.After(now) {
+				delete(routes, routeID)
+				continue
+			}
+			failed[routeID] = struct{}{}
+		}
+		if len(routes) == 0 {
+			delete(s.requestRouteFailures, key)
+		}
+	}
+	return failed
+}
+
+func (s *Service) rememberRequestRouteFailure(keys []routeAffinityKey, routeID uint, now time.Time) {
+	if s == nil || len(keys) == 0 || routeID == 0 {
+		return
+	}
+	s.requestRouteFailureMu.Lock()
+	defer s.requestRouteFailureMu.Unlock()
+	if s.requestRouteFailures == nil {
+		s.requestRouteFailures = make(map[routeAffinityKey]map[uint]time.Time)
+	}
+	for key, routes := range s.requestRouteFailures {
+		for id, until := range routes {
+			if !until.After(now) {
+				delete(routes, id)
+			}
+		}
+		if len(routes) == 0 {
+			delete(s.requestRouteFailures, key)
+		}
+	}
+	for _, key := range keys {
+		routes := s.requestRouteFailures[key]
+		if routes == nil {
+			routes = make(map[uint]time.Time)
+			s.requestRouteFailures[key] = routes
+		}
+		routes[routeID] = now.Add(requestRouteFailureTTL)
+	}
+	for len(s.requestRouteFailures) > maxRequestRouteFailureKeys {
+		for key := range s.requestRouteFailures {
+			delete(s.requestRouteFailures, key)
+			break
+		}
+	}
+}
+
+func (rt *Runtime) filterPreviouslyFailedRequestRoutes(candidates []ScoredRoute, affinity *routeAffinityContext) []ScoredRoute {
+	if rt == nil || rt.Service == nil || affinity == nil || len(affinity.RetryKeys) == 0 {
+		return candidates
+	}
+	failedRoutes := rt.Service.lookupRequestRouteFailures(affinity.RetryKeys, time.Now())
+	if len(failedRoutes) == 0 {
+		return candidates
+	}
+	filtered := make([]ScoredRoute, 0, len(candidates))
+	fallback := make([]ScoredRoute, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, failed := failedRoutes[candidate.Route.ID]; failed {
+			fallback = append(fallback, candidate)
+		} else {
+			filtered = append(filtered, candidate)
+		}
+	}
+	if len(filtered) == 0 {
+		return fallback
+	}
+	return append(filtered, fallback...)
+}
+
+func (rt *Runtime) rememberRequestRouteFailure(affinity *routeAffinityContext, routeID uint) {
+	if rt == nil || rt.Service == nil || affinity == nil || routeID == 0 || len(affinity.RetryKeys) == 0 {
+		return
+	}
+	rt.Service.rememberRequestRouteFailure(affinity.RetryKeys, routeID, time.Now())
 }
 
 func requestRouteAffinityFingerprints(c *gin.Context, body []byte, model string) []string {
