@@ -32,6 +32,7 @@ func TestResponseUsageRequiresExplicitZeroMetadata(t *testing.T) {
 		{"malformed", `{"usage":{"input_tokens":0,"output_tokens":0}`, false},
 		{"positive-input", `{"usage":{"input_tokens":1,"output_tokens":0}}`, false},
 		{"positive-output", `{"usage":{"input_tokens":0,"output_tokens":1}}`, false},
+		{"aggregate-total-only", `{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":5}}`, true},
 		{"conflicting-aliases", `{"usage":{"input_tokens":0,"prompt_tokens":10,"output_tokens":0}}`, false},
 		{"real-cache-read", `{"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":10}}`, false},
 		{"real-cache-write", `{"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":10}}`, false},

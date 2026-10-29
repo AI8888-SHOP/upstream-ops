@@ -104,6 +104,7 @@ func TestStrictZeroUsageAfterContentAcrossProtocols(t *testing.T) {
 			}{
 				{name: "missing"},
 				{name: "zero", usage: `{"input_tokens":0,"output_tokens":0}`},
+				{name: "aggregate-total-only", usage: `{"input_tokens":0,"output_tokens":0,"total_tokens":5}`},
 				{name: "null", usage: `null`},
 				{name: "invalid", usage: `{"input_tokens":"unknown","output_tokens":null}`},
 				{name: "partial-zero", usage: `{"output_tokens":0}`},

@@ -69,7 +69,7 @@ func (u *responseUsageObservation) observeFields(usage map[string]json.RawMessag
 				continue
 			}
 		}
-		if !strings.HasSuffix(key, "_tokens") && key != "tokens" {
+		if key == "total_tokens" || !strings.HasSuffix(key, "_tokens") && key != "tokens" {
 			continue
 		}
 		var number json.Number
