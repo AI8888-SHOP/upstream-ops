@@ -169,8 +169,20 @@ export function useChannels() {
   return useApi<Channel[]>("/channels")
 }
 
-export function useChannelsPage(page = 1, pageSize = 9) {
-  return useApi<ChannelPage>(`/channels?page=${page}&page_size=${pageSize}`)
+export function useChannelsPage(page = 1, pageSize = 9, search = "") {
+  const term = search.trim()
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+  if (term) params.set("search", term)
+  const result = useApi<ChannelPage>(`/channels?${params}`)
+  const matchesSearch = result.data != null
+    && (result.data.search ?? "") === term
+    && result.data.page === page
+    && result.data.page_size === pageSize
+  return {
+    ...result,
+    data: matchesSearch ? result.data : null,
+    loading: result.loading || (!matchesSearch && result.error == null),
+  }
 }
 
 export function useChannelRates(channelID: number | null, onlyWithKeys = false) {

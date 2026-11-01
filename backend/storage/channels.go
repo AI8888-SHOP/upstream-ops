@@ -92,19 +92,27 @@ func (r *Channels) List() ([]Channel, error) {
 	}
 	return list, nil
 }
-func (r *Channels) ListPage(page, pageSize int) ([]Channel, int64, error) {
+func (r *Channels) ListPage(page, pageSize int, search ...string) ([]Channel, int64, error) {
 	if page < 1 {
 		page = 1
 	}
 	if pageSize <= 0 && pageSize != -1 {
 		pageSize = 20
 	}
+	q := r.db.Model(&Channel{})
+	if len(search) > 0 {
+		term := strings.ToLower(strings.TrimSpace(search[0]))
+		if term != "" {
+			pattern := "%" + strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(term) + "%"
+			q = q.Where(`EXISTS (SELECT 1 FROM rate_snapshots WHERE rate_snapshots.channel_id = channels.id AND (LOWER(rate_snapshots.model_name) LIKE ? ESCAPE '!' OR LOWER(rate_snapshots.description) LIKE ? ESCAPE '!'))`, pattern, pattern)
+		}
+	}
 	var total int64
-	if err := r.db.Model(&Channel{}).Count(&total).Error; err != nil {
+	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var list []Channel
-	q := r.db.Order("sort_order DESC").Order("id ASC")
+	q = q.Order("sort_order DESC").Order("id ASC")
 	if pageSize != -1 {
 		q = q.Offset((page - 1) * pageSize).Limit(pageSize)
 	}

@@ -25,6 +25,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   XCircle,
+  X,
 } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -132,9 +133,12 @@ function ratioTone(r: number): string {
 }
 
 /** InlineRates 在渠道卡片内部展示当前所有分组倍率，默认 2 行折叠 + 展开按钮。 */
-function InlineRates({ channel }: { channel: Channel }) {
+function InlineRates({ channel, search = "" }: { channel: Channel; search?: string }) {
   const { data, loading } = useChannelRates(channel.id, channel.only_created_key_groups_enabled)
-  const rates = [...(data ?? [])].sort((a, b) => a.ratio - b.ratio)
+  const term = search.trim().toLowerCase()
+  const rates = (data ?? [])
+    .filter((rate) => !term || [rate.model_name, rate.description ?? ""].some((value) => value.toLowerCase().includes(term)))
+    .sort((a, b) => a.ratio - b.ratio)
   const [expanded, setExpanded] = useState(false)
   const [hasOverflow, setHasOverflow] = useState(false)
   const chipBoxRef = useRef<HTMLDivElement>(null)
@@ -157,13 +161,13 @@ function InlineRates({ channel }: { channel: Channel }) {
   if (loading) return null
   if (rates.length === 0) return null
 
-  const showToggle = hasOverflow || expanded
+  const showToggle = !term && (hasOverflow || expanded)
 
   return (
     <div className="mt-3 border-t border-border pt-2.5">
       <div className="mb-1.5 flex items-center justify-between">
         <p className="text-[11px] text-muted-foreground">
-          {rates.length} 个分组
+          {term ? `${rates.length} 个匹配分组` : `${rates.length} 个分组`}
         </p>
         {showToggle ? (
           <button
@@ -188,7 +192,7 @@ function InlineRates({ channel }: { channel: Channel }) {
           className={cn(
             "flex flex-wrap gap-1 overflow-hidden transition-[max-height] duration-300 ease-out",
             // 收起：max-h-12 (~48px) 约 2 行；展开：足够大的上限，留点缓冲让 transition 不立即消失。
-            expanded ? "max-h-150" : "max-h-12",
+            term ? "max-h-none" : expanded ? "max-h-150" : "max-h-12",
           )}
         >
           {rates.map((r) => (
@@ -223,7 +227,7 @@ function InlineRates({ channel }: { channel: Channel }) {
           ))}
         </div>
         {/* 折叠时底部淡出，提示还有更多内容 */}
-        {!expanded && hasOverflow ? (
+        {!term && !expanded && hasOverflow ? (
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-linear-to-t from-background to-transparent" />
         ) : null}
       </div>
@@ -587,7 +591,25 @@ export function ChannelCards() {
   const { data: channels, loading: channelsLoading } = useChannels()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState<ChannelPageSize>(9)
-  const pageQuery = useChannelsPage(page, pageSize === "all" ? -1 : pageSize)
+  const [searchInput, setSearchInput] = useState("")
+  const [search, setSearch] = useState("")
+  const pageQuery = useChannelsPage(page, pageSize === "all" ? -1 : pageSize, search)
+
+  useEffect(() => {
+    const term = searchInput.trim()
+    if (term === search) return
+    const timer = setTimeout(() => {
+      setSearch(term)
+      setPage(1)
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [searchInput, search])
+
+  function clearSearch() {
+    setSearchInput("")
+    setSearch("")
+    setPage(1)
+  }
   const refresh = useTriggerRefresh()
   const { confirm, dialog: confirmDialog } = useConfirm()
   const [editing, setEditing] = useState<Channel | null>(null)
@@ -624,8 +646,8 @@ export function ChannelCards() {
   }, [])
 
   useEffect(() => {
-    setPage((prev) => Math.min(prev, totalPages))
-  }, [totalPages])
+    if (channelPage) setPage((prev) => Math.min(prev, channelPage.pages))
+  }, [channelPage])
 
   function clearHideTimer(id: number) {
     const t = hideTimers.current.get(id)
@@ -822,7 +844,7 @@ export function ChannelCards() {
             variant="outline"
             size="sm"
             className="gap-1.5 text-xs"
-            disabled={channelsLoading || totalChannels === 0}
+            disabled={channelsLoading || !channels?.length}
             onClick={() => setGroupsOpen(true)}
           >
             <Tags className="size-3.5" />
@@ -842,10 +864,37 @@ export function ChannelCards() {
         </div>
       </div>
 
-      {pageQuery.loading && !channelPage ? (
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="relative w-full sm:max-w-sm">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="search"
+            aria-label="搜索渠道下的分组"
+            placeholder="搜索分组名称或描述，覆盖全部渠道"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            className="h-9 pl-8 pr-9 text-xs"
+          />
+          {searchInput ? (
+            <Button type="button" variant="ghost" size="icon-sm" className="absolute right-1 top-1/2 size-7 -translate-y-1/2" aria-label="清空分组搜索" onClick={clearSearch}>
+              <X className="size-3.5" />
+            </Button>
+          ) : null}
+        </div>
+        {search ? <p role="status" className="text-xs text-muted-foreground">{channelPage ? `找到 ${totalChannels} 个匹配渠道` : "正在搜索分组…"}</p> : null}
+      </div>
+
+      {pageQuery.error ? (
+        <p role="alert" className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-danger">{pageQuery.error}</p>
+      ) : pageQuery.loading && !channelPage ? (
         <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
           {"加载中…"}
         </p>
+      ) : totalChannels === 0 && search ? (
+        <div className="rounded-lg border border-dashed border-border px-4 py-10 text-center">
+          <p className="text-sm text-muted-foreground">没有找到匹配的分组，请尝试其他名称或描述。</p>
+          <Button variant="outline" size="sm" className="mt-3 text-xs" onClick={clearSearch}>清空搜索</Button>
+        </div>
       ) : totalChannels === 0 ? (
         <div className="rounded-lg border border-dashed border-border px-4 py-10 text-center">
           <p className="text-sm text-muted-foreground">{"还没有任何渠道。"}</p>
@@ -960,7 +1009,7 @@ export function ChannelCards() {
                     ) : null}
                   </div>
 
-                  <InlineRates channel={c} />
+                  <InlineRates channel={c} search={search} />
 
                   <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
                     <Button

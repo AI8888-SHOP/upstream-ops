@@ -122,13 +122,13 @@ type channelAPIKeyCreateInput = connector.APIKeyCreateRequest
 type channelAPIKeyUpdateInput = connector.APIKeyUpdateRequest
 
 func listChannels(c *gin.Context, d *Deps) {
-	if c.Query("page") != "" || c.Query("page_size") != "" {
+	if c.Query("page") != "" || c.Query("page_size") != "" || strings.TrimSpace(c.Query("search")) != "" {
 		page, pageSize, err := parseChannelPageQuery(c)
 		if err != nil {
 			fail(c, http.StatusBadRequest, err)
 			return
 		}
-		list, total, err := d.Channels.ListPage(page, pageSize)
+		list, total, err := channelSearchPage(c.Request.Context(), d, page, pageSize, c.Query("search"))
 		if err != nil {
 			fail(c, http.StatusInternalServerError, err)
 			return
@@ -143,6 +143,7 @@ func listChannels(c *gin.Context, d *Deps) {
 			"page":      page,
 			"page_size": pageSize,
 			"pages":     pages,
+			"search":    strings.TrimSpace(c.Query("search")),
 		}})
 		return
 	}

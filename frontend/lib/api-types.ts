@@ -75,6 +75,7 @@ export interface Channel {
 }
 
 export interface ChannelPage {
+  search?: string
   items: Channel[]
   total: number
   page: number
