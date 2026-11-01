@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 	"github.com/bejix/upstream-ops/backend/captcha"
 	"github.com/bejix/upstream-ops/backend/config"
 	"github.com/bejix/upstream-ops/backend/connector"
@@ -34,6 +35,8 @@ type Service struct {
 	Rates        *storage.Rates
 	MonitorLogs  *storage.MonitorLogs
 	Cipher       *crypto.Cipher
+	// APICalls records real upstream management HTTP attempts.
+	APICalls *storage.GatewayAPICallLogs
 
 	mu          sync.RWMutex
 	proxyConfig config.ProxyConfig
@@ -98,7 +101,40 @@ func applyProxy(conn connector.Connector, resolved *connector.Channel) {
 	}
 }
 
+func (s *Service) applyAPIAudit(conn connector.Connector, resolved *connector.Channel) {
+	if s.APICalls == nil {
+		return
+	}
+	setter, ok := conn.(connector.APIAuditSetter)
+	if !ok {
+		return
+	}
+	meta := storage.GatewayAPICallLog{
+		Purpose:   storage.GatewayAPICallPurposeChannelAPI,
+		ChannelID: resolvedID(resolved),
+	}
+	setter.SetAPIAudit(apiaudit.Options{
+		Store:    s.APICalls,
+		Purpose:  storage.GatewayAPICallPurposeChannelAPI,
+		Metadata: meta,
+	})
+}
+
+func resolvedID(resolved *connector.Channel) uint {
+	if resolved == nil {
+		return 0
+	}
+	return resolved.ID
+}
+
+func (s *Service) configureConnector(conn connector.Connector, resolved *connector.Channel) {
+	s.applyHTTPConfig(conn)
+	s.applyAPIAudit(conn, resolved)
+	applyProxy(conn, resolved)
+}
+
 func (s *Service) ApplyProxy(conn connector.Connector, resolved *connector.Channel) {
+	s.applyAPIAudit(conn, resolved)
 	applyProxy(conn, resolved)
 }
 
@@ -952,8 +988,7 @@ func (s *Service) TestLogin(ctx context.Context, channelID uint) error {
 	if err != nil {
 		return err
 	}
-	s.applyHTTPConfig(conn)
-	applyProxy(conn, resolved)
+	s.configureConnector(conn, resolved)
 	if c.CredentialMode == storage.CredentialModeToken {
 		_, err = s.EnsureSession(ctx, c, resolved, conn)
 		return err
@@ -980,8 +1015,7 @@ func (s *Service) RedeemCode(ctx context.Context, channelID uint, code string) (
 	if err != nil {
 		return nil, err
 	}
-	s.applyHTTPConfig(conn)
-	applyProxy(conn, resolved)
+	s.configureConnector(conn, resolved)
 	session, err := s.EnsureSession(ctx, c, resolved, conn)
 	if err != nil {
 		return nil, err
@@ -1041,8 +1075,7 @@ func (s *Service) GetRechargeInfo(ctx context.Context, channelID uint) (*connect
 	if err != nil {
 		return nil, err
 	}
-	s.applyHTTPConfig(conn)
-	applyProxy(conn, resolved)
+	s.configureConnector(conn, resolved)
 	session, err := s.EnsureSession(ctx, c, resolved, conn)
 	if err != nil {
 		return nil, err
@@ -1068,8 +1101,7 @@ func (s *Service) CreateRecharge(ctx context.Context, channelID uint, req connec
 	if err != nil {
 		return nil, err
 	}
-	s.applyHTTPConfig(conn)
-	applyProxy(conn, resolved)
+	s.configureConnector(conn, resolved)
 	session, err := s.EnsureSession(ctx, c, resolved, conn)
 	if err != nil {
 		return nil, err
@@ -1274,8 +1306,7 @@ func (s *Service) prepareConnectorCall(ctx context.Context, channelID uint) (*st
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	s.applyHTTPConfig(conn)
-	applyProxy(conn, resolved)
+	s.configureConnector(conn, resolved)
 	session, err := s.EnsureSession(ctx, c, resolved, conn)
 	if err != nil {
 		return nil, nil, nil, nil, err

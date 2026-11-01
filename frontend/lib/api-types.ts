@@ -754,6 +754,11 @@ export interface GatewayRouteCandyCheck {
   next_check_at?: string
   cooldown_until?: string
   lease_until?: string
+  /** The result was shared from a matching source route rather than issuing a new call. */
+  reused?: boolean
+  source_route_id?: number | null
+  source_request_id?: string | null
+  observed_at?: string | null
 }
 
 export interface GatewayCandyCheckEvent {
@@ -765,6 +770,10 @@ export interface GatewayCandyCheckEvent {
   manual: boolean
   created_at: string
   cooldown_until?: string
+  reused?: boolean
+  source_route_id?: number | null
+  source_request_id?: string | null
+  observed_at?: string | null
 }
 
 export interface GatewayGroupCloneKeyResult {
@@ -1241,6 +1250,108 @@ export interface GatewayUsageStats {
   /** 近 5 分钟平均每分钟 Token 数（input+output） */
   tpm?: number
   endpoints: { endpoint: string; requests: number }[]
+}
+
+/** 程序出站调用审计状态；与客户网关用量/计费记录分开。 */
+export type GatewayApiCallStatus = "pending" | "success" | "error" | "incomplete"
+
+export type GatewayApiCallPurpose =
+  | "gateway"
+  | "candy_check"
+  | "model_probe"
+  | "admin_model_test"
+  | "optimizer_explain"
+  | "channel_api"
+  | "sync_api"
+  | string
+
+export type GatewayApiCallTimestamp = string | number
+
+export interface GatewayApiCall {
+  id: number | string
+  request_id: string
+  /** Same logical gateway request across physical upstream attempts. */
+  gateway_request_id: string
+  purpose: GatewayApiCallPurpose
+  method: string
+  host: string
+  endpoint: string
+  model?: string | null
+  gateway_group_id?: number | null
+  route_id?: number | null
+  channel_id?: number | null
+  gateway_provider_id?: number | null
+  source_group_id?: number | null
+  source_api_key_id?: number | null
+  source_api_key_name?: string | null
+  upstream_request_id?: string | null
+  status_code?: number | null
+  status: GatewayApiCallStatus
+  error_type?: string | null
+  error_message?: string | null
+  stream: boolean
+  usage_known: boolean
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  /** null means that no estimate is available; it must not be rendered as zero. */
+  estimated_cost?: number | null
+  started_at: GatewayApiCallTimestamp
+  finished_at?: GatewayApiCallTimestamp | null
+  duration_ms: number
+  first_token_ms?: number | null
+  created_at: GatewayApiCallTimestamp
+}
+
+export interface GatewayApiCallFilters {
+  purpose?: string
+  channel_id?: number | string
+  provider_id?: number | string
+  source_group_id?: number | string
+  source_api_key_name?: string
+  model?: string
+  status?: GatewayApiCallStatus | string
+  since?: number
+  until?: number
+  page?: number
+  page_size?: number
+}
+
+export interface GatewayApiCallPage {
+  items: GatewayApiCall[]
+  total: number
+  page: number
+  page_size: number
+}
+
+/** Independent audit aggregates; nullable costs stay nullable when no row has a cost. */
+export interface GatewayApiCallStats {
+  total_calls?: number
+  total?: number
+  total_real_calls?: number
+  success_calls?: number
+  success_count?: number
+  error_calls?: number
+  error_count?: number
+  failed?: number
+  pending_calls?: number
+  pending?: number
+  in_progress?: number
+  incomplete_calls?: number
+  total_input_tokens?: number
+  total_output_tokens?: number
+  total_cache_read_tokens?: number
+  total_cache_creation_tokens?: number
+  total_tokens?: number
+  total_estimated_cost?: number | null
+  known_estimated_cost?: number | null
+  unknown_cost_calls?: number
+  unknown_cost_count?: number
+  usage_known_calls?: number
+  unknown_usage?: number
+  unknown_usage_count?: number
+  [key: string]: number | null | undefined
 }
 
 /** 使用记录模型下拉：后端按 requested_model 聚合 */

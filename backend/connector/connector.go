@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 )
 
 // ChannelType 渠道类型枚举，与 storage.ChannelType 同步。
@@ -382,6 +384,13 @@ type HTTPConfig struct {
 
 type HTTPConfigSetter interface {
 	SetHTTPConfig(cfg HTTPConfig)
+}
+
+// APIAuditSetter configures audit metadata for every real HTTP attempt made by
+// a connector. Implementations must preserve the wrapper when proxy settings
+// are changed afterwards.
+type APIAuditSetter interface {
+	SetAPIAudit(opts apiaudit.Options)
 }
 
 // Factory 构造一个全新的 Connector 实例。

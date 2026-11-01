@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 	"github.com/bejix/upstream-ops/backend/config"
 	"github.com/bejix/upstream-ops/backend/storage"
 )
@@ -57,7 +58,18 @@ func (rt *Runtime) httpClientForTarget(ch *storage.Channel, provider *storage.Ga
 	timeout := rt.gatewayRuntime().ForwardTimeout()
 	proxy := rt.proxyURLForTarget(ch, provider)
 	transport := rt.httpTransportForProxy(proxy)
-	return &http.Client{Timeout: timeout, Transport: transport}
+	var outbound http.RoundTripper = transport
+	if rt.Usage != nil {
+		meta := storage.GatewayAPICallLog{}
+		if ch != nil {
+			meta.ChannelID = ch.ID
+		}
+		if provider != nil {
+			meta.GatewayProviderID = provider.ID
+		}
+		outbound = apiaudit.WrapTransport(outbound, apiaudit.Options{Store: rt.Usage.APICalls(), Purpose: storage.GatewayAPICallPurposeGateway, Metadata: meta, Log: rt.Log, OnFinish: rt.finishAPICallCost, ParseUsage: auditModelUsage})
+	}
+	return &http.Client{Timeout: timeout, Transport: outbound}
 }
 
 func (rt *Runtime) httpTransportForProxy(proxy string) *http.Transport {

@@ -9,7 +9,7 @@ import type {
 } from "@/lib/api-types"
 import { findSourceGroupRatio } from "@/lib/source-groups"
 
-export type MainTab = "gateway" | "providers" | "usage" | "prices"
+export type MainTab = "gateway" | "providers" | "usage" | "api-calls" | "prices"
 export type ConfigTab = "keys" | "routes" | "models" | "response-rules"
 
 export type ModelSourceLabel = {

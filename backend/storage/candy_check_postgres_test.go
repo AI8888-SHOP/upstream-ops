@@ -111,4 +111,39 @@ func TestCandyCheckPostgresExclusiveLease(t *testing.T) {
 	if ok, err := routes.FinishCandyCheck(*claim, GatewayRouteCandyCheck{Status: "error"}, time.Now()); err != nil || ok {
 		t.Fatalf("stale result restored cooldown: %v %v", ok, err)
 	}
+	t.Run("shared source across repositories", func(t *testing.T) {
+		start := make(chan struct{})
+		leases := make(chan *GatewayCandyCheckSharedLease, 8)
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				a, err := NewGatewayRoutes(db).AcquireSharedCandyCheck("postgres-shared-source", time.Now(), time.Minute, 5*time.Minute, true)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if a.Lease != nil {
+					leases <- a.Lease
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(leases)
+		if len(leases) != 1 {
+			t.Fatalf("shared concurrent leases=%d want 1", len(leases))
+		}
+		lease := <-leases
+		observed := time.Now()
+		if ok, err := routes.FinishSharedCandyCheck(*lease, GatewayRouteCandyCheck{Status: "correct", SourceRequestID: "pg-real-request", ObservedAt: &observed}, observed); err != nil || !ok {
+			t.Fatalf("shared finish: %v %v", ok, err)
+		}
+		fresh, err := NewGatewayRoutes(db).AcquireSharedCandyCheck("postgres-shared-source", time.Now(), time.Minute, 5*time.Minute, false)
+		if err != nil || fresh.Cached == nil || fresh.Cached.SourceRequestID != "pg-real-request" {
+			t.Fatalf("shared persisted observation: %+v %v", fresh, err)
+		}
+	})
 }

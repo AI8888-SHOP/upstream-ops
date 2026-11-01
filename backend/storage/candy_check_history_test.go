@@ -86,8 +86,19 @@ func TestCandyProbeErrorsPreserveQualityVerdictAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int64
-	if err := db.Model(&GatewayCandyCheckEvent{}).Where("route_id = ?", route.ID).Count(&count).Error; err != nil || count != 100 {
-		t.Fatalf("unbounded history: %d %v", count, err)
+	if err := db.Model(&GatewayCandyCheckEvent{}).Where("route_id = ?", route.ID).Count(&count).Error; err != nil || count != 113 {
+		t.Fatalf("recent history was pruned by count: %d %v", count, err)
+	}
+	if events, err := routes.CandyCheckHistory(route.ID); err != nil || len(events) != 100 {
+		t.Fatalf("history list limit: %d %v", len(events), err)
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return appendCandyCheckEvent(tx, GatewayCandyCheckEvent{RouteID: route.ID, Status: "correct", CreatedAt: at.Add(91 * 24 * time.Hour)})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&GatewayCandyCheckEvent{}).Where("route_id = ?", route.ID).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("90 day history retention: %d %v", count, err)
 	}
 	if err := routes.SaveForGroup(group.ID, nil); err != nil {
 		t.Fatal(err)

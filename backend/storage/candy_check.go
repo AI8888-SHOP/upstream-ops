@@ -36,11 +36,21 @@ type GatewayRouteCandyCheck struct {
 	StatusCode    int        `gorm:"not null;default:0" json:"status_code"`
 	LatencyMS     int64      `gorm:"not null;default:0" json:"latency_ms"`
 	CheckedAt     *time.Time `json:"checked_at,omitempty"`
-	NextCheckAt   *time.Time `gorm:"index" json:"next_check_at,omitempty"`
-	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
-	LeaseUntil    *time.Time `json:"lease_until,omitempty"`
-	LeaseToken    string     `gorm:"size:64;not null;default:''" json:"-"`
-	Active        bool       `gorm:"-" json:"active"`
+	// ObservedAt is the source observation time. Reused route states retain it
+	// so a fresh route interval cannot extend the shared result's age.
+	ObservedAt      *time.Time `json:"observed_at,omitempty"`
+	NextCheckAt     *time.Time `gorm:"index" json:"next_check_at,omitempty"`
+	CooldownUntil   *time.Time `json:"cooldown_until,omitempty"`
+	LeaseUntil      *time.Time `json:"lease_until,omitempty"`
+	LeaseToken      string     `gorm:"size:64;not null;default:''" json:"-"`
+	Reused          bool       `gorm:"not null;default:false" json:"reused"`
+	SourceRouteID   uint       `gorm:"not null;default:0" json:"source_route_id,omitempty"`
+	SourceRequestID string     `gorm:"size:96;not null;default:''" json:"source_request_id,omitempty"`
+	// The following fields are request-local handoff metadata. They are never
+	// persisted and let gateway fence the route before publishing the shared row.
+	SharedCacheKey   string `gorm:"-" json:"-"`
+	SharedLeaseToken string `gorm:"-" json:"-"`
+	Active           bool   `gorm:"-" json:"active"`
 }
 
 func (GatewayRouteCandyCheck) TableName() string { return "gateway_route_candy_checks" }
@@ -65,7 +75,7 @@ func GatewayCandyCheckConfigKey(group *GatewayGroup, route *GatewayRoute, provid
 		route.ModelMappingJSON, route.ModelPolicy, route.AllowedModelsJSON, route.UpstreamProtocol,
 		route.UserAgentMode, route.UserAgentCustom}
 	if provider != nil {
-		values = append(values, provider.Enabled, provider.BaseURL, provider.APIKeyCipher, provider.UpstreamProtocol, provider.ModelPolicy, provider.AllowedModelsJSON)
+		values = append(values, provider.Enabled, provider.BaseURL, provider.APIKeyCipher, provider.UpstreamProtocol, provider.ModelPolicy, provider.AllowedModelsJSON, provider.AuthStyle, provider.ExtraHeadersJSON, provider.ProxyEnabled)
 	}
 	body, _ := json.Marshal(values)
 	sum := sha256.Sum256(body)
@@ -246,14 +256,24 @@ func (r *GatewayRoutes) claimCandyCheck(routeID uint, configKey, model string, n
 }
 
 func (r *GatewayRoutes) FinishCandyCheck(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time) (bool, error) {
-	return r.finishCandyCheck(claim, result, now, false)
+	return r.finishCandyCheck(claim, result, now, false, nil)
 }
 
 func (r *GatewayRoutes) FinishManualCandyCheck(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time) (bool, error) {
-	return r.finishCandyCheck(claim, result, now, true)
+	return r.finishCandyCheck(claim, result, now, true, nil)
 }
 
-func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time, manual bool) (bool, error) {
+func (r *GatewayRoutes) FinishCandyCheckWithShared(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time, lease GatewayCandyCheckSharedLease) (bool, error) {
+	return r.finishCandyCheck(claim, result, now, false, &lease)
+}
+
+func (r *GatewayRoutes) FinishManualCandyCheckWithShared(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time, lease GatewayCandyCheckSharedLease) (bool, error) {
+	return r.finishCandyCheck(claim, result, now, true, &lease)
+}
+
+var errCandyCheckSharedLeaseStale = errors.New("shared candy check lease is stale")
+
+func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result GatewayRouteCandyCheck, now time.Time, manual bool, sharedLease *GatewayCandyCheckSharedLease) (bool, error) {
 	updated := false
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		group, route, provider, err := lockCandyContext(tx, claim.RouteID)
@@ -263,10 +283,24 @@ func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 		if (!manual && !group.CandyCheckEnabled) || group.Status != GatewayGroupStatusActive || claim.ConfigKey != GatewayCandyCheckConfigKey(group, route, provider) {
 			return nil
 		}
-		next := now.Add(time.Duration(group.CandyCheckIntervalMinutes) * time.Minute)
+		interval := group.CandyCheckIntervalMinutes
+		if interval < 1 {
+			interval = 5
+		}
+		cooldown := group.CandyCheckCooldownMinutes
+		if cooldown < 1 {
+			cooldown = 10
+		}
+		// Reused observations retain the source observation clock. This prevents
+		// a short-interval group from extending a shared result indefinitely.
+		observedAt := now
+		if result.ObservedAt != nil && !result.ObservedAt.IsZero() {
+			observedAt = *result.ObservedAt
+		}
+		next := observedAt.Add(time.Duration(interval) * time.Minute)
 		var until *time.Time
 		if group.CandyCheckEnabled && result.Status == "incorrect" {
-			end := now.Add(time.Duration(group.CandyCheckCooldownMinutes) * time.Minute)
+			end := observedAt.Add(time.Duration(cooldown) * time.Minute)
 			until = &end
 			if end.After(next) {
 				next = end
@@ -311,6 +345,10 @@ func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 		}
 		if result.Status != "deferred" {
 			updates["checked_at"] = now
+			updates["observed_at"] = observedAt
+			updates["reused"] = result.Reused
+			updates["source_route_id"] = result.SourceRouteID
+			updates["source_request_id"] = result.SourceRequestID
 			// Skipping an unsupported/unavailable route is not proof of recovery.
 			if result.Status != "skipped" {
 				updates["cooldown_until"] = until
@@ -318,15 +356,29 @@ func (r *GatewayRoutes) finishCandyCheck(claim GatewayRouteCandyCheck, result Ga
 			updates["status"], updates["answer_preview"], updates["reason"] = result.Status, result.AnswerPreview, result.Reason
 			updates["status_code"], updates["latency_ms"] = result.StatusCode, result.LatencyMS
 		}
-		q := tx.Model(&GatewayRouteCandyCheck{}).Where("route_id = ? AND config_key = ? AND lease_token = ?", claim.RouteID, claim.ConfigKey, claim.LeaseToken).Updates(updates)
+		q := tx.Model(&GatewayRouteCandyCheck{}).Where("route_id = ? AND config_key = ? AND lease_token = ? AND lease_until > ?", claim.RouteID, claim.ConfigKey, claim.LeaseToken, now).Updates(updates)
 		updated = q.RowsAffected > 0
 		if q.Error != nil || !updated {
 			return q.Error
 		}
+		if sharedLease != nil && result.Status != "deferred" && !result.Reused {
+			published, publishErr := finishSharedCandyCheckTx(tx, *sharedLease, result, now)
+			if publishErr != nil {
+				return publishErr
+			}
+			if !published {
+				return errCandyCheckSharedLeaseStale
+			}
+		}
 		return appendCandyCheckEvent(tx, GatewayCandyCheckEvent{RouteID: claim.RouteID, Model: claim.Model,
 			Status: result.Status, Reason: result.Reason, StatusCode: result.StatusCode, LatencyMS: result.LatencyMS,
-			Manual: manual, CooldownUntil: until, BackoffUntil: backoffUntil, CreatedAt: now})
+			Manual: manual, Reused: result.Reused, SourceRouteID: result.SourceRouteID,
+			SourceRequestID: result.SourceRequestID, ObservedAt: result.ObservedAt,
+			CooldownUntil: until, BackoffUntil: backoffUntil, CreatedAt: now})
 	})
+	if errors.Is(err, errCandyCheckSharedLeaseStale) {
+		return false, nil
+	}
 	if err == nil && updated {
 		r.readCaches.invalidateGatewayRoute(claim.RouteID)
 	}

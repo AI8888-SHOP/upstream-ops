@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 	"github.com/bejix/upstream-ops/backend/connector"
 )
 
@@ -19,6 +20,13 @@ type AdminClient struct {
 
 func NewAdminClient() *AdminClient {
 	return &AdminClient{client: New()}
+}
+
+// SetAPIAudit forwards audit configuration to the underlying connector.
+func (a *AdminClient) SetAPIAudit(opts apiaudit.Options) {
+	if a != nil && a.client != nil {
+		a.client.SetAPIAudit(opts)
+	}
 }
 
 type AdminTarget struct {

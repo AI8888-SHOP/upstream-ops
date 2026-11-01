@@ -220,6 +220,7 @@ func (s *Service) fetchProviderModels(
 		return nil, errors.New("provider base_url is empty")
 	}
 	url := baseURL + "/v1/models"
+	ctx = apiCallPurpose(ctx, storage.GatewayAPICallPurposeChannelAPI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build GET %s: %w", url, err)

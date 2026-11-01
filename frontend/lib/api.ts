@@ -7,6 +7,12 @@
  *   - 401 时触发 onUnauthorized，让上层清空 state、回到登录页
  */
 
+import type {
+  GatewayApiCallFilters,
+  GatewayApiCallPage,
+  GatewayApiCallStats,
+} from "./api-types"
+
 const TOKEN_KEY = "uh_token"
 
 let unauthorizedHandler: (() => void) | null = null
@@ -102,3 +108,26 @@ export async function apiFetch<T = unknown>(
 }
 
 export const TOKEN_STORAGE_KEY = TOKEN_KEY
+
+/** Build the server-side filters without sending empty values. */
+export function gatewayApiCallQuery(filters: GatewayApiCallFilters = {}): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters)) {
+    if (value == null || value === "") continue
+    params.set(key, String(value))
+  }
+  const query = params.toString()
+  return query ? `?${query}` : ""
+}
+
+export function fetchGatewayApiCalls(filters: GatewayApiCallFilters = {}) {
+  return apiFetch<GatewayApiCallPage>(
+    `/gateway/api-calls${gatewayApiCallQuery(filters)}`,
+  )
+}
+
+export function fetchGatewayApiCallStats(filters: GatewayApiCallFilters = {}) {
+  return apiFetch<GatewayApiCallStats>(
+    `/gateway/api-calls/stats${gatewayApiCallQuery(filters)}`,
+  )
+}

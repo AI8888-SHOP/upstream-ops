@@ -348,6 +348,47 @@ func newTestService(t *testing.T, db *gorm.DB, fake *fakeChannelService) *Servic
 	)
 }
 
+func TestCheckTargetAuditsAdminHTTPCalls(t *testing.T) {
+	db := openSyncerTestDB(t)
+	svc := newTestService(t, db, &fakeChannelService{})
+	svc.APICalls = storage.NewGatewayAPICallLogs(db)
+	srv, _ := newAdminServer(t)
+	defer srv.Close()
+	target, err := svc.CreateTarget(context.Background(), TargetInput{
+		Name:        "audit-target",
+		BaseURL:     srv.URL,
+		AdminAPIKey: "admin-key",
+		Enabled:     true,
+	})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if err := svc.CheckTarget(context.Background(), target.ID); err != nil {
+		t.Fatalf("check target: %v", err)
+	}
+	page, err := svc.APICalls.List(storage.GatewayAPICallLogQuery{Purpose: storage.GatewayAPICallPurposeSyncAPI})
+	if err != nil {
+		t.Fatalf("list API calls: %v", err)
+	}
+	if page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("audit page = %+v", page)
+	}
+	for _, item := range page.Items {
+		if item.Purpose != storage.GatewayAPICallPurposeSyncAPI {
+			t.Errorf("purpose = %q", item.Purpose)
+		}
+		if item.Host != strings.TrimPrefix(srv.URL, "http://") {
+			t.Errorf("host = %q", item.Host)
+		}
+		if strings.Contains(item.Endpoint, "?") || strings.Contains(item.Endpoint, "include_inactive") {
+			t.Errorf("query leaked in endpoint = %q", item.Endpoint)
+		}
+		if item.Status != storage.GatewayAPICallStatusSuccess {
+			t.Errorf("status = %q, want success", item.Status)
+		}
+	}
+}
+
 func TestSyncAllOnRateScanSkipsDisabledTarget(t *testing.T) {
 	db := openSyncerTestDB(t)
 	svc := newTestService(t, db, &fakeChannelService{})
@@ -484,6 +525,7 @@ func TestListSourceModelsUsesSourceChannelKey(t *testing.T) {
 		}},
 	}
 	svc := newTestService(t, db, fake)
+	svc.APICalls = storage.NewGatewayAPICallLogs(db)
 
 	models, err := svc.ListSourceModels(context.Background(), SourceModelsInput{
 		ChannelID:     ch.ID,
@@ -495,6 +537,20 @@ func TestListSourceModelsUsesSourceChannelKey(t *testing.T) {
 	}
 	if strings.Join(models, ",") != "gpt-a,gpt-b" {
 		t.Fatalf("models = %#v", models)
+	}
+	page, err := svc.APICalls.List(storage.GatewayAPICallLogQuery{Purpose: storage.GatewayAPICallPurposeSyncAPI})
+	if err != nil {
+		t.Fatalf("list model API audit: %v", err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("model audit page = %+v", page)
+	}
+	item := page.Items[0]
+	if item.ChannelID != ch.ID || item.SourceAPIKeyID != 7 || item.Endpoint != "/v1/models" {
+		t.Fatalf("model audit attribution = %+v", item)
+	}
+	if item.SourceGroupID == nil || *item.SourceGroupID != sourceGroupID {
+		t.Fatalf("model audit source group = %v", item.SourceGroupID)
 	}
 }
 

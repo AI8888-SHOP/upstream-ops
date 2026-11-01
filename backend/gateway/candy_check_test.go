@@ -109,7 +109,10 @@ func TestCandyCheckWorkerScopeMappingAndRecovery(t *testing.T) {
 	if err := db.Model(&storage.GatewayRouteCandyCheck{}).Where("route_id = ?", route.ID).Update("next_check_at", time.Now().Add(-time.Minute)).Error; err != nil {
 		t.Fatal(err)
 	}
-	svc.RunCandyChecks(context.Background())
+	// Manual refresh bypasses the shared cache's fresh completed observation.
+	if _, err := svc.RunCandyCheckNow(context.Background(), route.ID); err != nil {
+		t.Fatal(err)
+	}
 	list, _ = routes.ListByGroupID(group.ID)
 	if calls.Load() != 2 || list[0].CandyCheck.Status != "correct" || !IsRouteSchedulable(&list[0], time.Now()) {
 		t.Fatalf("recovery: calls=%d state=%+v", calls.Load(), list[0].CandyCheck)
@@ -166,7 +169,7 @@ func TestManualAndScheduledCandyChecksShareConcurrencyLimit(t *testing.T) {
 	svc.SetProviders(providers)
 	var routeIDs []uint
 	for i := 0; i < 3; i++ {
-		group := &storage.GatewayGroup{Name: fmt.Sprintf("manual-limit-%d", i), GatewayCandyCheckPolicy: storage.GatewayCandyCheckPolicy{CandyCheckEnabled: i == 1, CandyCheckModel: "test-model"}}
+		group := &storage.GatewayGroup{Name: fmt.Sprintf("manual-limit-%d", i), GatewayCandyCheckPolicy: storage.GatewayCandyCheckPolicy{CandyCheckEnabled: i == 1, CandyCheckModel: fmt.Sprintf("test-model-%d", i)}}
 		if err := groups.Create(group); err != nil {
 			t.Fatal(err)
 		}
@@ -227,7 +230,7 @@ func TestCandyCheckProbeProtocolsAndTerminalWithoutEOF(t *testing.T) {
 		{"chat JSON fallback", "openai", "/v1/chat/completions", `{"choices":[{"message":{"content":"21"},"finish_reason":"stop"}]}`, false, false, false},
 		{"anthropic JSON fallback", "anthropic", "/v1/messages", `{"content":[{"type":"text","text":"21"}],"stop_reason":"end_turn"}`, false, false, false},
 		{"responses JSON fallback", "responses", "/v1/responses", `{"object":"response","status":"completed","output_text":"21"}`, false, false, false},
-		{"chat streaming only", "openai", "/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"21\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n", true, true, false},
+		{"chat streaming only", "openai", "/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"21\"},\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n", true, true, false},
 		{"anthropic streaming only", "anthropic", "/v1/messages", "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"21\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", true, true, false},
 		{"responses streaming only", "responses", "/v1/responses", "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"21\"}}\n\n", true, true, false},
 		{"chat truncated", "openai", "/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"21\"},\"finish_reason\":\"length\"}]}\n\n", true, true, true},

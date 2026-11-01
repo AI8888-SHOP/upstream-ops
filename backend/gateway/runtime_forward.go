@@ -803,6 +803,7 @@ func (rt *Runtime) forwardOnce(
 	reqCtx, abortReq := context.WithCancel(ctx)
 	defer abortReq()
 
+	reqCtx = gatewayAPICallContext(reqCtx, c)
 	req, err := rt.buildUpstreamHTTPRequest(reqCtx, target, path, method, inHeader, body, kind, stream)
 	if err != nil {
 		return 0, nil, nil, nil, err
@@ -920,9 +921,10 @@ func (rt *Runtime) resolveUpstreamTarget(route *storage.GatewayRoute) (*upstream
 			return nil, errors.New("provider api key missing or decrypt failed")
 		}
 		return &upstreamTarget{
-			BaseURL:  strings.TrimRight(p.BaseURL, "/"),
-			APIKey:   secret,
-			Provider: p,
+			BaseURL:       strings.TrimRight(p.BaseURL, "/"),
+			AuditMetadata: routeAPIAuditMetadata(route),
+			APIKey:        secret,
+			Provider:      p,
 		}, nil
 	}
 	ch, err := rt.Channels.FindByID(route.SourceChannelID)
@@ -934,8 +936,9 @@ func (rt *Runtime) resolveUpstreamTarget(route *storage.GatewayRoute) (*upstream
 		return nil, errors.New("missing upstream api key; run ensure-keys")
 	}
 	return &upstreamTarget{
-		BaseURL: strings.TrimRight(ch.SiteURL, "/"),
-		APIKey:  secret,
-		Channel: ch,
+		BaseURL:       strings.TrimRight(ch.SiteURL, "/"),
+		AuditMetadata: routeAPIAuditMetadata(route),
+		APIKey:        secret,
+		Channel:       ch,
 	}, nil
 }

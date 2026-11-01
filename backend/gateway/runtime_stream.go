@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/bejix/upstream-ops/backend/storage"
 	"github.com/gin-gonic/gin"
@@ -46,6 +47,12 @@ func (rt *Runtime) buildUpstreamHTTPRequest(
 		body = EnsureStreamUsageOption(body, true)
 	}
 
+	meta := target.AuditMetadata
+	meta.Model = ExtractModelFromBody(body)
+	if meta.Model == "" {
+		meta.Model = extractMultipartModel(inHeader.Get("Content-Type"), body)
+	}
+	ctx = apiaudit.WithMetadata(ctx, meta)
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -228,6 +235,7 @@ func (rt *Runtime) forwardStreamWithVirtualCache(
 	})
 	defer stopBudgetCancel()
 
+	reqCtx = gatewayAPICallContext(reqCtx, c)
 	req, err := rt.buildUpstreamHTTPRequest(reqCtx, target, path, method, inHeader, body, upstreamKind, true)
 	if err != nil {
 		return streamAttemptResult{Err: err}

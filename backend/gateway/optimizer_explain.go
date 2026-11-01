@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/bejix/upstream-ops/backend/apiaudit"
+	"github.com/bejix/upstream-ops/backend/storage"
 	"io"
 	"net/http"
 	"os"
@@ -111,6 +113,9 @@ func (s *Service) optimizerModelNarrative(ctx context.Context, plan *OptimizerPl
 		return "", false
 	}
 	client := &http.Client{Timeout: optimizerExplainTimeout}
+	if s.Usage != nil {
+		client.Transport = apiaudit.WrapTransport(nil, apiaudit.Options{Store: s.Usage.APICalls(), Purpose: storage.GatewayAPICallPurposeOptimizerExplain, Log: s.Log})
+	}
 	url := strings.TrimRight(baseURL, "/") + "/chat/completions"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

@@ -8,10 +8,11 @@ import (
 )
 
 type upstreamTarget struct {
-	BaseURL  string
-	APIKey   string
-	Channel  *storage.Channel
-	Provider *storage.GatewayProvider
+	BaseURL       string
+	APIKey        string
+	AuditMetadata storage.GatewayAPICallLog
+	Channel       *storage.Channel
+	Provider      *storage.GatewayProvider
 	// UserAgentOverride 非空时覆盖发往上游的 User-Agent（组+路由策略解析结果）。
 	UserAgentOverride string
 	// onUpstreamStart is used by coordinated hedge accounting. It runs only

@@ -80,8 +80,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run gateway, storage and updater race tests
-        run: go test -race ./backend/gateway/... ./backend/storage/... ./backend/updater/...
+      - name: Run API audit, gateway, storage and management race tests
+        run: go test -race ./backend/apiaudit/... ./backend/gateway/... ./backend/storage/... ./backend/channel/... ./backend/syncer/... ./backend/updater/...
 
   go-build:
     name: Go build (${{ matrix.os }})

@@ -244,12 +244,14 @@ func AutoMigrate(db *gorm.DB) error {
 		&GatewayRoute{},
 		&GatewayRouteCandyCheck{},
 		&GatewayCandyCheckEvent{},
+		&GatewayCandyCheckSharedResult{},
 		&GatewayRouteModelCooldown{},
 		&GatewaySharedModelCooldown{},
 		&GatewayChannelCacheHealth{},
 		&GatewayProvider{},
 		&GatewayResponseRule{},
 		&GatewayUsageLog{},
+		&GatewayAPICallLog{},
 		&GatewayOptimizerRun{},
 		&GatewayRequestFinalization{},
 		&GatewayWinnerSettlement{},
@@ -259,6 +261,9 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 	if err := ensurePerformanceIndexes(db); err != nil {
+		return err
+	}
+	if err := ensureGatewayAPICallIndexes(db); err != nil {
 		return err
 	}
 	return migrateLegacyModelCooldownsToShared(db)

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 	"github.com/bejix/upstream-ops/backend/connector"
 	"github.com/bejix/upstream-ops/backend/connector/sub2api"
 	"github.com/bejix/upstream-ops/backend/crypto"
@@ -46,6 +47,8 @@ type Service struct {
 	syncAccounts    *storage.UpstreamSyncAccounts
 	managedAccounts *storage.UpstreamSyncManagedAccounts
 	logs            *storage.UpstreamSyncLogs
+	// APICalls records real upstream sync management HTTP attempts.
+	APICalls *storage.GatewayAPICallLogs
 }
 
 func New(
@@ -78,6 +81,21 @@ func New(
 
 func (s *Service) SetDispatcher(dispatcher *notify.Dispatcher) {
 	s.dispatcher = dispatcher
+}
+
+func (s *Service) newAdminClient() *sub2api.AdminClient {
+	client := sub2api.NewAdminClient()
+	if s.APICalls != nil {
+		client.SetAPIAudit(apiaudit.Options{
+			Store:   s.APICalls,
+			Purpose: storage.GatewayAPICallPurposeSyncAPI,
+			Log:     s.log,
+			Metadata: storage.GatewayAPICallLog{
+				Purpose: storage.GatewayAPICallPurposeSyncAPI,
+			},
+		})
+	}
+	return client
 }
 
 type TargetDTO struct {
@@ -273,7 +291,7 @@ func (s *Service) CheckTarget(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
-	client := sub2api.NewAdminClient()
+	client := s.newAdminClient()
 	plain, err := s.cipher.Decrypt(item.AdminAPIKeyCipher)
 	if err != nil {
 		_ = s.targets.UpdateCheck(id, "failed", ptrTime(time.Now()), err.Error())
@@ -300,7 +318,7 @@ func (s *Service) SyncTargetGroups(ctx context.Context, targetID uint) ([]Target
 	if err != nil {
 		return nil, err
 	}
-	client := sub2api.NewAdminClient()
+	client := s.newAdminClient()
 	groups, err := client.ListGroups(ctx, sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}, true)
 	if err != nil {
 		_ = s.targets.UpdateCheck(targetID, "failed", ptrTime(time.Now()), err.Error())
@@ -357,7 +375,7 @@ func (s *Service) ListTargetProxies(ctx context.Context, targetID uint) ([]Targe
 	if err != nil {
 		return nil, err
 	}
-	client := sub2api.NewAdminClient()
+	client := s.newAdminClient()
 	proxies, err := client.ListProxies(ctx, sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain})
 	if err != nil {
 		_ = s.targets.UpdateCheck(targetID, "failed", ptrTime(time.Now()), err.Error())
@@ -406,7 +424,17 @@ func (s *Service) ListSourceModels(ctx context.Context, in SourceModelsInput) ([
 	if err != nil {
 		return nil, err
 	}
-	return fetchGatewayModels(ctx, ch.SiteURL, in.Platform, secret)
+	return fetchGatewayModels(ctx, ch.SiteURL, in.Platform, secret, apiaudit.Options{
+		Store:   s.APICalls,
+		Purpose: storage.GatewayAPICallPurposeSyncAPI,
+		Log:     s.log,
+		Metadata: storage.GatewayAPICallLog{
+			Purpose:        storage.GatewayAPICallPurposeSyncAPI,
+			ChannelID:      ch.ID,
+			SourceGroupID:  in.SourceGroupID,
+			SourceAPIKeyID: key.ID,
+		},
+	})
 }
 
 func (s *Service) ListSyncGroups() ([]SyncGroupDTO, error) {
@@ -655,7 +683,7 @@ func (s *Service) ApplySyncGroup(ctx context.Context, syncGroupID uint) (*LogDTO
 	if err != nil {
 		return nil, err
 	}
-	client := sub2api.NewAdminClient()
+	client := s.newAdminClient()
 	adminTarget := sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}
 	if err := client.Ping(ctx, adminTarget); err != nil {
 		_ = s.targets.UpdateCheck(target.ID, "failed", ptrTime(time.Now()), err.Error())
@@ -1717,7 +1745,7 @@ func (s *Service) DeleteManaged(ctx context.Context, syncGroupID uint) (*LogDTO,
 		target, err := s.targets.FindByID(syncGroup.TargetID)
 		if err == nil {
 			if plain, decErr := s.cipher.Decrypt(target.AdminAPIKeyCipher); decErr == nil {
-				client := sub2api.NewAdminClient()
+				client := s.newAdminClient()
 				adminTarget := sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}
 				for _, account := range managedAccounts {
 					if isManagedAccountName(syncGroup, account.TargetAccountName) {
@@ -2135,7 +2163,7 @@ func apiKeyUsableForModels(key connector.APIKey) bool {
 	}
 }
 
-func fetchGatewayModels(ctx context.Context, baseURL, platform, apiKey string) ([]string, error) {
+func fetchGatewayModels(ctx context.Context, baseURL, platform, apiKey string, audit apiaudit.Options) ([]string, error) {
 	endpoint := buildGatewayModelsURL(baseURL, platform)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -2144,7 +2172,11 @@ func fetchGatewayModels(ctx context.Context, baseURL, platform, apiKey string) (
 	apiKey = strings.TrimSpace(apiKey)
 	req.Header.Set("Accept", "application/json")
 	setGatewayModelAuthHeaders(req, platform, apiKey)
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	client := &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: apiaudit.WrapTransport(http.DefaultTransport, audit),
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -4,14 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/bejix/upstream-ops/backend/storage"
 )
@@ -139,9 +143,8 @@ func (s *Service) runCandyCheck(ctx context.Context, route storage.GatewayRoute,
 	}
 	key := storage.GatewayCandyCheckConfigKey(group, &route, provider)
 	claimCheck := s.Routes.ClaimCandyCheck
-	finishCheck := s.Routes.FinishCandyCheck
 	if manual {
-		claimCheck, finishCheck = s.Routes.ClaimManualCandyCheck, s.Routes.FinishManualCandyCheck
+		claimCheck = s.Routes.ClaimManualCandyCheck
 	}
 	claim, err := claimCheck(route.ID, key, model, time.Now(), candyCheckTimeout+30*time.Second)
 	if err != nil {
@@ -150,16 +153,39 @@ func (s *Service) runCandyCheck(ctx context.Context, route storage.GatewayRoute,
 	if claim == nil {
 		return nil, ErrCandyCheckBusy
 	}
-	result := s.probeCandyRoute(ctx, group, route, model)
+	result := s.probeCandyRouteWithSharing(ctx, group, route, model, manual)
+	if result.SharedLeaseToken != "" {
+		defer func() {
+			_, _ = s.Routes.ReleaseSharedCandyCheck(storage.GatewayCandyCheckSharedLease{CacheKey: result.SharedCacheKey, LeaseToken: result.SharedLeaseToken})
+		}()
+	}
 	if ctx.Err() != nil {
 		result.Status = "deferred"
 	}
-	updated, err := finishCheck(*claim, result, time.Now())
+	now := time.Now()
+	var updated bool
+	if result.SharedLeaseToken != "" && !result.Reused && result.Status != "deferred" {
+		lease := storage.GatewayCandyCheckSharedLease{CacheKey: result.SharedCacheKey, LeaseToken: result.SharedLeaseToken, RouteID: claim.RouteID, ConfigKey: claim.ConfigKey}
+		if manual {
+			updated, err = s.Routes.FinishManualCandyCheckWithShared(*claim, result, now, lease)
+		} else {
+			updated, err = s.Routes.FinishCandyCheckWithShared(*claim, result, now, lease)
+		}
+	} else if manual {
+		updated, err = s.Routes.FinishManualCandyCheck(*claim, result, now)
+	} else {
+		updated, err = s.Routes.FinishCandyCheck(*claim, result, now)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if !updated {
+		// A route config/manual clear fence won. The atomic storage transaction
+		// also rolled back the shared result, so no source row is published.
 		return nil, ErrCandyCheckChanged
+	}
+	if result.SharedLeaseToken != "" && result.Status == "deferred" && s.Routes != nil {
+		_, _ = s.Routes.ReleaseSharedCandyCheck(storage.GatewayCandyCheckSharedLease{CacheKey: result.SharedCacheKey, LeaseToken: result.SharedLeaseToken})
 	}
 	if !manual {
 		return nil, nil
@@ -180,10 +206,20 @@ func (s *Service) runCandyCheck(ctx context.Context, route storage.GatewayRoute,
 	return loaded.CandyCheck, nil
 }
 
-func (s *Service) probeCandyRoute(parent context.Context, group *storage.GatewayGroup, route storage.GatewayRoute, model string) (result storage.GatewayRouteCandyCheck) {
-	result.Status, result.Model = "error", model
+// probeCandyRoute is kept as the direct, uncached probe used by focused
+// protocol tests. Scheduled/manual route execution uses the shared wrapper.
+func (s *Service) probeCandyRoute(parent context.Context, group *storage.GatewayGroup, route storage.GatewayRoute, model string) storage.GatewayRouteCandyCheck {
+	return s.probeCandyRouteHTTP(parent, group, route, model)
+}
+
+func (s *Service) probeCandyRouteWithSharing(parent context.Context, group *storage.GatewayGroup, route storage.GatewayRoute, model string, manual bool) (result storage.GatewayRouteCandyCheck) {
+	result.Status, result.Model, result.SourceRouteID = "error", model, route.ID
 	start := time.Now()
-	defer func() { result.LatencyMS = time.Since(start).Milliseconds() }()
+	defer func() {
+		if !result.Reused {
+			result.LatencyMS = time.Since(start).Milliseconds()
+		}
+	}()
 	allowed, err := RouteAllowsUpstreamModel(&route, model)
 	if err != nil || !allowed || model == "" || mediaGenerationModel(model) {
 		result.Status, result.Reason = "skipped", "检测模型不在该路由的支持范围内，或不是文本模型"
@@ -210,6 +246,62 @@ func (s *Service) probeCandyRoute(parent context.Context, group *storage.Gateway
 	body, path := candyCheckRequest(kind, model, group.CandyCheckReasoningEffort)
 	ctx, cancel := context.WithTimeout(parent, candyCheckTimeout)
 	defer cancel()
+	req, err := s.buildUpstreamHTTPRequest(ctx, target, path, http.MethodPost, http.Header{"Accept": []string{"text/event-stream"}}, body, kind, true)
+	if err != nil {
+		result.Reason = "无法创建检测请求"
+		return
+	}
+	actualBody := body
+	if protocol.NormalizeKind(kind) == protocol.KindOpenAIChat {
+		actualBody = EnsureStreamUsageOption(body, true)
+	}
+	proxy := s.proxyURLForTarget(target.Channel, target.Provider)
+	if proxy == "" {
+		if resolved, proxyErr := http.ProxyFromEnvironment(req); proxyErr == nil && resolved != nil {
+			proxy = resolved.String()
+		}
+	}
+	cacheKey := candyCheckSharedKey(target, kind, model, group.CandyCheckReasoningEffort, path, actualBody, req.Header, proxy)
+	result.SharedCacheKey = cacheKey
+	interval := group.CandyCheckIntervalMinutes
+	if interval < 1 {
+		interval = 5
+	}
+	maxAge := time.Duration(interval) * time.Minute
+	for attempt := 0; attempt < 3; attempt++ {
+		startedWaiting := time.Now()
+		acquired, acquireErr := s.Routes.AcquireSharedCandyCheck(cacheKey, startedWaiting, candyCheckTimeout+30*time.Second, maxAge, manual)
+		if acquireErr != nil {
+			result.Reason = "共享检测状态不可用"
+			return
+		}
+		if acquired.Cached != nil {
+			return applySharedCandyResult(result, acquired.Cached)
+		}
+		if acquired.InFlight {
+			waitCtx, waitCancel := context.WithTimeout(ctx, candyCheckTimeout+30*time.Second)
+			row, waitErr := s.Routes.WaitForSharedCandyCheck(waitCtx, cacheKey, 50*time.Millisecond)
+			waitCancel()
+			if waitErr != nil {
+				result.Status, result.Reason = "deferred", "等待同源检测完成超时"
+				return
+			}
+			if candyCheckSharedUsable(row, time.Now(), maxAge) && sharedCandyObservationChanged(row, acquired) {
+				// Consume only a newly published observation. A released lease can
+				// expose an old row or pending seed and must be claimed again.
+				return applySharedCandyResult(result, row)
+			}
+			continue
+		}
+		if acquired.Lease != nil {
+			result.SharedLeaseToken = acquired.Lease.LeaseToken
+			break
+		}
+	}
+	if result.SharedLeaseToken == "" {
+		result.Status, result.Reason = "deferred", "同源检测租约未取得"
+		return
+	}
 	queueCtx, queueCancel := context.WithTimeout(ctx, 2*time.Second)
 	release, err := s.runtime().acquireUpstreamConcurrency(queueCtx, target)
 	queueCancel()
@@ -218,43 +310,139 @@ func (s *Service) probeCandyRoute(parent context.Context, group *storage.Gateway
 		return
 	}
 	defer release()
-	req, err := s.buildUpstreamHTTPRequest(ctx, target, path, http.MethodPost, http.Header{"Accept": {"text/event-stream"}}, body, kind, true)
+	return s.probeCandyRequest(ctx, target, kind, body, path, req, result)
+}
+
+func candyCheckSharedUsable(row *storage.GatewayCandyCheckSharedResult, now time.Time, maxAge time.Duration) bool {
+	if row == nil || row.ObservedAt == nil || row.ObservedAt.After(now) {
+		return false
+	}
+	switch row.Status {
+	case "correct", "incorrect":
+		return row.ObservedAt.Add(maxAge).After(now)
+	case "error":
+		return row.RetryUntil != nil && row.RetryUntil.After(now)
+	default:
+		return false
+	}
+}
+
+func sharedCandyObservationChanged(row *storage.GatewayCandyCheckSharedResult, acquired *storage.GatewayCandyCheckSharedAcquire) bool {
+	if row == nil || row.ObservedAt == nil || acquired == nil {
+		return false
+	}
+	return acquired.PreviousObservedAt == nil || row.ObservedAt.After(*acquired.PreviousObservedAt) || row.SourceRequestID != acquired.PreviousRequestID
+}
+
+func applySharedCandyResult(result storage.GatewayRouteCandyCheck, shared *storage.GatewayCandyCheckSharedResult) storage.GatewayRouteCandyCheck {
+	if shared == nil {
+		return result
+	}
+	result.Status, result.Model = shared.Status, shared.Model
+	result.AnswerPreview, result.Reason = shared.AnswerPreview, shared.Reason
+	result.StatusCode, result.LatencyMS = shared.StatusCode, shared.LatencyMS
+	result.Reused = true
+	result.SourceRouteID, result.SourceRequestID = shared.SourceRouteID, shared.SourceRequestID
+	result.ObservedAt = shared.ObservedAt
+	result.SharedLeaseToken = ""
+	return result
+}
+
+func (s *Service) probeCandyRouteHTTP(parent context.Context, group *storage.GatewayGroup, route storage.GatewayRoute, model string) (result storage.GatewayRouteCandyCheck) {
+	result.Status, result.Model, result.SourceRouteID = "error", model, route.ID
+	start := time.Now()
+	defer func() {
+		if !result.Reused {
+			result.LatencyMS = time.Since(start).Milliseconds()
+		}
+	}()
+	allowed, err := RouteAllowsUpstreamModel(&route, model)
+	if err != nil || !allowed || model == "" || mediaGenerationModel(model) {
+		result.Status, result.Reason = "skipped", "检测模型不在该路由的支持范围内，或不是文本模型"
+		return
+	}
+	target, err := s.resolveUpstreamTarget(&route)
+	if err != nil {
+		result.Status, result.Reason = "skipped", "上游未就绪，请检查渠道状态及上游密钥"
+		return
+	}
+	if target.Provider != nil {
+		allowed, err = ProviderAllowsUpstreamModel(target.Provider, model)
+		if err != nil || !allowed {
+			result.Status, result.Reason = "skipped", "直连渠道不支持检测模型"
+			return
+		}
+	}
+	s.applyRouteUserAgentForAdmin(target, group, &route)
+	kindSetting := s.normalizeUpstreamProtocol(route.UpstreamProtocol)
+	if kindSetting == storage.GatewayUpstreamProtocolAuto && target.Provider != nil {
+		kindSetting = s.normalizeProviderProtocol(target.Provider.UpstreamProtocol)
+	}
+	kind := protocol.ResolveUpstream(kindSetting, protocol.KindOpenAIChat, model)
+	body, path := candyCheckRequest(kind, model, group.CandyCheckReasoningEffort)
+	ctx, cancel := context.WithTimeout(parent, candyCheckTimeout)
+	defer cancel()
+	req, err := s.buildUpstreamHTTPRequest(ctx, target, path, http.MethodPost, http.Header{"Accept": []string{"text/event-stream"}}, body, kind, true)
 	if err != nil {
 		result.Reason = "无法创建检测请求"
 		return
 	}
+	queueCtx, queueCancel := context.WithTimeout(ctx, 2*time.Second)
+	release, err := s.runtime().acquireUpstreamConcurrency(queueCtx, target)
+	queueCancel()
+	if err != nil {
+		result.Status, result.Reason = "deferred", "渠道忙，延后检测"
+		return
+	}
+	defer release()
+	return s.probeCandyRequest(ctx, target, kind, body, path, req, result)
+}
+
+func (s *Service) probeCandyRequest(ctx context.Context, target *upstreamTarget, kind protocol.Kind, body []byte, path string, req *http.Request, result storage.GatewayRouteCandyCheck) storage.GatewayRouteCandyCheck {
+	// Create the audit identity only at the actual outbound attempt. Shared
+	// cache consumers never enter this function and therefore create no row.
+	requestID := apiaudit.NewRequestID()
+	result.SourceRequestID = requestID
+	meta := target.AuditMetadata
+	meta.Purpose = storage.GatewayAPICallPurposeCandyCheck
+	meta.RequestID = requestID
+	meta.Model = result.Model
+	meta.RouteID = result.SourceRouteID
+	req = req.WithContext(apiaudit.WithMetadata(req.Context(), meta))
 	resp, err := s.runtime().httpClientForTarget(target.Channel, target.Provider).Do(req)
 	if err != nil {
 		result.Reason = "检测请求失败或超时"
-		return
+		return result
 	}
 	defer resp.Body.Close()
 	result.StatusCode = resp.StatusCode
 	data, err := s.runtime().readCandyCheckBody(resp.Body, resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		result.Reason = s.candyCheckHTTPError(resp.StatusCode, data, target, req.Header)
-		return
+		return result
 	}
 	if err != nil {
 		result.Reason = "检测响应未完整接收或超时"
-		return
+		return result
 	}
 	if len(data) > candyCheckBodyLimit {
 		result.Reason = "检测响应超过 2 MiB 限制"
-		return
+		return result
 	}
 	answer, err := parseCandyCheckAnswer(data, resp.Header)
 	result.AnswerPreview = string([]rune(answer)[:min(len([]rune(answer)), 512)])
 	if err != nil {
 		result.Reason = err.Error()
-		return
+		return result
 	}
 	result.Status = "incorrect"
 	result.Reason = "糖果题未通过：最终答案应为 21"
 	if candyCheckAnswerCorrect(answer) {
 		result.Status, result.Reason = "correct", ""
 	}
-	return
+	observed := time.Now()
+	result.ObservedAt = &observed
+	return result
 }
 
 func (rt *Runtime) readCandyCheckBody(body io.Reader, headers http.Header) ([]byte, error) {
@@ -298,16 +486,43 @@ func candyCheckFrameTerminal(frame []byte) bool {
 		case "message_stop", "error", "response.completed", "response.done", "response.failed", "response.incomplete", "response.error":
 			return true
 		}
-		if choices, ok := obj["choices"].([]any); ok {
-			for _, value := range choices {
-				choice, _ := value.(map[string]any)
-				if reason, _ := choice["finish_reason"].(string); reason != "" {
-					return true
-				}
-			}
-		}
+		// Usage can arrive before any answer (Anthropic message_start) or be
+		// null in chat deltas. Only protocol terminal markers end this read;
+		// finish_reason and usage alone must leave room for the complete tail.
 	}
 	return false
+}
+
+func candyCheckSharedKey(target *upstreamTarget, kind protocol.Kind, model, effort, path string, body []byte, headers http.Header, proxyURL string) string {
+	// The key is intentionally source-scoped, never gateway-group/route-scoped.
+	// Secrets are represented only by SHA-256; raw API keys and extra-header
+	// values never enter the database or the key string.
+	parts := []string{
+		strings.TrimRight(strings.TrimSpace(target.BaseURL), "/"),
+		hex.EncodeToString(sha256Bytes([]byte(target.APIKey))),
+		string(protocol.NormalizeKind(kind)), strings.TrimSpace(model), strings.TrimSpace(effort),
+		path, hex.EncodeToString(sha256Bytes(body)), strings.TrimSpace(proxyURL),
+	}
+	parts = append(parts, "candy-puzzle-v1")
+	canonical := make(map[string][]string, len(headers))
+	for name, values := range headers {
+		canonical[strings.ToLower(strings.TrimSpace(name))] = values
+	}
+	names := make([]string, 0, len(canonical))
+	for name := range canonical {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		parts = append(parts, name, hex.EncodeToString(sha256Bytes([]byte(strings.Join(canonical[name], "\x00")))))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x1f")))
+	return hex.EncodeToString(sum[:])
+}
+
+func sha256Bytes(value []byte) []byte {
+	sum := sha256.Sum256(value)
+	return sum[:]
 }
 
 func candyCheckRequest(kind protocol.Kind, model, effort string) ([]byte, string) {

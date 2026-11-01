@@ -131,8 +131,10 @@ func main() {
 	gatewayProviders := storage.NewGatewayProviders(db)
 	gatewayUsage := storage.NewGatewayUsageLogs(db)
 	modelPrices := storage.NewModelPriceOverrides(db)
+	apiCalls := storage.NewGatewayAPICallLogs(db)
 
 	channelSvc := channel.NewService(channels, authSessions, captchas, rates, monLogs, cipher)
+	channelSvc.APICalls = apiCalls
 	channelSvc.UpdateProxyConfig(cfg.Proxy)
 	channelSvc.UpdateUpstreamConfig(cfg.Upstream)
 	gatewaySvc := gateway.NewService(gatewayGroups, gatewayKeys, gatewayRoutes, gatewayUsage, modelPrices, channels, channelSvc, cipher, log)
@@ -159,6 +161,7 @@ func main() {
 	dispatcher.UpdateProxyConfig(cfg.Proxy)
 	monitorSvc := monitor.NewService(channels, announcements, rates, monLogs, channelSvc, dispatcher, log)
 	syncSvc := syncer.New(channels, rates, cipher, channelSvc, log, syncTargets, syncGroups, upstreamSyncGroups, upstreamSyncAccounts, managedSyncAccounts, syncLogs)
+	syncSvc.APICalls = apiCalls
 	syncSvc.SetDispatcher(dispatcher)
 
 	schedulerFactory := func(scfg config.SchedulerConfig, pcfg config.ProxyConfig) *scheduler.Scheduler {

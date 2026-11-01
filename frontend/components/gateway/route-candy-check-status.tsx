@@ -28,6 +28,7 @@ export function RouteCandyCheckStatus({ routeID, enabled, state, disabledReason,
   const running = testing || !!(state?.lease_until && new Date(state.lease_until).getTime() > Date.now())
   const backingOff = !!(state?.active && state.backoff_until && new Date(state.backoff_until).getTime() > Date.now())
   const status = running ? "检测中" : state?.active ? labels[state.status] : enabled ? "等待检测" : "定时检测关闭"
+  const stateTime = state?.reused ? state.observed_at || state.checked_at : state?.checked_at
   const format = (value: string) => new Date(value).toLocaleString("zh-CN")
   return <div className="mt-2 space-y-1 text-[11px]">
     <div className="flex flex-wrap items-center gap-1">
@@ -50,9 +51,10 @@ export function RouteCandyCheckStatus({ routeID, enabled, state, disabledReason,
     </div>
     {disabledReason && <div className="text-muted-foreground">{disabledReason}</div>}
     {state && <details className="text-muted-foreground">
-      <summary className="cursor-pointer">检测详情{state.checked_at ? ` · ${format(state.checked_at)}` : ""}</summary>
+      <summary className="cursor-pointer">检测详情{stateTime ? ` · ${format(stateTime)}` : ""}</summary>
       <div className="mt-1 space-y-0.5 break-all">
         <div>检测上游模型：{state.model || "—"} · 耗时 {(state.latency_ms / 1000).toFixed(2)}s</div>
+        {state.reused ? <div className="text-sky-700 dark:text-sky-300">复用 route#{state.source_route_id ?? "—"} 的检测结果 · 观察于 {state.observed_at ? format(state.observed_at) : "—"}{state.source_request_id ? ` · 真实请求 ${state.source_request_id}` : ""}</div> : null}
         {state.reason && <div>{state.reason}</div>}
         {state.answer_preview && <div className="whitespace-pre-wrap">最终答复：{state.answer_preview}</div>}
         {cooling && state.cooldown_until && <div>冷却至：{format(state.cooldown_until)}</div>}
@@ -75,7 +77,8 @@ export function RouteCandyCheckStatus({ routeID, enabled, state, disabledReason,
       {history && <div className="max-h-48 space-y-1 overflow-y-auto rounded border p-2">
         {history.length === 0 && <div>暂无历史记录</div>}
         {history.map((event) => <div key={event.id} className="border-b pb-1 last:border-0">
-          <div>{format(event.created_at)} · {event.manual ? "人工" : "定时"} · {labels[event.status as GatewayRouteCandyCheck["status"]] || event.status}</div>
+          <div>{format(event.reused ? event.observed_at || event.created_at : event.created_at)} · {event.manual ? "人工" : "定时"} · {labels[event.status as GatewayRouteCandyCheck["status"]] || event.status}{event.reused ? ` · 复用 route#${event.source_route_id ?? "—"}` : ""}</div>
+          {event.reused && <div className="text-sky-700 dark:text-sky-300">观察于 {event.observed_at ? format(event.observed_at) : "—"}{event.source_request_id ? ` · 真实请求 ${event.source_request_id}` : ""}</div>}
           {event.reason && <div className="break-all text-muted-foreground">{event.reason}</div>}
           {event.cooldown_until && <div>当时冷却截止：{format(event.cooldown_until)}</div>}
           {event.backoff_until && <div>当时网络退避截止：{format(event.backoff_until)}</div>}

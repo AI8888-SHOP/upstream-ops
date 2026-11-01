@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 	"github.com/bejix/upstream-ops/backend/connector"
 	"github.com/go-resty/resty/v2"
 )
@@ -23,22 +25,53 @@ func init() {
 }
 
 type Client struct {
-	http *resty.Client
+	http          *resty.Client
+	baseTransport *http.Transport
+	audit         *apiaudit.Options
 }
 
 func New() *Client {
-	c := resty.New().
+	rc := resty.New().
 		SetTimeout(30*time.Second).
 		SetHeader("User-Agent", "upstream-ops/0.1").
 		SetHeader("Accept", "application/json")
-	return &Client{http: c}
+	base, _ := rc.Transport()
+	return &Client{http: rc, baseTransport: base}
 }
 
 func (c *Client) SetProxy(proxyURL string) {
-	if strings.TrimSpace(proxyURL) == "" {
+	if strings.TrimSpace(proxyURL) == "" || c.baseTransport == nil {
 		return
 	}
-	c.http.SetProxy(proxyURL)
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return
+	}
+	c.baseTransport.Proxy = http.ProxyURL(parsed)
+	c.rebuildTransport()
+}
+
+// SetAPIAudit installs the audit wrapper around the connector's inner
+// transport. Rebuilding from baseTransport keeps it intact across SetProxy.
+func (c *Client) SetAPIAudit(opts apiaudit.Options) {
+	if opts.Store == nil {
+		c.audit = nil
+	} else {
+		copy := opts
+		c.audit = &copy
+	}
+	c.rebuildTransport()
+}
+
+func (c *Client) rebuildTransport() {
+	if c.baseTransport == nil {
+		return
+	}
+	var transport http.RoundTripper = c.baseTransport
+	if c.audit != nil {
+		transport = apiaudit.WrapTransport(transport, *c.audit)
+	}
+	c.http.SetTransport(transport)
 }
 
 func (c *Client) SetHTTPConfig(cfg connector.HTTPConfig) {

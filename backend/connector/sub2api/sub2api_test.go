@@ -3,13 +3,17 @@ package sub2api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/bejix/upstream-ops/backend/apiaudit"
 	"github.com/bejix/upstream-ops/backend/connector"
+	"github.com/bejix/upstream-ops/backend/storage"
 )
 
 func TestSetHTTPConfigAppliesUserAgentAndTimeout(t *testing.T) {
@@ -31,6 +35,87 @@ func TestSetHTTPConfigAppliesUserAgentAndTimeout(t *testing.T) {
 	}
 	if _, err := c.getJSON(context.Background(), srv.URL, nil); err != nil {
 		t.Fatalf("getJSON: %v", err)
+	}
+}
+
+func TestAuditTransportSurvivesProxyReset(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("secret"); got != "top-secret" && r.URL.Query().Get("token") != "second-secret" {
+			t.Fatalf("unexpected upstream query: %q", r.URL.RawQuery)
+		}
+		_, _ = io.WriteString(w, `{"code":0,"message":"ok","data":{"balance":3.5}}`)
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		outReq := r.Clone(r.Context())
+		outReq.URL.Scheme = "http"
+		outReq.URL.Host = strings.TrimPrefix(upstream.URL, "http://")
+		outReq.RequestURI = ""
+		resp, err := http.DefaultTransport.RoundTrip(outReq)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	defer proxy.Close()
+
+	db, err := storage.Open(storage.DBConfig{Driver: storage.DBDriverSQLite, Path: filepath.Join(t.TempDir(), "audit.db")})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := storage.AutoMigrate(db); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	logs := storage.NewGatewayAPICallLogs(db)
+	c := New()
+	c.SetAPIAudit(apiaudit.Options{
+		Store:   logs,
+		Purpose: storage.GatewayAPICallPurposeChannelAPI,
+		Metadata: storage.GatewayAPICallLog{
+			Purpose:   storage.GatewayAPICallPurposeChannelAPI,
+			ChannelID: 42,
+		},
+	})
+	c.SetProxy(proxy.URL)
+	if _, err := c.getJSON(context.Background(), upstream.URL+"/api/v1/test?secret=top-secret", nil); err != nil {
+		t.Fatalf("first getJSON through proxy: %v", err)
+	}
+	c.SetProxy(proxy.URL)
+	if _, err := c.getJSON(context.Background(), upstream.URL+"/api/v1/auth/me?token=second-secret", nil); err != nil {
+		t.Fatalf("second getJSON through proxy: %v", err)
+	}
+	page, err := logs.List(storage.GatewayAPICallLogQuery{Purpose: storage.GatewayAPICallPurposeChannelAPI})
+	if err != nil {
+		t.Fatalf("list audit logs: %v", err)
+	}
+	if page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("audit page = %+v", page)
+	}
+	for _, item := range page.Items {
+		if item.ChannelID != 42 || item.Purpose != storage.GatewayAPICallPurposeChannelAPI {
+			t.Fatalf("metadata = %+v", item)
+		}
+		if item.Endpoint != "/api/v1/test" && item.Endpoint != "/api/v1/auth/me" {
+			t.Fatalf("endpoint = %q", item.Endpoint)
+		}
+		if strings.Contains(item.Endpoint, "secret") {
+			t.Fatalf("query secret leaked in endpoint = %q", item.Endpoint)
+		}
 	}
 }
 

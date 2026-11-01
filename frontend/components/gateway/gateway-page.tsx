@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 import {
+  Activity,
   DollarSign,
   Layers,
   Loader2,
@@ -57,6 +58,7 @@ import { RoutesPanel } from "./routes-panel"
 import { ModelsPanel } from "./models-panel"
 import { ResponseRulesPanel } from "./response-rules-panel"
 import { UsagePanel } from "./usage-panel"
+import { ApiCallsPanel } from "./api-calls-panel"
 import { PricesPanel } from "./prices-panel"
 import {
   CreatedSecretDialog,
@@ -1993,6 +1995,9 @@ export function GatewayPage() {
           <TabsTrigger value="usage" className="gap-1.5 px-4 py-2">
             <ScrollText className="size-3.5" /> 使用记录
           </TabsTrigger>
+          <TabsTrigger value="api-calls" className="gap-1.5 px-4 py-2">
+            <Activity className="size-3.5" /> API调用记录
+          </TabsTrigger>
           <TabsTrigger value="prices" className="gap-1.5 px-4 py-2">
             <DollarSign className="size-3.5" /> 价格覆盖
           </TabsTrigger>
@@ -2268,6 +2273,10 @@ export function GatewayPage() {
             refreshUsage={refreshUsage}
             goUsagePage={goUsagePage}
           />
+        </TabsContent>
+
+        <TabsContent value="api-calls" className="mt-0 space-y-4">
+          <ApiCallsPanel />
         </TabsContent>
 
         <TabsContent value="prices" className="mt-0 space-y-4">

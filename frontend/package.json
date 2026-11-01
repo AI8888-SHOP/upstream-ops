@@ -1,6 +1,6 @@
 {
   "name": "upstream-ops-web",
-  "version": "0.0.75",
+  "version": "0.0.76",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.4.0",
@@ -8,7 +8,8 @@
     "dev": "vite --port 3010",
     "build": "vite build",
     "preview": "vite preview --port 3010",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.1.0",

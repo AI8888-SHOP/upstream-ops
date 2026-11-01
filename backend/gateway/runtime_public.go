@@ -215,6 +215,7 @@ func (rt *Runtime) fetchUpstreamModels(ctx context.Context, ch *storage.Channel,
 	client := rt.httpClientForChannel(ch)
 	client.Timeout = 30 * time.Second
 	url := strings.TrimRight(ch.SiteURL, "/") + "/v1/models"
+	ctx = apiCallPurpose(ctx, storage.GatewayAPICallPurposeChannelAPI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build GET %s: %w", url, err)

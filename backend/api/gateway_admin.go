@@ -19,10 +19,17 @@ import (
 
 // registerGatewayAdmin 在管理 API 下注册 /gateway/* 路由。
 func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
-	if d.Gateway == nil {
+	if d == nil {
 		return
 	}
 	gp := g.Group("/gateway")
+	// API call audit is backed by the independent storage repository and can
+	// remain available even when the gateway runtime is not constructed.
+	gp.GET("/api-calls", func(c *gin.Context) { listGatewayAPICalls(c, d) })
+	gp.GET("/api-calls/stats", func(c *gin.Context) { statsGatewayAPICalls(c, d) })
+	if d.Gateway == nil {
+		return
+	}
 	{
 		// groups（reorder 须在 :id 之前注册，避免被当成 id）
 		gp.GET("/groups", func(c *gin.Context) { listGatewayGroups(c, d) })

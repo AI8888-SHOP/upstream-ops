@@ -322,6 +322,7 @@ func (s *Service) probePersistedRouteModel(parent context.Context, group *storag
 	if timeout <= 0 {
 		timeout = time.Duration(config.DefaultGatewayModelCooldownProbeTimeoutSeconds) * time.Second
 	}
+	parent = apiCallPurpose(parent, storage.GatewayAPICallPurposeModelProbe)
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	start := time.Now()

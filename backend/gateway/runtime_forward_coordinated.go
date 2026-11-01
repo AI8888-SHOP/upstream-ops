@@ -782,6 +782,7 @@ func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coor
 	if attempt.Target != nil {
 		attempt.Target.onUpstreamStart = attempt.markUpstreamStarted
 	}
+	ctx = gatewayAPICallContext(ctx, req.c)
 	attempt.Status, attempt.Headers, attempt.UpstreamBody, attempt.FirstTokenMS, attempt.Err = rt.forwardOnce(
 		ctx, nil, attempt.Target, attempt.UpstreamPath, req.c.Request.Method, req.c.Request.Header,
 		attempt.ForwardBody, false, attempt.UpstreamKind, timeout,

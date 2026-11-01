@@ -418,6 +418,7 @@ func (a *AdminService) probeRouteModel(
 	requestedModel string,
 	groupMapping map[string]string,
 ) ModelTestResult {
+	parent = apiCallPurpose(parent, storage.GatewayAPICallPurposeAdminModelTest)
 	routeMapping := ParseModelMapping(route.ModelMappingJSON)
 	upstreamModel, _ := ResolveModel(requestedModel, routeMapping, groupMapping)
 	if upstreamModel == "" {
