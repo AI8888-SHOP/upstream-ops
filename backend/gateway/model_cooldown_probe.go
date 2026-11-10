@@ -309,8 +309,9 @@ func (s *Service) probePersistedRouteModel(parent context.Context, group *storag
 			routeProtocol = providerProtocol
 		}
 	}
-	upstreamKind := protocol.ResolveUpstream(routeProtocol, inbound, upstreamModel)
 	probeBody, inboundPath := modelProbeInboundRequest(inbound, upstreamModel)
+	upstreamKind := imageGenerationUpstreamKind(target.Provider, upstreamModel, inboundPath,
+		protocol.ResolveUpstream(routeProtocol, inbound, upstreamModel))
 	body, path, _, convErr := s.prepareUpstreamRequest(probeBody, inbound, upstreamKind, upstreamModel, false, inboundPath)
 	if convErr != nil {
 		result.Error = "protocol convert: " + convErr.Error()

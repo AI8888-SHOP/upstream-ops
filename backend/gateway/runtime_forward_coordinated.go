@@ -752,7 +752,8 @@ func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, att
 			routeProtocol = providerProtocol
 		}
 	}
-	attempt.UpstreamKind = protocol.ResolveUpstream(routeProtocol, req.kind, attempt.UpstreamModel)
+	attempt.UpstreamKind = imageGenerationUpstreamKind(target.Provider, attempt.UpstreamModel, req.path,
+		protocol.ResolveUpstream(routeProtocol, req.kind, attempt.UpstreamModel))
 	if protocol.IsOpenAIFamily(req.kind) && strings.Contains(req.path, "/completions") && !strings.Contains(req.path, "/chat/") {
 		if attempt.UpstreamKind == protocolAnthropic || attempt.UpstreamKind == protocol.KindOpenAIResponses {
 			return errors.New("protocol conversion for /v1/completions is not supported; use /v1/chat/completions")

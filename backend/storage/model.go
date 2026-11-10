@@ -506,6 +506,7 @@ type GatewayProvider struct {
 	UpstreamProtocol  string `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
 	ModelPolicy       string `gorm:"size:16;not null;default:'all'" json:"model_policy"`
 	AllowedModelsJSON string `gorm:"type:text;not null;default:'[]'" json:"allowed_models_json"`
+	ImageGenerationModelsJSON string `gorm:"type:text;not null;default:'[]'" json:"image_generation_models_json"`
 	// ConcurrencyLimit is shared by every gateway route that references this provider.
 	// Zero preserves the legacy unlimited behavior.
 	ConcurrencyLimit int `gorm:"not null;default:0" json:"concurrency_limit"`

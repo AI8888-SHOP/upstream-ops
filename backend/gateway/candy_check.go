@@ -230,6 +230,10 @@ func (s *Service) probeCandyRouteWithSharing(parent context.Context, group *stor
 		result.Status, result.Reason = "skipped", "上游未就绪，请检查渠道状态及上游密钥"
 		return
 	}
+	if providerUsesImageGeneration(target.Provider, model, "/v1/chat/completions") {
+		result.Status, result.Reason = "skipped", "图片生成模型不参与文本检测"
+		return
+	}
 	if target.Provider != nil {
 		allowed, err = ProviderAllowsUpstreamModel(target.Provider, model)
 		if err != nil || !allowed {
@@ -364,6 +368,10 @@ func (s *Service) probeCandyRouteHTTP(parent context.Context, group *storage.Gat
 	target, err := s.resolveUpstreamTarget(&route)
 	if err != nil {
 		result.Status, result.Reason = "skipped", "上游未就绪，请检查渠道状态及上游密钥"
+		return
+	}
+	if providerUsesImageGeneration(target.Provider, model, "/v1/chat/completions") {
+		result.Status, result.Reason = "skipped", "图片生成模型不参与文本检测"
 		return
 	}
 	if target.Provider != nil {

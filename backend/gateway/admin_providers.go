@@ -53,6 +53,10 @@ func (a *AdminService) CreateProvider(in CreateProviderInput) (*storage.GatewayP
 	if err != nil {
 		return nil, err
 	}
+	imageGenerationModelsJSON, err := NormalizeProviderAllowedModelsJSON(in.ImageGenerationModelsJSON)
+	if err != nil {
+		return nil, err
+	}
 	virtualCacheModelsJSON, err := NormalizeProviderVirtualCacheModelsJSON(in.VirtualCacheModelsJSON)
 	if err != nil {
 		return nil, err
@@ -81,23 +85,24 @@ func (a *AdminService) CreateProvider(in CreateProviderInput) (*storage.GatewayP
 		proxyEnabled = *in.ProxyEnabled
 	}
 	item := &storage.GatewayProvider{
-		Name:               name,
-		BaseURL:            base,
-		APIKeyCipher:       cipherText,
-		APIKeyHint:         a.apiKeyHint(key),
-		UpstreamProtocol:   a.normalizeProviderProtocol(in.UpstreamProtocol),
-		ModelPolicy:        modelPolicy,
-		AllowedModelsJSON:  allowedModelsJSON,
-		ConcurrencyLimit:   normalizeProviderConcurrencyLimit(in.ConcurrencyLimit),
-		VirtualCacheEnabled: in.VirtualCacheEnabled != nil && *in.VirtualCacheEnabled,
-		VirtualCacheModelsJSON: virtualCacheModelsJSON,
-		VirtualCachePercent: normalizeProviderVirtualCachePercent(virtualCachePercent),
-		DefaultBillingRate: rate,
-		AuthStyle:          a.normalizeProviderAuthStyle(in.AuthStyle),
-		Enabled:            enabled,
-		ProxyEnabled:       proxyEnabled,
-		ExtraHeadersJSON:   strings.TrimSpace(in.ExtraHeadersJSON),
-		Notes:              strings.TrimSpace(in.Notes),
+		Name:                      name,
+		BaseURL:                   base,
+		APIKeyCipher:              cipherText,
+		APIKeyHint:                a.apiKeyHint(key),
+		UpstreamProtocol:          a.normalizeProviderProtocol(in.UpstreamProtocol),
+		ModelPolicy:               modelPolicy,
+		AllowedModelsJSON:         allowedModelsJSON,
+		ImageGenerationModelsJSON: imageGenerationModelsJSON,
+		ConcurrencyLimit:          normalizeProviderConcurrencyLimit(in.ConcurrencyLimit),
+		VirtualCacheEnabled:       in.VirtualCacheEnabled != nil && *in.VirtualCacheEnabled,
+		VirtualCacheModelsJSON:    virtualCacheModelsJSON,
+		VirtualCachePercent:       normalizeProviderVirtualCachePercent(virtualCachePercent),
+		DefaultBillingRate:        rate,
+		AuthStyle:                 a.normalizeProviderAuthStyle(in.AuthStyle),
+		Enabled:                   enabled,
+		ProxyEnabled:              proxyEnabled,
+		ExtraHeadersJSON:          strings.TrimSpace(in.ExtraHeadersJSON),
+		Notes:                     strings.TrimSpace(in.Notes),
 	}
 	if err := a.Providers.Create(item); err != nil {
 		return nil, err
@@ -161,6 +166,13 @@ func (a *AdminService) UpdateProvider(id uint, in UpdateProviderInput) (*storage
 			return nil, err
 		}
 		item.AllowedModelsJSON = allowed
+	}
+	if in.ImageGenerationModelsJSON != nil {
+		models, err := NormalizeProviderAllowedModelsJSON(*in.ImageGenerationModelsJSON)
+		if err != nil {
+			return nil, err
+		}
+		item.ImageGenerationModelsJSON = models
 	}
 	if in.ConcurrencyLimit != nil {
 		item.ConcurrencyLimit = normalizeProviderConcurrencyLimit(*in.ConcurrencyLimit)

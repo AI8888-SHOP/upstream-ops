@@ -98,7 +98,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	// A model alias can map to a media-generation model only after route
 	// selection. Disable concurrent hedge scheduling for such a request even
 	// when the client-facing name itself looks like a text model.
-	mappedMediaModel := mappedRouteContainsMediaModel(routes, requestedModel, groupMapping)
+	mappedMediaModel := mappedRouteContainsMediaModel(routes, requestedModel, groupMapping) ||
+		rt.routesContainConfiguredImageModel(routes, requestedModel, groupMapping, path)
 	affinity := rt.routeAffinityForAnalyzedRequest(c, key.ID, group.ID, string(kind), requestedModel, body, requestInfo.AffinityID)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	validator, validationErr := rt.responseValidatorForGroup(group)
@@ -284,7 +285,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 					routeProto = p
 				}
 			}
-			upstreamKind := protocol.ResolveUpstream(routeProto, kind, upstreamModel)
+			upstreamKind := imageGenerationUpstreamKind(target.Provider, upstreamModel, path,
+				protocol.ResolveUpstream(routeProto, kind, upstreamModel))
 
 			// legacy completions 不跨协议
 			if protocol.IsOpenAIFamily(kind) && strings.Contains(path, "/completions") && !strings.Contains(path, "/chat/") {
@@ -888,6 +890,11 @@ func (rt *Runtime) forwardOnce(
 		}
 		if len(rest) > 0 {
 			data = append(data, rest...)
+		}
+	}
+	if kind == protocol.KindOpenAIImages {
+		if errorBody := imageGenerationResponseError(data); errorBody != nil {
+			return http.StatusBadGateway, resp.Header.Clone(), errorBody, ft, nil
 		}
 	}
 	_ = c

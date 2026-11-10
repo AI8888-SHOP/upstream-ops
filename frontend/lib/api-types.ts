@@ -820,6 +820,7 @@ export interface GatewayProvider {
   upstream_protocol: GatewayUpstreamProtocol
   model_policy?: GatewayProviderModelPolicy
   allowed_models_json?: string
+  image_generation_models_json?: string
   concurrency_limit?: number
   virtual_cache_enabled?: boolean
   virtual_cache_models_json?: string

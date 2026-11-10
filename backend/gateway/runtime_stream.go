@@ -43,6 +43,9 @@ func (rt *Runtime) buildUpstreamHTTPRequest(
 	fullURL := base + path
 
 	upKind := protocol.NormalizeKind(kind)
+	if upKind == protocol.KindOpenAIImages {
+		stream = false
+	}
 	if stream && (upKind == protocol.KindOpenAIChat || upKind == protocol.KindOpenAI) {
 		body = EnsureStreamUsageOption(body, true)
 	}
@@ -76,8 +79,11 @@ func (rt *Runtime) buildUpstreamHTTPRequest(
 			req.Header.Set("OpenAI-Beta", v)
 		}
 	}
-	if req.Header.Get("Content-Type") == "" {
+	if req.Header.Get("Content-Type") == "" || upKind == protocol.KindOpenAIImages {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if upKind == protocol.KindOpenAIImages {
+		req.Header.Set("Accept", "application/json")
 	}
 	authStyle := storage.GatewayProviderAuthBoth
 	if target.Provider != nil {
@@ -338,7 +344,12 @@ func (rt *Runtime) forwardStreamBuffered(
 	}
 	data = append(data, rest...)
 
-	tokens := rt.parseUsageByKind(data, true, upstream)
+	tokens := rt.parseUsageByKind(data, upstream != protocol.KindOpenAIImages, upstream)
+	if upstream == protocol.KindOpenAIImages {
+		if errorBody := imageGenerationResponseError(data); errorBody != nil {
+			return streamAttemptResult{Status: http.StatusBadGateway, Headers: headers, Body: errorBody, FirstTokenMS: ft, Tokens: tokens, StreamCommitted: false}
+		}
+	}
 	if hasExplicitUpstreamError(data) {
 		return streamAttemptResult{
 			Status: status, Headers: headers, Body: data, FirstTokenMS: ft, Tokens: tokens,

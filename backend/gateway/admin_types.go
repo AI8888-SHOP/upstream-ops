@@ -201,42 +201,44 @@ type UpdateKeyInput struct {
 
 // CreateProviderInput 创建直连渠道（GatewayProvider）。
 type CreateProviderInput struct {
-	Name                   string  `json:"name"`
-	BaseURL                string  `json:"base_url"`
-	APIKey                 string  `json:"api_key"`
-	UpstreamProtocol       string  `json:"upstream_protocol"`
-	ModelPolicy            string  `json:"model_policy"`
-	AllowedModelsJSON      string  `json:"allowed_models_json"`
-	ConcurrencyLimit       int     `json:"concurrency_limit"`
-	VirtualCacheEnabled    *bool   `json:"virtual_cache_enabled"`
-	VirtualCacheModelsJSON string  `json:"virtual_cache_models_json"`
-	VirtualCachePercent    *int    `json:"virtual_cache_percent"`
-	DefaultBillingRate     float64 `json:"default_billing_rate"`
-	AuthStyle              string  `json:"auth_style"`
-	Enabled                *bool   `json:"enabled"`
-	ProxyEnabled           *bool   `json:"proxy_enabled"`
-	ExtraHeadersJSON       string  `json:"extra_headers"`
-	Notes                  string  `json:"notes"`
+	Name                      string  `json:"name"`
+	BaseURL                   string  `json:"base_url"`
+	APIKey                    string  `json:"api_key"`
+	UpstreamProtocol          string  `json:"upstream_protocol"`
+	ModelPolicy               string  `json:"model_policy"`
+	AllowedModelsJSON         string  `json:"allowed_models_json"`
+	ImageGenerationModelsJSON string  `json:"image_generation_models_json"`
+	ConcurrencyLimit          int     `json:"concurrency_limit"`
+	VirtualCacheEnabled       *bool   `json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON    string  `json:"virtual_cache_models_json"`
+	VirtualCachePercent       *int    `json:"virtual_cache_percent"`
+	DefaultBillingRate        float64 `json:"default_billing_rate"`
+	AuthStyle                 string  `json:"auth_style"`
+	Enabled                   *bool   `json:"enabled"`
+	ProxyEnabled              *bool   `json:"proxy_enabled"`
+	ExtraHeadersJSON          string  `json:"extra_headers"`
+	Notes                     string  `json:"notes"`
 }
 
 // UpdateProviderInput 更新直连渠道（指针字段：nil 表示不改；APIKey 空或省略=不改）。
 type UpdateProviderInput struct {
-	Name                   *string  `json:"name"`
-	BaseURL                *string  `json:"base_url"`
-	APIKey                 *string  `json:"api_key"`
-	UpstreamProtocol       *string  `json:"upstream_protocol"`
-	ModelPolicy            *string  `json:"model_policy"`
-	AllowedModelsJSON      *string  `json:"allowed_models_json"`
-	ConcurrencyLimit       *int     `json:"concurrency_limit"`
-	VirtualCacheEnabled    *bool    `json:"virtual_cache_enabled"`
-	VirtualCacheModelsJSON *string  `json:"virtual_cache_models_json"`
-	VirtualCachePercent    *int     `json:"virtual_cache_percent"`
-	DefaultBillingRate     *float64 `json:"default_billing_rate"`
-	AuthStyle              *string  `json:"auth_style"`
-	Enabled                *bool    `json:"enabled"`
-	ProxyEnabled           *bool    `json:"proxy_enabled"`
-	ExtraHeadersJSON       *string  `json:"extra_headers"`
-	Notes                  *string  `json:"notes"`
+	Name                      *string  `json:"name"`
+	BaseURL                   *string  `json:"base_url"`
+	APIKey                    *string  `json:"api_key"`
+	UpstreamProtocol          *string  `json:"upstream_protocol"`
+	ModelPolicy               *string  `json:"model_policy"`
+	AllowedModelsJSON         *string  `json:"allowed_models_json"`
+	ImageGenerationModelsJSON *string  `json:"image_generation_models_json"`
+	ConcurrencyLimit          *int     `json:"concurrency_limit"`
+	VirtualCacheEnabled       *bool    `json:"virtual_cache_enabled"`
+	VirtualCacheModelsJSON    *string  `json:"virtual_cache_models_json"`
+	VirtualCachePercent       *int     `json:"virtual_cache_percent"`
+	DefaultBillingRate        *float64 `json:"default_billing_rate"`
+	AuthStyle                 *string  `json:"auth_style"`
+	Enabled                   *bool    `json:"enabled"`
+	ProxyEnabled              *bool    `json:"proxy_enabled"`
+	ExtraHeadersJSON          *string  `json:"extra_headers"`
+	Notes                     *string  `json:"notes"`
 }
 
 // ProviderModelsPreview 返回直连渠道实时模型与当前选择，不包含任何密钥信息。

@@ -480,7 +480,8 @@ func (a *AdminService) probeRouteModel(
 			routeProto = p
 		}
 	}
-	upstreamKind := protocol.ResolveUpstream(routeProto, inbound, upstreamModel)
+	upstreamKind := imageGenerationUpstreamKind(target.Provider, upstreamModel, "/v1/chat/completions",
+		protocol.ResolveUpstream(routeProto, inbound, upstreamModel))
 	// 探测 body 统一用 chat 形态，再按上游协议转换
 	chatBody := []byte(fmt.Sprintf(
 		`{"model":%q,"max_tokens":1,"messages":[{"role":"user","content":"ping"}],"stream":false}`,

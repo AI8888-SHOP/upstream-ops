@@ -60,6 +60,7 @@ type ProviderForm = {
   auth_style: string
   model_policy: GatewayProviderModelPolicy
   allowed_models: string[]
+  image_generation_models: string
   concurrency_limit: string
   virtual_cache_enabled: boolean
   virtual_cache_models: string[]
@@ -78,6 +79,7 @@ const emptyForm = (): ProviderForm => ({
   auth_style: "both",
   model_policy: "all",
   allowed_models: [],
+  image_generation_models: "",
   concurrency_limit: "0",
   virtual_cache_enabled: false,
   virtual_cache_models: [],
@@ -155,6 +157,7 @@ export function GatewayProvidersPanel() {
       auth_style: item.auth_style || "both",
       model_policy: item.model_policy || "all",
       allowed_models: parseAllowedModels(item.allowed_models_json),
+      image_generation_models: parseAllowedModels(item.image_generation_models_json).join("\n"),
       concurrency_limit: String(item.concurrency_limit ?? 0),
       virtual_cache_enabled: !!item.virtual_cache_enabled,
       virtual_cache_models: parseAllowedModels(item.virtual_cache_models_json),
@@ -221,6 +224,9 @@ export function GatewayProvidersPanel() {
       toast.error("虚拟缓存百分比必须是 0-100 的整数")
       return
     }
+    const imageGenerationModelsJSON = JSON.stringify(
+      Array.from(new Set(form.image_generation_models.split(/\r?\n/).map((model) => model.trim()).filter(Boolean))),
+    )
     setBusy(true)
     try {
       if (editing) {
@@ -232,6 +238,7 @@ export function GatewayProvidersPanel() {
           auth_style: form.auth_style,
           model_policy: form.model_policy,
           allowed_models_json: JSON.stringify(form.allowed_models),
+          image_generation_models_json: imageGenerationModelsJSON,
           concurrency_limit: concurrencyLimit,
           virtual_cache_enabled: form.virtual_cache_enabled,
           virtual_cache_models_json: JSON.stringify(form.virtual_cache_models),
@@ -258,6 +265,7 @@ export function GatewayProvidersPanel() {
             auth_style: form.auth_style,
             model_policy: form.model_policy,
             allowed_models_json: JSON.stringify(form.allowed_models),
+            image_generation_models_json: imageGenerationModelsJSON,
             concurrency_limit: concurrencyLimit,
             virtual_cache_enabled: form.virtual_cache_enabled,
             virtual_cache_models_json: JSON.stringify(form.virtual_cache_models),
@@ -775,6 +783,22 @@ export function GatewayProvidersPanel() {
                   />
                 </>
               ) : null}
+            </div>
+            <div className="space-y-2 rounded-lg border border-border px-3 py-3">
+              <Label htmlFor="provider-image-generation-models">图片生成模型</Label>
+              <p className="text-[11px] text-muted-foreground">
+                每行一个模型名，精确匹配映射后的上游模型名，匹配后自动使用 /images/generations。
+                留空关闭；不影响图片编辑 /images/edits；不按关键词自动识别。
+              </p>
+              <Textarea
+                id="provider-image-generation-models"
+                rows={3}
+                value={form.image_generation_models}
+                onChange={(event) =>
+                  setForm({ ...form, image_generation_models: event.target.value })
+                }
+                placeholder="每行一个映射后的上游模型名；留空关闭"
+              />
             </div>
             <div className="space-y-3 rounded-lg border border-border px-3 py-3">
               <div className="flex flex-wrap items-center justify-between gap-3">

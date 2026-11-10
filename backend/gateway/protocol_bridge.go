@@ -18,8 +18,8 @@ const (
 )
 
 type preparedUpstreamRequestKey struct {
-	inbound       protocolKind
-	upstream      protocolKind
+	inbound        protocolKind
+	upstream       protocolKind
 	requestedModel string
 	upstreamModel  string
 	stream         bool
@@ -302,7 +302,7 @@ func (svc *Service) convertErrorBody(body []byte, client, upstream protocolKind,
 		}
 	}
 	// OpenAI Chat 上游错误 → Anthropic 客户端
-	if in == protocol.KindAnthropic && (up == protocol.KindOpenAIChat || up == protocol.KindOpenAI) {
+	if in == protocol.KindAnthropic && (up == protocol.KindOpenAIChat || up == protocol.KindOpenAI || up == protocol.KindOpenAIImages) {
 		if out, err := protocol.OpenAIToAnthropicResponse(body, ""); err == nil {
 			return out
 		}

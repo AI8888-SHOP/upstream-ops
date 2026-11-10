@@ -10,6 +10,7 @@ const (
 	KindOpenAI          Kind = "openai"           // Chat Completions（兼容旧值）
 	KindOpenAIChat      Kind = "openai_chat"      // /v1/chat/completions · messages
 	KindOpenAIResponses Kind = "openai_responses" // /v1/responses · input
+	KindOpenAIImages    Kind = "openai_images"    // /v1/images/generations · prompt
 	KindAnthropic       Kind = "anthropic"        // /v1/messages
 	KindAuto            Kind = "auto"
 )
@@ -31,6 +32,8 @@ func NormalizeKind(k Kind) Kind {
 		return KindOpenAIChat
 	case KindOpenAIResponses, "responses":
 		return KindOpenAIResponses
+	case KindOpenAIImages:
+		return KindOpenAIImages
 	case KindAnthropic:
 		return KindAnthropic
 	case KindAuto, "":
@@ -52,6 +55,8 @@ func PathFor(kind Kind, inboundPath string) string {
 		return ip
 	}
 	switch NormalizeKind(kind) {
+	case KindOpenAIImages:
+		return "/v1/images/generations"
 	case KindAnthropic:
 		return "/v1/messages"
 	case KindOpenAIResponses:

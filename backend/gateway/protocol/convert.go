@@ -11,6 +11,9 @@ func ConvertRequest(inbound, upstream Kind, body []byte, model string, stream bo
 	out = body
 
 	switch {
+	case up == KindOpenAIImages:
+		out, err = ImageGenerationRequest(in, out, model)
+		converted = true
 	case IsOpenAIFamily(in) && in != KindOpenAIResponses && up == KindAnthropic:
 		out, err = OpenAIToAnthropicRequest(out, model, stream)
 		converted = true
@@ -47,6 +50,9 @@ func ConvertRequest(inbound, upstream Kind, body []byte, model string, stream bo
 // ConvertResponse 将上游非流式响应转回客户端协议。
 // 失败或无转换器时返回原 body。
 func ConvertResponse(inbound, upstream Kind, body []byte, model string) []byte {
+	if NormalizeKind(upstream) == KindOpenAIImages {
+		return imageGenerationResponse(inbound, body, model, false)
+	}
 	if len(body) == 0 {
 		return body
 	}
@@ -91,6 +97,9 @@ func ConvertStreamResponse(
 	wrapChatAsOpenAISSE func([]byte) []byte,
 	tryExtractJSON func([]byte) []byte,
 ) []byte {
+	if NormalizeKind(upstream) == KindOpenAIImages {
+		return imageGenerationResponse(inbound, body, model, true)
+	}
 	if len(body) == 0 {
 		return body
 	}
