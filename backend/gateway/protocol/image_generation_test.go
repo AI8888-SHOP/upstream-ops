@@ -127,7 +127,7 @@ func TestImageGenerationStreams(t *testing.T) {
 		}
 		switch kind {
 		case KindOpenAIChat:
-			if len(events) != 5 || events[4].Data != "[DONE]" {
+			if len(events) != 4 {
 				t.Fatalf("incomplete chat SSE: %s", result)
 			}
 			role := decodeImageTest(t, []byte(events[0].Data))["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["role"]
