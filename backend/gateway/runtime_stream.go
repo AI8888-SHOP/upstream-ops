@@ -347,7 +347,7 @@ func (rt *Runtime) forwardStreamBuffered(
 	tokens := rt.parseUsageByKind(data, upstream != protocol.KindOpenAIImages, upstream)
 	if upstream == protocol.KindOpenAIImages {
 		if errorBody := imageGenerationResponseError(data); errorBody != nil {
-			return streamAttemptResult{Status: http.StatusBadGateway, Headers: headers, Body: errorBody, FirstTokenMS: ft, Tokens: tokens, StreamCommitted: false}
+			return streamAttemptResult{Status: http.StatusBadGateway, Headers: headers, Body: errorBody, FirstTokenMS: ft, Tokens: tokens, Committed: false}
 		}
 	}
 	if hasExplicitUpstreamError(data) {
