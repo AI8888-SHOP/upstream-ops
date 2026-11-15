@@ -64,7 +64,7 @@ jobs:
       - name: Test PostgreSQL leases, reports and historical repricing
         env:
           UPSTREAM_OPS_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/upstreamops_test?sslmode=disable
-        run: go test -race ./backend/storage -run 'TestCandyCheckPostgres|TestGatewayDailyReportPostgres|TestPriceRepricingPostgres' -count=1
+        run: go test -race ./backend/storage -run 'TestCandyCheckPostgres|TestGatewayDailyReportPostgres|TestPriceRepricingPostgres|TestVideoTaskPostgres' -count=1
 
   go-race:
     name: Go race checks

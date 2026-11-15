@@ -48,6 +48,7 @@ import type {
   GatewayProviderModelsPreview,
   GatewayProviderPage,
   GatewayUpstreamProtocol,
+  GatewayVideoUpstreamMode,
 } from "@/lib/api-types"
 import { cn } from "@/lib/utils"
 
@@ -61,6 +62,7 @@ type ProviderForm = {
   model_policy: GatewayProviderModelPolicy
   allowed_models: string[]
   image_generation_models: string
+  video_upstream_mode: GatewayVideoUpstreamMode
   concurrency_limit: string
   virtual_cache_enabled: boolean
   virtual_cache_models: string[]
@@ -80,6 +82,7 @@ const emptyForm = (): ProviderForm => ({
   model_policy: "all",
   allowed_models: [],
   image_generation_models: "",
+  video_upstream_mode: "passthrough",
   concurrency_limit: "0",
   virtual_cache_enabled: false,
   virtual_cache_models: [],
@@ -158,6 +161,7 @@ export function GatewayProvidersPanel() {
       model_policy: item.model_policy || "all",
       allowed_models: parseAllowedModels(item.allowed_models_json),
       image_generation_models: parseAllowedModels(item.image_generation_models_json).join("\n"),
+      video_upstream_mode: item.video_upstream_mode || "passthrough",
       concurrency_limit: String(item.concurrency_limit ?? 0),
       virtual_cache_enabled: !!item.virtual_cache_enabled,
       virtual_cache_models: parseAllowedModels(item.virtual_cache_models_json),
@@ -239,6 +243,7 @@ export function GatewayProvidersPanel() {
           model_policy: form.model_policy,
           allowed_models_json: JSON.stringify(form.allowed_models),
           image_generation_models_json: imageGenerationModelsJSON,
+          video_upstream_mode: form.video_upstream_mode,
           concurrency_limit: concurrencyLimit,
           virtual_cache_enabled: form.virtual_cache_enabled,
           virtual_cache_models_json: JSON.stringify(form.virtual_cache_models),
@@ -266,6 +271,7 @@ export function GatewayProvidersPanel() {
             model_policy: form.model_policy,
             allowed_models_json: JSON.stringify(form.allowed_models),
             image_generation_models_json: imageGenerationModelsJSON,
+            video_upstream_mode: form.video_upstream_mode,
             concurrency_limit: concurrencyLimit,
             virtual_cache_enabled: form.virtual_cache_enabled,
             virtual_cache_models_json: JSON.stringify(form.virtual_cache_models),
@@ -799,6 +805,25 @@ export function GatewayProvidersPanel() {
                 }
                 placeholder="每行一个映射后的上游模型名；留空关闭"
               />
+            </div>
+            <div className="space-y-2 rounded-lg border border-border px-3 py-3">
+              <Label htmlFor="provider-video-upstream-mode">上游视频接口</Label>
+              <Select
+                value={form.video_upstream_mode}
+                onValueChange={(value) => setForm({ ...form, video_upstream_mode: value as GatewayVideoUpstreamMode })}
+              >
+                <SelectTrigger id="provider-video-upstream-mode">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="passthrough">原协议透传（默认）</SelectItem>
+                  <SelectItem value="videos">POST /v1/videos（Image2Pro 兼容）</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                选择 Image2Pro 兼容后，将 sub2api 的 /v1/videos/generations 转为上游 /v1/videos，
+                创建返回 request_id，查询完成返回 done 和 video.url。仅影响此渠道的视频生成；已有任务保留创建时的格式。
+              </p>
             </div>
             <div className="space-y-3 rounded-lg border border-border px-3 py-3">
               <div className="flex flex-wrap items-center justify-between gap-3">

@@ -184,6 +184,12 @@ curl http://localhost:8418/v1/chat/completions \
 
 网关支持 OpenAI Chat、OpenAI Responses、Anthropic Messages 之间的 JSON 与 SSE 协议转换。图片、视频、Embedding 等接口按相应兼容路径转发，具体功能仍需上游支持；协议转换不意味着所有模型能力完全等价。
 
+视频任务：`POST /v1/videos/generations`、`/edits`、`/extensions` 返回的任务 ID 会绑定到创建时的上游地址和凭据。`GET /v1/videos/{request_id}` 必须使用创建任务的同一把网关密钥；查询固定回原上游，不受路由重排或自动冷却影响。绑定加密存入数据库，查询有效期为 7 天，服务重启不会丢失；原直连渠道被禁用或原渠道被删除时返回不可用，不换到其他站点。升级前创建、过期或不属于当前密钥的任务不会猜测选路。
+
+视频端点跳过零 Token、响应模型和助手正文校验，保留原始报文及错误消息的正则拒绝；普通聊天请求的校验不变。视频任务提交不接受 `stream: true`，收到任务 ID 后通过查询接口获取结果。查询不新增生成用量或按次扣费记录；当前仍未实现视频按秒定价及任务完成后结算。详见[视频任务说明](docs/video-tasks.md)。
+
+直连渠道可将「上游视频接口」设为 `POST /v1/videos（Image2Pro 兼容）`：下游继续使用 sub2api 的 `/v1/videos/generations`，网关转换创建请求，返回 `request_id`；查询结果转换为 `pending / done / failed / expired`，成功时提供 `video.url` 和可获得的时长。视频地址指向绑定原任务的 `/v1/videos/{id}/content`，供 sub2api 下载转发，支持 Range。原生 `POST /v1/videos` 也可透传并绑定任务。默认渠道保持原协议，此选项不改变聊天、图片、视频编辑和续写接口。
+
 ## 调度与故障处理
 
 ### 三种选路策略

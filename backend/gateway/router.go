@@ -38,9 +38,11 @@ func endpointsPayload() gin.H {
 			"POST /images/generations",
 			"POST /images/edits",
 			"POST /v1/videos/generations",
+			"POST /v1/videos",
 			"POST /v1/videos/edits",
 			"POST /v1/videos/extensions",
 			"GET  /v1/videos/:request_id",
+			"GET  /v1/videos/:request_id/content",
 			"POST /v1/alpha/search",
 			// Codex
 			"POST /backend-api/codex/responses",
@@ -153,6 +155,9 @@ func registerAllGatewayRoutes(r *gin.Engine, s *Service) {
 		})
 
 		// Videos
+		v1.POST("/videos", func(c *gin.Context) {
+			s.HandleForward(c, "/v1/videos", protocol.KindOpenAIChat)
+		})
 		v1.POST("/videos/generations", func(c *gin.Context) {
 			s.HandleForward(c, "/v1/videos/generations", protocol.KindOpenAIChat)
 		})
@@ -164,6 +169,9 @@ func registerAllGatewayRoutes(r *gin.Engine, s *Service) {
 		})
 		v1.GET("/videos/:request_id", func(c *gin.Context) {
 			s.HandleForward(c, "/v1/videos/"+c.Param("request_id"), protocol.KindOpenAIChat)
+		})
+		v1.GET("/videos/:request_id/content", func(c *gin.Context) {
+			s.HandleForward(c, "/v1/videos/"+c.Param("request_id")+"/content", protocol.KindOpenAIChat)
 		})
 
 		// Alpha Search
@@ -195,6 +203,9 @@ func registerAllGatewayRoutes(r *gin.Engine, s *Service) {
 	r.POST("/images/edits", func(c *gin.Context) {
 		s.HandleForward(c, "/v1/images/edits", protocol.KindOpenAIChat)
 	})
+	r.POST("/videos", func(c *gin.Context) {
+		s.HandleForward(c, "/v1/videos", protocol.KindOpenAIChat)
+	})
 	r.POST("/videos/generations", func(c *gin.Context) {
 		s.HandleForward(c, "/v1/videos/generations", protocol.KindOpenAIChat)
 	})
@@ -206,6 +217,9 @@ func registerAllGatewayRoutes(r *gin.Engine, s *Service) {
 	})
 	r.GET("/videos/:request_id", func(c *gin.Context) {
 		s.HandleForward(c, "/v1/videos/"+c.Param("request_id"), protocol.KindOpenAIChat)
+	})
+	r.GET("/videos/:request_id/content", func(c *gin.Context) {
+		s.HandleForward(c, "/v1/videos/"+c.Param("request_id")+"/content", protocol.KindOpenAIChat)
 	})
 
 	// ---------- Codex ----------

@@ -57,6 +57,10 @@ func (a *AdminService) CreateProvider(in CreateProviderInput) (*storage.GatewayP
 	if err != nil {
 		return nil, err
 	}
+	videoMode, err := normalizeVideoUpstreamMode(in.VideoUpstreamMode)
+	if err != nil {
+		return nil, err
+	}
 	virtualCacheModelsJSON, err := NormalizeProviderVirtualCacheModelsJSON(in.VirtualCacheModelsJSON)
 	if err != nil {
 		return nil, err
@@ -93,6 +97,7 @@ func (a *AdminService) CreateProvider(in CreateProviderInput) (*storage.GatewayP
 		ModelPolicy:               modelPolicy,
 		AllowedModelsJSON:         allowedModelsJSON,
 		ImageGenerationModelsJSON: imageGenerationModelsJSON,
+		VideoUpstreamMode:         videoMode,
 		ConcurrencyLimit:          normalizeProviderConcurrencyLimit(in.ConcurrencyLimit),
 		VirtualCacheEnabled:       in.VirtualCacheEnabled != nil && *in.VirtualCacheEnabled,
 		VirtualCacheModelsJSON:    virtualCacheModelsJSON,
@@ -176,6 +181,13 @@ func (a *AdminService) UpdateProvider(id uint, in UpdateProviderInput) (*storage
 	}
 	if in.ConcurrencyLimit != nil {
 		item.ConcurrencyLimit = normalizeProviderConcurrencyLimit(*in.ConcurrencyLimit)
+	}
+	if in.VideoUpstreamMode != nil {
+		mode, err := normalizeVideoUpstreamMode(*in.VideoUpstreamMode)
+		if err != nil {
+			return nil, err
+		}
+		item.VideoUpstreamMode = mode
 	}
 	if in.VirtualCacheEnabled != nil {
 		item.VirtualCacheEnabled = *in.VirtualCacheEnabled
@@ -266,7 +278,7 @@ func (a *AdminService) PreviewProviderModels(ctx context.Context, id uint) (*Pro
 		return nil, err
 	}
 	return &ProviderModelsPreview{
-		ProviderID:     provider.ID,
+		ProviderID:    provider.ID,
 		ModelPolicy:   policy,
 		Available:     available,
 		AllowedModels: allowed,

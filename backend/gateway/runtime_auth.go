@@ -3,6 +3,7 @@ package gateway
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/bejix/upstream-ops/backend/storage"
@@ -30,7 +31,11 @@ func (rt *Runtime) Authenticate(c *gin.Context) (*AuthResult, error) {
 	if err := rt.checkIPAccess(c.ClientIP(), key.IPWhitelistJSON, key.IPBlacklistJSON); err != nil {
 		return nil, err
 	}
-	if key.Quota > 0 && key.QuotaUsed >= key.Quota {
+	// Reading an already accepted video must remain possible after its
+	// creation uses the last credit. Ownership is checked against the task
+	// binding before any upstream call; disabled keys/groups remain blocked.
+	videoLookup := c.Request.Method == http.MethodGet && videoTaskLookupID(c.Request.URL.Path) != ""
+	if key.Quota > 0 && key.QuotaUsed >= key.Quota && !videoLookup {
 		return nil, errors.New("api key quota exceeded")
 	}
 	group, err := rt.Groups.FindByID(key.GroupID)

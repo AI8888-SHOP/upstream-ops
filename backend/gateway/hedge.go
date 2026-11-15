@@ -87,14 +87,14 @@ func (p hedgePolicy) normalized() hedgePolicy {
 }
 
 type hedgeRequest struct {
-	Path                    string
-	Model                   string
-	Header                  http.Header
-	Body                    []byte
-	Stream                  bool
-	Realtime                bool
-	BodyMediaAnalyzed       bool
-	BodyGeneratesMedia      bool
+	Path               string
+	Model              string
+	Header             http.Header
+	Body               []byte
+	Stream             bool
+	Realtime           bool
+	BodyMediaAnalyzed  bool
+	BodyGeneratesMedia bool
 }
 
 // hedgeEligible excludes operations that can create image/video assets and
@@ -105,6 +105,9 @@ func hedgeEligible(req hedgeRequest) bool {
 		return false
 	}
 	path := strings.ToLower(strings.TrimSpace(req.Path))
+	if isVideoEndpoint(path) {
+		return false
+	}
 	for _, marker := range []string{
 		"/images/generations", "/images/edits", "/images/batches",
 		"/videos/generations", "/videos/edits", "/videos/extensions", "/realtime",

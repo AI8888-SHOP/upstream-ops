@@ -45,6 +45,24 @@ func (rt *Runtime) responseValidatorForGroup(group *storage.GatewayGroup) (*resp
 	return validator, nil
 }
 
+// Video task envelopes have neither assistant text nor required token usage
+// or response-model declarations. Keep explicit raw/error rejection rules,
+// without mutating the cached validator shared by concurrent text requests.
+func (v *responseValidator) forEndpoint(path string) *responseValidator {
+	if v == nil || !isVideoEndpoint(path) {
+		return v
+	}
+	copy := *v
+	copy.rules = make([]compiledResponseRule, 0, len(v.rules))
+	for _, rule := range v.rules {
+		if rule.Target == "raw_body" || rule.Target == "error_message" {
+			copy.rules = append(copy.rules, rule)
+		}
+	}
+	copy.prefilters = buildResponseRulePrefilters(copy.rules)
+	return &copy
+}
+
 func decodeResponseRuleSelectors(raw string) ([]string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" {

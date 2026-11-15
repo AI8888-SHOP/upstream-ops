@@ -94,6 +94,7 @@ var gatewayMigrationModels = []migrationModelSpec{
 	{table: "gateway_groups", model: &GatewayGroup{}},
 	{table: "gateway_keys", model: &GatewayKey{}},
 	{table: "gateway_routes", model: &GatewayRoute{}},
+	{table: "gateway_video_task_bindings", model: &GatewayVideoTaskBinding{}},
 	{table: "gateway_route_candy_checks", model: &GatewayRouteCandyCheck{}},
 	{table: "gateway_candy_check_events", model: &GatewayCandyCheckEvent{}},
 	{table: "gateway_candy_check_shared_results", model: &GatewayCandyCheckSharedResult{}},

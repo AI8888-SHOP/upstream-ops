@@ -208,6 +208,7 @@ type CreateProviderInput struct {
 	ModelPolicy               string  `json:"model_policy"`
 	AllowedModelsJSON         string  `json:"allowed_models_json"`
 	ImageGenerationModelsJSON string  `json:"image_generation_models_json"`
+	VideoUpstreamMode         string  `json:"video_upstream_mode"`
 	ConcurrencyLimit          int     `json:"concurrency_limit"`
 	VirtualCacheEnabled       *bool   `json:"virtual_cache_enabled"`
 	VirtualCacheModelsJSON    string  `json:"virtual_cache_models_json"`
@@ -229,6 +230,7 @@ type UpdateProviderInput struct {
 	ModelPolicy               *string  `json:"model_policy"`
 	AllowedModelsJSON         *string  `json:"allowed_models_json"`
 	ImageGenerationModelsJSON *string  `json:"image_generation_models_json"`
+	VideoUpstreamMode         *string  `json:"video_upstream_mode"`
 	ConcurrencyLimit          *int     `json:"concurrency_limit"`
 	VirtualCacheEnabled       *bool    `json:"virtual_cache_enabled"`
 	VirtualCacheModelsJSON    *string  `json:"virtual_cache_models_json"`

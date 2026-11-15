@@ -227,6 +227,7 @@ type coordinatedForwardAttempt struct {
 	UpstreamPath  string
 	UpstreamURL   string
 	Converted     bool
+	VideoAdapted  bool
 	ForwardBody   []byte
 	UsageMeta     usageRecordMeta
 
@@ -764,6 +765,11 @@ func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, att
 		rt.Service, req.body, req.kind, attempt.UpstreamKind,
 		req.requestedModel, attempt.UpstreamModel, req.stream, req.path,
 	)
+	if err == nil {
+		attempt.ForwardBody, attempt.UpstreamPath, attempt.VideoAdapted, err = prepareVideoUpstreamRequest(
+			target, req.path, attempt.ForwardBody, attempt.UpstreamPath,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("protocol convert failed: %w", err)
 	}
@@ -773,7 +779,7 @@ func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, att
 		SchedulerObservation: rt.newSchedulerObservation(attempt.Plan.Candidate, attempt.StartedAt, target),
 		InboundEndpoint:      req.path, UpstreamEndpoint: attempt.UpstreamPath,
 		InboundProtocol: string(req.kind), UpstreamProtocol: string(attempt.UpstreamKind),
-		ProtocolConverted: attempt.Converted, ServiceTier: req.serviceTier,
+		ProtocolConverted: attempt.Converted || attempt.VideoAdapted, ServiceTier: req.serviceTier,
 		ReasoningEffort: reasoningEffort, UpstreamURL: attempt.UpstreamURL,
 	}
 	return nil
@@ -826,6 +832,22 @@ func (rt *Runtime) runCoordinatedNonStreamAttempt(ctx context.Context, req *coor
 	if attempt.Status >= 400 {
 		attempt.Terminal = true
 		attempt.ErrInfo = rt.buildUpstreamErrorInfoCfg(rt.gatewayRuntime(), nil, attempt.Status, attempt.Headers, attempt.UpstreamBody, attempt.UpstreamURL, req.c.Request.Method)
+	}
+	videoBody, videoErr := videoCreateClientBody(attempt.Target, req.path, attempt.UpstreamBody)
+	if videoErr == nil {
+		videoErr = rt.bindVideoTask(ctx, req.path, attempt.Status, attempt.UpstreamBody, req.key, req.group, &attempt.Route,
+			attempt.Target, attempt.UpstreamKind, req.requestedModel, attempt.ForwardBody)
+	}
+	if videoErr != nil {
+		attempt.Terminal = true
+		attempt.Err = fmt.Errorf("%w: %v", errVideoTaskBinding, videoErr)
+		attempt.ErrInfo = videoBindingErrorInfo(videoErr)
+		return attempt, stopHedgeAttempts(attempt.Err)
+	}
+	if attempt.VideoAdapted {
+		attempt.ClientBody = videoBody
+		taskID, _ := videoTaskIDFromResponse(attempt.UpstreamBody)
+		attempt.Headers = adaptedVideoHeaders(attempt.Headers, taskID)
 	}
 	return attempt, nil
 }
@@ -1169,6 +1191,7 @@ func coordinatedRetrySuppressed(suppressedRoutes *sync.Map, plan coordinatedRout
 
 func coordinatedRequestFailureIsSourceSpecific(attempt *coordinatedForwardAttempt, validation validationResult, status int, attemptErr error, terminal bool) bool {
 	if attempt == nil || attempt.Skipped || errors.Is(attemptErr, context.Canceled) ||
+		errors.Is(attemptErr, errVideoTaskBinding) ||
 		errors.Is(attemptErr, errClientDisconnected) || errors.Is(attemptErr, errUpstreamQueueTimeout) ||
 		errors.Is(attemptErr, errRequestFirstTokenBudget) {
 		return false
@@ -1200,6 +1223,9 @@ func (rt *Runtime) publishCoordinatedFailure(req *coordinatedForwardRequest, att
 		return
 	}
 	validation, status, attemptErr, terminal, errInfo := attempt.retryFailureSnapshot()
+	if errors.Is(attemptErr, errVideoTaskBinding) {
+		return
+	}
 	adapterFailure := isPreconnectIntegrityFailure(errInfo.Summary) ||
 		(attemptErr != nil && isPreconnectIntegrityFailure(attemptErr.Error()))
 	// Only our own adapter's recorded protocol error may override a canceled
@@ -1867,6 +1893,10 @@ func (rt *Runtime) writeCoordinatedFailure(req *coordinatedForwardRequest, resul
 			finalValidation = attempt.Validation
 		}
 		break
+	}
+	if errors.Is(finalErr, errVideoTaskBinding) {
+		rt.writeGatewayError(req.c, req.kind, http.StatusServiceUnavailable, "api_error", "accepted video task could not be bound; submission was not retried")
+		return
 	}
 	if errors.Is(finalErr, errFirstTokenTimeout) {
 		rt.writeGatewayError(req.c, req.kind, http.StatusGatewayTimeout, "request_timeout", errFirstTokenTimeout.Error())

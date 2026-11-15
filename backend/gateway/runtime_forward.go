@@ -27,6 +27,14 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	key, group := auth.Key, auth.Group
+	if isVideoEndpoint(path) && c.Request.Method == http.MethodGet {
+		rt.handleVideoTaskLookup(c, path, key, group)
+		return
+	}
+	if isVideoTaskCreate(path) && (rt.Routes == nil || rt.Cipher == nil) {
+		rt.writeGatewayError(c, kind, http.StatusServiceUnavailable, "api_error", "video task binding is not configured")
+		return
+	}
 
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -47,6 +55,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	}
 	requestInfo := analyzeRequestBody(body)
 	requestedModel, stream := requestInfo.Model, requestInfo.Stream
+	if isVideoTaskCreate(path) && stream {
+		rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", "video task submission is asynchronous; omit stream or set it to false")
+		return
+	}
 	formModel := ""
 	if requestedModel == "" {
 		// 图片编辑等 multipart 请求没有 JSON 体，模型名在表单字段里。
@@ -108,6 +120,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		rt.writeGatewayError(c, kind, http.StatusInternalServerError, "api_error", validationErr.Error())
 		return
 	}
+	validator = validator.forEndpoint(path)
 	useCoordinator, hedgeActive, virtualCacheEligible := rt.shouldUseCoordinatedForward(group, validator, hedgeRequest{
 		Path: path, Model: requestedModel, Header: c.Request.Header, Body: body, Stream: stream,
 		Realtime:          strings.Contains(strings.ToLower(path), "realtime"),
@@ -312,6 +325,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			fwdBody, upstreamPath, converted, convErr := prepareCache.prepare(
 				rt.Service, body, kind, upstreamKind, requestedModel, upstreamModel, stream, path,
 			)
+			videoAdapted := false
+			if convErr == nil {
+				fwdBody, upstreamPath, videoAdapted, convErr = prepareVideoUpstreamRequest(target, path, fwdBody, upstreamPath)
+			}
 			if convErr != nil {
 				message := "protocol convert failed: " + convErr.Error()
 				errInfo := usageErrorInfo{
@@ -336,7 +353,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				UpstreamEndpoint:   upstreamPath,
 				InboundProtocol:    string(kind),
 				UpstreamProtocol:   string(upstreamKind),
-				ProtocolConverted:  converted,
+				ProtocolConverted:  converted || videoAdapted,
 				ServiceTier:        serviceTier,
 				ReasoningEffort:    attemptReasoningEffort,
 				UpstreamURL:        upstreamFullURL,
@@ -669,8 +686,24 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			}
 
 			// 非流式成功：整包转换后写出
+			videoBody, videoErr := videoCreateClientBody(target, path, respBody)
+			if videoErr == nil {
+				videoErr = rt.bindVideoTask(c.Request.Context(), path, status, respBody, key, group, &route, target, upstreamKind, requestedModel, fwdBody)
+			}
+			if videoErr != nil {
+				rt.recordUsage(key, group, &route, target, reqID, requestedModel, upstreamModel, chain, UsageTokens{}, cand.EffectiveRate, cand.BillingRate,
+					false, status, false, videoBindingErrorInfo(videoErr), duration, firstTokenMS, c, usageMeta)
+				rt.finalizeUsageFailure(reqID, key)
+				rt.writeGatewayError(c, kind, http.StatusServiceUnavailable, "api_error", "accepted video task could not be bound; submission was not retried")
+				return
+			}
 			tokens := rt.parseUsageByKind(respBody, false, upstreamKind)
 			clientBody := rt.convertUpstreamResponse(respBody, kind, upstreamKind, upstreamModel, false, converted)
+			if videoAdapted {
+				clientBody = videoBody
+				taskID, _ := videoTaskIDFromResponse(respBody)
+				respHeaders = adaptedVideoHeaders(respHeaders, taskID)
+			}
 			if converted && rt.Log != nil && len(clientBody) == 0 && len(respBody) > 0 {
 				rt.Log.Warn("response convert produced empty body")
 			}

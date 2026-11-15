@@ -811,6 +811,7 @@ export interface GatewayKeyCreateResult {
 export type GatewayRouteSourceKind = "monitor" | "provider"
 
 export type GatewayProviderModelPolicy = "all" | "allowlist"
+export type GatewayVideoUpstreamMode = "passthrough" | "videos"
 
 export interface GatewayProvider {
   id: number
@@ -821,6 +822,7 @@ export interface GatewayProvider {
   model_policy?: GatewayProviderModelPolicy
   allowed_models_json?: string
   image_generation_models_json?: string
+  video_upstream_mode?: GatewayVideoUpstreamMode
   concurrency_limit?: number
   virtual_cache_enabled?: boolean
   virtual_cache_models_json?: string

@@ -67,6 +67,13 @@ func (rt *Runtime) buildUpstreamHTTPRequest(
 	}
 	// 请求相关 ID 原样转发上游；网关只在响应侧写 X-Upstream-Ops-Request-Id
 	rt.copyClientRequestIDHeaders(req.Header, inHeader)
+	if isVideoEndpoint(path) {
+		for _, header := range []string{"Idempotency-Key", "X-Xiaojuzi-Media-Contract"} {
+			if value := inHeader.Get(header); value != "" {
+				req.Header.Set(header, value)
+			}
+		}
+	}
 	if upKind == protocol.KindAnthropic {
 		if v := inHeader.Get("anthropic-version"); v != "" {
 			req.Header.Set("anthropic-version", v)
