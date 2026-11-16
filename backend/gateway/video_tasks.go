@@ -233,13 +233,14 @@ func (rt *Runtime) handleVideoTaskLookup(c *gin.Context, path string, key *stora
 		return
 	}
 	contentRequest := strings.HasSuffix(path, "/"+taskID+"/content")
-	if contentRequest && snapshot.ResponseFormat != videoResponseGrok {
-		rt.writeGatewayError(c, protocol.KindOpenAIChat, http.StatusNotFound, "not_found_error", "video content relay is unavailable for this task")
-		return
-	}
 	target, err := rt.boundVideoTarget(snapshot)
 	if err != nil {
 		rt.writeGatewayError(c, protocol.KindOpenAIChat, http.StatusServiceUnavailable, "api_error", "original video upstream is unavailable")
+		return
+	}
+	if contentRequest && snapshot.ResponseFormat != videoResponseGrok {
+		_ = rt.Keys.TouchLastUsed(key.ID, time.Now())
+		rt.serveNativeVideoContent(c, target, taskID, snapshot.UpstreamKind)
 		return
 	}
 	validator, err := rt.responseValidatorForGroup(group)

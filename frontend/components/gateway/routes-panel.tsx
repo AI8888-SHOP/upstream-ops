@@ -30,6 +30,7 @@ import {
 import { formatRatio } from "@/lib/format"
 import { RouteModelsSelect, routeModelSourceKey } from "./route-models-select"
 import { RouteCandyCheckStatus } from "./route-candy-check-status"
+import { ApplyComparisonStrategy } from "./apply-comparison-strategy"
 import type {
   GatewayProviderOption,
   GatewayRateConvertMode,
@@ -283,6 +284,8 @@ export function RoutesPanel({
         </Button>
       </div>
       <div className="flex-1" />
+      <ApplyComparisonStrategy key={groupID} disabled={busy} setRoutes={setRouteDrafts} loadGroups={onLoadSourceGroups} />
+      {routeDrafts.some((route) => (route.priority ?? 0) > 0) && <Button size="sm" variant="outline" disabled={busy} onClick={() => setRouteDrafts((prev) => prev.map((route) => ({ ...route, priority: 0 })))}>清除比价优先级</Button>}
       <Button
         size="sm"
         variant="outline"
@@ -310,7 +313,7 @@ export function RoutesPanel({
       </Button>
     </div>
     <p className="text-[11px] leading-5 text-muted-foreground">
-      列表顺序 = 尝试顺序：按账号计费倍率
+      优先采用比价优先级（数值越小越先；0 表示自动，排在指定优先级之后），同优先级保留速度和缓存调度；并发打满时让位，恢复探测与备用路由规则不变，限价仍生效。未设置优先级时按账号计费倍率
       {rateSort === "desc" ? "从高到低" : "从低到高"}
       排列；同倍率时权重大优先。
       {rateResortEnabled
@@ -329,6 +332,7 @@ export function RoutesPanel({
             <TableHead>上游协议</TableHead>
             <TableHead>User-Agent</TableHead>
             <TableHead>权重</TableHead>
+            <TableHead>比价优先级</TableHead>
             <TableHead className="min-w-28">倍率换算</TableHead>
             <TableHead className="min-w-32">账号计费倍率</TableHead>
             <TableHead>启用</TableHead>
@@ -656,6 +660,12 @@ export function RoutesPanel({
                   />
                 </TableCell>
                 <TableCell>
+                  <Input className="w-24" type="number" min={0} max={1000000} step={1} aria-label="比价优先级"
+                    title="数值越小越先；0 表示自动，排在指定优先级之后"
+                    value={r.priority ?? 0}
+                    onChange={(e) => setRouteDrafts((prev) => prev.map((route, i) => i === idx ? { ...route, priority: Math.max(0, Math.min(1000000, Math.trunc(Number(e.target.value) || 0))) } : route))} />
+                </TableCell>
+                <TableCell>
                   <Select
                     value={(r.rate_convert_mode as string) || "raw"}
                     onValueChange={(v) => {
@@ -901,7 +911,7 @@ export function RoutesPanel({
           })}
           {routeDrafts.length === 0 && (
             <TableRow>
-              <TableCell colSpan={11} className="text-center text-muted-foreground">
+              <TableCell colSpan={13} className="text-center text-muted-foreground">
                 添加路由后保存。监控渠道需「确保上游密钥」；直连渠道使用已配置的 Key
               </TableCell>
             </TableRow>

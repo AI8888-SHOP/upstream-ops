@@ -158,6 +158,9 @@ func IsRouteSchedulableForModel(route *storage.GatewayRoute, model string, now t
 // direction: asc 低倍率优先；desc 高倍率优先。
 // 同倍率：权重大优先；再比 position；再比 id。
 func routeRateLess(a, b storage.GatewayRoute, rateA, rateB float64, desc bool) bool {
+	if a.Priority != b.Priority {
+		return routePriorityLess(a.Priority, b.Priority)
+	}
 	finiteA := !math.IsNaN(rateA) && !math.IsInf(rateA, 0)
 	finiteB := !math.IsNaN(rateB) && !math.IsInf(rateB, 0)
 	if finiteA != finiteB {
@@ -208,7 +211,7 @@ func OrderRoutesByRate(routes []storage.GatewayRoute, groupsByChannel map[uint][
 	}
 	desc := strings.EqualFold(strings.TrimSpace(direction), "desc")
 	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].rate != items[j].rate || items[i].route.Weight != items[j].route.Weight ||
+		if items[i].route.Priority != items[j].route.Priority || items[i].rate != items[j].rate || items[i].route.Weight != items[j].route.Weight ||
 			items[i].route.Position != items[j].route.Position {
 			return routeRateLess(items[i].route, items[j].route, items[i].rate, items[j].rate, desc)
 		}

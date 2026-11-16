@@ -225,6 +225,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&AuthSession{},
 		&CaptchaConfig{},
 		&RateSnapshot{},
+		&PriceComparisonConfig{},
+		&PriceComparisonStrategy{},
 		&RateChangeLog{},
 		&UpstreamAnnouncement{},
 		&BalanceSnapshot{},

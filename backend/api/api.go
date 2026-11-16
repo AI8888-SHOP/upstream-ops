@@ -115,6 +115,7 @@ func Register(r *gin.Engine, d *Deps) {
 		registerUpdates(api, d)
 		registerAuth(api, d)
 		registerChannels(api, d)
+		registerPriceComparison(api, d)
 		registerCaptchas(api, d)
 		registerNotifications(api, d)
 		registerAnnouncements(api, d)

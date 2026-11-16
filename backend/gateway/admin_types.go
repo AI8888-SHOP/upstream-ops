@@ -253,6 +253,7 @@ type ProviderModelsPreview struct {
 
 // RouteInput 保存路由时的单条输入。
 type RouteInput struct {
+	Priority                    int     `json:"priority"`
 	FallbackOnly                bool    `json:"fallback_only"`
 	FirstTokenCooldownExempt    bool    `json:"first_token_cooldown_exempt"`
 	ID                          uint    `json:"id"`

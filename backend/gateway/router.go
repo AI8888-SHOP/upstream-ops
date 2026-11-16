@@ -43,6 +43,8 @@ func endpointsPayload() gin.H {
 			"POST /v1/videos/extensions",
 			"GET  /v1/videos/:request_id",
 			"GET  /v1/videos/:request_id/content",
+			"HEAD /v1/videos/:request_id/content",
+			"POST /v1/media",
 			"POST /v1/alpha/search",
 			// Codex
 			"POST /backend-api/codex/responses",
@@ -155,6 +157,9 @@ func registerAllGatewayRoutes(r *gin.Engine, s *Service) {
 		})
 
 		// Videos
+		v1.POST("/media", func(c *gin.Context) {
+			s.HandleForward(c, "/v1/media", protocol.KindOpenAIChat)
+		})
 		v1.POST("/videos", func(c *gin.Context) {
 			s.HandleForward(c, "/v1/videos", protocol.KindOpenAIChat)
 		})
@@ -171,6 +176,9 @@ func registerAllGatewayRoutes(r *gin.Engine, s *Service) {
 			s.HandleForward(c, "/v1/videos/"+c.Param("request_id"), protocol.KindOpenAIChat)
 		})
 		v1.GET("/videos/:request_id/content", func(c *gin.Context) {
+			s.HandleForward(c, "/v1/videos/"+c.Param("request_id")+"/content", protocol.KindOpenAIChat)
+		})
+		v1.HEAD("/videos/:request_id/content", func(c *gin.Context) {
 			s.HandleForward(c, "/v1/videos/"+c.Param("request_id")+"/content", protocol.KindOpenAIChat)
 		})
 
@@ -206,6 +214,9 @@ func registerAllGatewayRoutes(r *gin.Engine, s *Service) {
 	r.POST("/videos", func(c *gin.Context) {
 		s.HandleForward(c, "/v1/videos", protocol.KindOpenAIChat)
 	})
+	r.POST("/media", func(c *gin.Context) {
+		s.HandleForward(c, "/v1/media", protocol.KindOpenAIChat)
+	})
 	r.POST("/videos/generations", func(c *gin.Context) {
 		s.HandleForward(c, "/v1/videos/generations", protocol.KindOpenAIChat)
 	})
@@ -219,6 +230,9 @@ func registerAllGatewayRoutes(r *gin.Engine, s *Service) {
 		s.HandleForward(c, "/v1/videos/"+c.Param("request_id"), protocol.KindOpenAIChat)
 	})
 	r.GET("/videos/:request_id/content", func(c *gin.Context) {
+		s.HandleForward(c, "/v1/videos/"+c.Param("request_id")+"/content", protocol.KindOpenAIChat)
+	})
+	r.HEAD("/videos/:request_id/content", func(c *gin.Context) {
 		s.HandleForward(c, "/v1/videos/"+c.Param("request_id")+"/content", protocol.KindOpenAIChat)
 	})
 

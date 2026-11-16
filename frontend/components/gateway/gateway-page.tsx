@@ -1449,6 +1449,7 @@ export function GatewayPage() {
               : "passthrough"
           return {
             id: r.id,
+            priority: r.priority ?? 0,
             source_kind: "provider",
             source_channel_id: 0,
             gateway_provider_id: pid,
@@ -1481,6 +1482,7 @@ export function GatewayPage() {
             : "passthrough"
         return {
           id: r.id,
+          priority: r.priority ?? 0,
           source_kind: "monitor",
           source_channel_id: r.source_channel_id,
           gateway_provider_id: 0,

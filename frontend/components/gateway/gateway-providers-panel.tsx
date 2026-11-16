@@ -823,6 +823,7 @@ export function GatewayProvidersPanel() {
               <p className="text-[11px] text-muted-foreground">
                 选择 Image2Pro 兼容后，将 sub2api 的 /v1/videos/generations 转为上游 /v1/videos，
                 创建返回 request_id，查询完成返回 done 和 video.url。仅影响此渠道的视频生成；已有任务保留创建时的格式。
+                v6k 原生接口请选择原协议透传，直接调用 /v1/videos；支持任务查询、鉴权下载及 /v1/media 素材上传。
               </p>
             </div>
             <div className="space-y-3 rounded-lg border border-border px-3 py-3">

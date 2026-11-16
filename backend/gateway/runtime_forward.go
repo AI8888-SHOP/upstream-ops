@@ -27,8 +27,12 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	key, group := auth.Key, auth.Group
-	if isVideoEndpoint(path) && c.Request.Method == http.MethodGet {
+	if isVideoEndpoint(path) && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
 		rt.handleVideoTaskLookup(c, path, key, group)
+		return
+	}
+	if path == "/v1/media" || path == "/media" {
+		rt.handleVideoMediaUpload(c, key, group)
 		return
 	}
 	if isVideoTaskCreate(path) && (rt.Routes == nil || rt.Cipher == nil) {
@@ -36,9 +40,17 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 
+	if isVideoTaskCreate(path) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, videoRequestBodyLimit)
+	}
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		rt.finalizeUsageFailure(reqID, key)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			rt.writeGatewayError(c, kind, http.StatusRequestEntityTooLarge, "invalid_request_error", "video request exceeds 256 MiB")
+			return
+		}
 		rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", "failed to read body")
 		return
 	}
@@ -55,6 +67,18 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	}
 	requestInfo := analyzeRequestBody(body)
 	requestedModel, stream := requestInfo.Model, requestInfo.Stream
+	if isVideoTaskCreate(path) {
+		form, formErr := videoFormFields(c.GetHeader("Content-Type"), body)
+		if formErr != nil {
+			rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", formErr.Error())
+			return
+		}
+		if form != nil {
+			requestedModel = strings.TrimSpace(form.Get("model"))
+			streamValue := strings.TrimSpace(form.Get("stream"))
+			stream = strings.EqualFold(streamValue, "true") || streamValue == "1"
+		}
+	}
 	if isVideoTaskCreate(path) && stream {
 		rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", "video task submission is asynchronous; omit stream or set it to false")
 		return
@@ -91,7 +115,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		return
 	}
 	if strings.TrimSpace(requestedModel) != "" && len(filteredRoutes) == 0 {
-		if formModel != "" {
+		if formModel != "" && !isVideoTaskCreate(path) {
 			// 图片等 multipart 接口以前看不到模型、从不按模型过滤。表单里的模型
 			// 只用于定价与统计，不能因为路由白名单没列它就把请求拒掉。
 			filteredRoutes = routes
@@ -207,6 +231,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		candidates := rt.sortRoutesWithAffinity(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude, &affinity, requestedModel)
 		candidates = rt.orderAdaptiveCandidates(candidates, adaptive, &affinity, routesTried == 0, time.Now())
 		candidates = rt.applyCacheHitRatePriority(candidates, group, affinity.PreferredRouteID)
+		candidates = rt.orderExplicitRoutePriorities(candidates, affinity.RecoveryRouteID)
 		candidates = rt.filterPreviouslyFailedRequestRoutes(candidates, &affinity)
 		if len(candidates) == 0 {
 			if routesTried == 0 {
@@ -325,6 +350,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			fwdBody, upstreamPath, converted, convErr := prepareCache.prepare(
 				rt.Service, body, kind, upstreamKind, requestedModel, upstreamModel, stream, path,
 			)
+			if convErr == nil && isVideoTaskCreate(path) {
+				fwdBody, convErr = rewriteVideoFormModel(c.GetHeader("Content-Type"), fwdBody, upstreamModel)
+			}
 			videoAdapted := false
 			if convErr == nil {
 				fwdBody, upstreamPath, videoAdapted, convErr = prepareVideoUpstreamRequest(target, path, fwdBody, upstreamPath)

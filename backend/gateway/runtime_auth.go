@@ -34,7 +34,7 @@ func (rt *Runtime) Authenticate(c *gin.Context) (*AuthResult, error) {
 	// Reading an already accepted video must remain possible after its
 	// creation uses the last credit. Ownership is checked against the task
 	// binding before any upstream call; disabled keys/groups remain blocked.
-	videoLookup := c.Request.Method == http.MethodGet && videoTaskLookupID(c.Request.URL.Path) != ""
+	videoLookup := (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) && videoTaskLookupID(c.Request.URL.Path) != ""
 	if key.Quota > 0 && key.QuotaUsed >= key.Quota && !videoLookup {
 		return nil, errors.New("api key quota exceeded")
 	}

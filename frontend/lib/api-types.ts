@@ -921,6 +921,7 @@ export interface GatewayRouteModelCooldown {
 }
 
 export interface GatewayRoute {
+  priority?: number
   fallback_only?: boolean
   /** 首字超时冷却白名单：勾选后该渠道不因首字超时进入冷却 */
   first_token_cooldown_exempt?: boolean

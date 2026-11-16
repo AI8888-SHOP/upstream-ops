@@ -61,6 +61,7 @@ import { cn } from "@/lib/utils"
 import { syncAllChannelsStream, syncChannelStream, testLoginStream, type ProgressEvent } from "@/lib/sync-stream"
 import type { Channel, ChannelRedeemResult, RateSnapshot } from "@/lib/api-types"
 import { ChannelFormDialog } from "@/components/monitor/channel-form-dialog"
+import { PriceComparisonDialog } from "@/components/monitor/price-comparison-dialog"
 import { ChannelRedeemDialog } from "@/components/monitor/channel-redeem-dialog"
 import { ChannelRechargeDialog } from "@/components/monitor/channel-recharge-dialog"
 import {
@@ -881,6 +882,7 @@ export function ChannelCards() {
             </Button>
           ) : null}
         </div>
+        <PriceComparisonDialog search={searchInput} />
         {search ? <p role="status" className="text-xs text-muted-foreground">{channelPage ? `找到 ${totalChannels} 个匹配渠道` : "正在搜索分组…"}</p> : null}
       </div>
 

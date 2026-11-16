@@ -60,7 +60,7 @@ func (rt *Runtime) serveVideoTaskContent(c *gin.Context, target *upstreamTarget,
 	defer release()
 	client := newVideoContentClient()
 	defer client.CloseIdleConnections()
-	if err := streamVideoContent(ctx, c.Writer, client, task.Video.URL, c.GetHeader("Range")); err != nil && !c.Writer.Written() {
+	if err := streamVideoContentMethod(ctx, c.Writer, client, task.Video.URL, c.Request.Method, c.GetHeader("Range"), c.GetHeader("If-Range")); err != nil && !c.Writer.Written() {
 		for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Content-Disposition", "ETag", "Last-Modified"} {
 			c.Writer.Header().Del(header)
 		}
@@ -168,21 +168,32 @@ func newVideoContentClient() *http.Client {
 }
 
 func streamVideoContent(ctx context.Context, dst http.ResponseWriter, client *http.Client, rawURL, byteRange string) error {
+	return streamVideoContentMethod(ctx, dst, client, rawURL, http.MethodGet, byteRange, "")
+}
+
+func streamVideoContentMethod(ctx context.Context, dst http.ResponseWriter, client *http.Client, rawURL, method, byteRange, ifRange string) error {
 	if _, err := validateVideoContentURL(rawURL); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 	if err != nil {
 		return err
 	}
 	if byteRange != "" {
 		req.Header.Set("Range", byteRange)
+		if ifRange != "" {
+			req.Header.Set("If-Range", ifRange)
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	return copyVideoContentResponse(dst, resp, method)
+}
+
+func copyVideoContentResponse(dst http.ResponseWriter, resp *http.Response, method string) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
 		return errors.New("video content upstream failed")
 	}
@@ -202,11 +213,92 @@ func streamVideoContent(ctx context.Context, dst http.ResponseWriter, client *ht
 		dst.Header().Set("Content-Type", "application/octet-stream")
 	}
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
-		dst.Header().Del("Content-Length")
+		// Do not forward the upstream's JSON/HTML error body as a video.
+		dst.Header().Set("Content-Length", "0")
 		dst.WriteHeader(resp.StatusCode)
 		return nil
 	}
 	dst.WriteHeader(resp.StatusCode)
-	_, err = io.Copy(dst, resp.Body)
+	if method == http.MethodHead {
+		return nil
+	}
+	_, err := io.Copy(dst, resp.Body)
 	return err
+}
+
+// Native /videos tasks may complete without a URL. Their fixed content API
+// belongs to the original account, so use the encrypted task credentials and
+// the provider's proxy/concurrency settings, never a newly selected route.
+func (rt *Runtime) serveNativeVideoContent(c *gin.Context, target *upstreamTarget, taskID string, kind protocolKind) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Minute)
+	defer cancel()
+	release, err := rt.acquireUpstreamConcurrencyForAttempt(ctx, target, time.Now(), 0)
+	if err != nil {
+		rt.writeVideoContentError(c, http.StatusServiceUnavailable, "video download is unavailable")
+		return
+	}
+	defer release()
+	req, err := rt.buildUpstreamHTTPRequest(gatewayAPICallContext(ctx, c), target,
+		"/v1/videos/"+url.PathEscape(taskID)+"/content", c.Request.Method, c.Request.Header, nil, kind, false)
+	if err != nil {
+		rt.writeVideoContentError(c, http.StatusBadGateway, "video download is unavailable")
+		return
+	}
+	req.Header.Set("Accept", "video/*, application/octet-stream")
+	req.Header.Set("Accept-Encoding", "identity")
+	if value := c.GetHeader("Range"); value != "" {
+		req.Header.Set("Range", value)
+		if value := c.GetHeader("If-Range"); value != "" {
+			req.Header.Set("If-Range", value)
+		}
+	}
+	client := rt.videoUpstreamClient(target)
+	resp, err := client.Do(req)
+	if err != nil {
+		rt.writeVideoContentError(c, http.StatusBadGateway, "video download failed")
+		return
+	}
+	defer resp.Body.Close()
+	if isVideoContentRedirect(resp.StatusCode) {
+		// Even a same-host CDN redirect gets a fresh credential-free client.
+		// No upstream API key, custom auth header, cookie or proxy is carried.
+		location, locationErr := resp.Location()
+		if locationErr == nil {
+			cdn := newVideoContentClient()
+			defer cdn.CloseIdleConnections()
+			err = streamVideoContentMethod(ctx, c.Writer, cdn, location.String(), c.Request.Method, c.GetHeader("Range"), c.GetHeader("If-Range"))
+		} else {
+			err = locationErr
+		}
+	} else {
+		err = copyVideoContentResponse(c.Writer, resp, c.Request.Method)
+	}
+	if err != nil && !c.Writer.Written() {
+		status := http.StatusBadGateway
+		switch resp.StatusCode {
+		case http.StatusNotFound, http.StatusConflict, http.StatusGone:
+			status = resp.StatusCode
+		}
+		rt.writeVideoContentError(c, status, "video content is unavailable or not ready")
+	}
+}
+
+func isVideoContentRedirect(status int) bool {
+	return status == http.StatusMovedPermanently || status == http.StatusFound ||
+		status == http.StatusSeeOther || status == http.StatusTemporaryRedirect || status == http.StatusPermanentRedirect
+}
+
+func (rt *Runtime) videoUpstreamClient(target *upstreamTarget) *http.Client {
+	client := *rt.httpClientForTarget(target.Channel, target.Provider)
+	client.Timeout = 10 * time.Minute
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &client
+}
+
+func (rt *Runtime) writeVideoContentError(c *gin.Context, status int, message string) {
+	if c.Request.Method == http.MethodHead {
+		c.Status(status)
+		return
+	}
+	rt.writeGatewayError(c, protocol.KindOpenAIChat, status, "upstream_error", message)
 }

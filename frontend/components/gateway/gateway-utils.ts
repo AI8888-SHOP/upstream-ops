@@ -599,6 +599,9 @@ export function sortGatewayRouteRows(
       }
     })
     .sort((a, b) => {
+      const pa = a.route.priority || Number.MAX_SAFE_INTEGER
+      const pb = b.route.priority || Number.MAX_SAFE_INTEGER
+      if (pa !== pb) return pa - pb
       const rateDiff = compareRouteRates(a.rate, b.rate, dir)
       if (rateDiff !== 0) return rateDiff
       const wa = Number(a.route.weight) || 1

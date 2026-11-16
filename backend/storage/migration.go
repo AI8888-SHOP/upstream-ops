@@ -77,6 +77,8 @@ var gatewayMigrationModels = []migrationModelSpec{
 	{table: "auth_sessions", model: &AuthSession{}},
 	{table: "captcha_configs", model: &CaptchaConfig{}},
 	{table: "rate_snapshots", model: &RateSnapshot{}},
+	{table: "price_comparison_configs", model: &PriceComparisonConfig{}},
+	{table: "price_comparison_strategies", model: &PriceComparisonStrategy{}},
 	{table: "rate_change_logs", model: &RateChangeLog{}},
 	{table: "upstream_announcements", model: &UpstreamAnnouncement{}},
 	{table: "balance_snapshots", model: &BalanceSnapshot{}},

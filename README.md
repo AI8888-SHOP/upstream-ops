@@ -27,6 +27,7 @@
 | 集中管理上游 | 接入 NewAPI / Sub2API，查看余额、消费、分组倍率、公告与订阅状态，管理上游 API Key、充值和兑换。 |
 | 统一请求入口 | 创建网关分组和密钥，接入监控渠道或直连 Provider，配置模型映射、模型列表、代理与鉴权方式。 |
 | 控制成本与等待 | 提供倍率优先、均衡、首字优先策略，结合近期首字、失败情况与负载选路，遵守配置的倍率上限。 |
+| 智能比价 | 从首页搜索结果的源分组简介提取同规格价格，生成可保存 30 分钟的策略，在网关组一键合并渠道并设置独立优先级。[使用说明](docs/smart-price-comparison.md) |
 | 处理上游故障 | 支持重试、故障顺延、冷却、首字等待预算，以及可选的响应校验和并发兜底。 |
 | 回看请求过程 | 记录请求与尝试耗时、Token、缓存、费用、响应模型、错误详情、胜出线路和调度依据。 |
 | 同步与告警 | 向 Sub2API 同步上游账号与分组；通过 Telegram、Webhook、邮件、企业微信、钉钉、飞书、ServerChan3 推送通知。 |
@@ -189,6 +190,8 @@ curl http://localhost:8418/v1/chat/completions \
 视频端点跳过零 Token、响应模型和助手正文校验，保留原始报文及错误消息的正则拒绝；普通聊天请求的校验不变。视频任务提交不接受 `stream: true`，收到任务 ID 后通过查询接口获取结果。查询不新增生成用量或按次扣费记录；当前仍未实现视频按秒定价及任务完成后结算。详见[视频任务说明](docs/video-tasks.md)。
 
 直连渠道可将「上游视频接口」设为 `POST /v1/videos（Image2Pro 兼容）`：下游继续使用 sub2api 的 `/v1/videos/generations`，网关转换创建请求，返回 `request_id`；查询结果转换为 `pending / done / failed / expired`，成功时提供 `video.url` 和可获得的时长。视频地址指向绑定原任务的 `/v1/videos/{id}/content`，供 sub2api 下载转发，支持 Range。原生 `POST /v1/videos` 也可透传并绑定任务。默认渠道保持原协议，此选项不改变聊天、图片、视频编辑和续写接口。
+
+v6k 等原生 `/v1/videos` 上游可使用 JSON、URL-encoded 或 multipart 创建任务，查询完成时允许不返回视频 URL；通过本程序 `GET /v1/videos/{id}/content` 使用原任务密钥下载，支持 HEAD 和 Range。新增 `POST /v1/media` 上传参考图片、视频、音频，取得 URL 后用于生成；多渠道组上传需指定 `route_id`。视频表单支持模型映射，下载和上传不重复记为生成消费。配置和示例见[视频任务说明](docs/video-tasks.md)。
 
 ## 调度与故障处理
 

@@ -351,6 +351,7 @@ func (rt *Runtime) handleForwardCoordinated(req coordinatedForwardRequest) {
 	adaptive := newAdaptiveRequest(req.group, req.requestedModel, req.reasoningEffort, req.path, req.requestID, req.thinkingEnabled, len(req.body), req.stream && req.virtualCacheEligible)
 	candidates = rt.orderAdaptiveCandidates(candidates, adaptive, &req.affinity, true, time.Now())
 	candidates = rt.applyCacheHitRatePriority(candidates, req.group, req.affinity.PreferredRouteID)
+	candidates = rt.orderExplicitRoutePriorities(candidates, req.affinity.RecoveryRouteID)
 	candidates = rt.filterPreviouslyFailedRequestRoutes(candidates, &req.affinity)
 	if req.affinity.Recovery && req.hedgeActive {
 		// A cooled route must complete its single recovery probe before any
@@ -765,6 +766,9 @@ func (rt *Runtime) prepareCoordinatedAttempt(req *coordinatedForwardRequest, att
 		rt.Service, req.body, req.kind, attempt.UpstreamKind,
 		req.requestedModel, attempt.UpstreamModel, req.stream, req.path,
 	)
+	if err == nil && isVideoTaskCreate(req.path) {
+		attempt.ForwardBody, err = rewriteVideoFormModel(req.c.GetHeader("Content-Type"), attempt.ForwardBody, attempt.UpstreamModel)
+	}
 	if err == nil {
 		attempt.ForwardBody, attempt.UpstreamPath, attempt.VideoAdapted, err = prepareVideoUpstreamRequest(
 			target, req.path, attempt.ForwardBody, attempt.UpstreamPath,

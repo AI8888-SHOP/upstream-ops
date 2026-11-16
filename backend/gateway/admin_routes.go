@@ -123,6 +123,9 @@ func (a *AdminService) SaveRoutes(groupID uint, inputs []RouteInput) ([]storage.
 	}
 	list := make([]storage.GatewayRoute, 0, len(inputs))
 	for i, in := range inputs {
+		if in.Priority < 0 || in.Priority > 1000000 {
+			return nil, fmt.Errorf("route[%d]: priority must be between 0 and 1000000", i)
+		}
 		modelPolicy, err := NormalizeProviderModelPolicy(in.ModelPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("route[%d]: %w", i, err)
@@ -146,6 +149,7 @@ func (a *AdminService) SaveRoutes(groupID uint, inputs []RouteInput) ([]storage.
 			uaCustom = ""
 		}
 		route := storage.GatewayRoute{
+			Priority:                 in.Priority,
 			FallbackOnly:             in.FallbackOnly,
 			FirstTokenCooldownExempt: in.FirstTokenCooldownExempt,
 			ID:                       in.ID,

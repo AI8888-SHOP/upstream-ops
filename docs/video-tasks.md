@@ -2,6 +2,51 @@
 
 支持的异步提交路径为 `POST /v1/videos/generations`、`POST /v1/videos/edits`、`POST /v1/videos/extensions`、`POST /v1/videos`，以及不带 `/v1` 的对应别名。默认透传相同的视频协议；直连渠道可单独启用下述 Image2Pro 兼容转换。
 
+## upstream-ops → v6k 原生接口
+
+此流程使用 v6k 的原生协议，入站直接调用 `POST /v1/videos`。直连渠道 Base URL 填 `https://www.v6k.top`（不加 `/v1`），填写该站 API Key，鉴权选 Bearer，「上游视频接口」保持「原协议透传」。把渠道加入网关组，按需设置支持模型和路由模型映射；模型 ID 必须是该上游密钥可用的模型。
+
+| 操作 | 调用本程序的接口 | 行为 |
+| --- | --- | --- |
+| 上传参考素材（可选） | `POST /v1/media` | 单个原始文件使用 multipart 字段 `file`，返回顶层 `url`、`expires_at` |
+| 创建 | `POST /v1/videos` | JSON、URL-encoded 表单和 multipart 表单；保留原生任务响应并保存绑定 |
+| 查询 | `GET /v1/videos/{id}` | 固定原渠道及创建时的密钥，原样返回 `queued / in_progress / completed / failed / unknown` 等任务状态 |
+| 下载 | `GET /v1/videos/{id}/content` | 使用绑定密钥访问原上游的同一路径，流式返回文件，支持 Range、If-Range |
+| 文件响应头 | `HEAD /v1/videos/{id}/content` | 返回上游文件响应头、状态码，不下载响应正文 |
+
+上述所有请求都使用本程序的网关密钥；查询和下载必须使用创建任务的同一把网关密钥。任务完成响应允许没有 `url` 或时长，此时直接调用固定的 `/content` 接口获取文件，无须重复创建。HEAD 和 GET 下载都不消耗第二次生成额度，创建后额度耗尽仍可读取自己的任务。任务等待、失败、过期或下载失败时不会换渠道重新生成。
+
+JSON 直接使用 v6k 字段，例如：
+
+```json
+{
+  "model": "上游支持的模型ID",
+  "prompt": "一只小猫在草地上奔跑",
+  "seconds": 5,
+  "aspect_ratio": "16:9",
+  "resolution": "720p",
+  "images": ["https://example.com/reference.png"]
+}
+```
+
+`duration` 是该站 `seconds` 的别名，两者同时填写需相同。`images`、`videos`、`audios`、`input_reference`、编辑/续写用途等字段按其模型文档填写并原样传递；不根据模型名猜测能力。原生 multipart 文件和字段保留，模型映射同时支持 JSON、URL-encoded 和 multipart，表单模型也遵守渠道支持模型限制。创建请求不能开启 `stream`。网关视频创建和素材上传请求体上限为 256 MiB，上游或前置反向代理可有更低限制；大文件推荐先走素材上传再使用 URL。
+
+参考素材上传示例（请求本程序，非直接请求 v6k）：
+
+```bash
+curl "$GATEWAY_URL/v1/media" \
+  -H "Authorization: Bearer $GATEWAY_KEY" \
+  -F 'file=@reference.mp4'
+```
+
+网关组只有一个可用渠道时自动使用它；存在多个可用渠道时，上传 URL 必须加 `?route_id=该网关组内的路由ID`，防止无模型的上传被发到不确定的站点。该 ID 是网关组的路由 ID，不是直连渠道 ID。上传不跨渠道重试、不产生视频生成用量和按次扣费记录，HTTP 200 错误信封及原始报文/错误消息拒绝规则仍有效。文件暂存到权限为 0600 的临时文件，结束即删除，不在内存中缓存整个上传文件。
+
+使用上传返回的顶层 `url` 填入 `images`、`videos` 或 `audios` 数组；v6k 文档标明素材链接公开可读、保留 24 小时，过期前应提交任务。已有公开素材直链可跳过上传。此功能接收原始文件，不会把 JSON 里的 Base64 视频自动上传或转换成链接。
+
+原生文件下载使用创建时绑定的地址和鉴权，并遵守当前渠道的代理与并发设置；任务归属校验通过前不会访问上游。若下载接口重定向到 CDN，则用不携带任何密钥、Cookie、额外鉴权头的独立客户端访问公网 HTTP(S) 地址；这部分 CDN 下载不继承渠道代理，禁止内网地址和非 80/443 端口。原上游的错误正文不作为视频透传。
+
+本节覆盖 upstream-ops 与 v6k 的原生接口链路，不包含 sub2api `/v1/videos/generations` 到 v6k 的字段及响应转换。现有 Image2Pro 选项仍按下一节的协议工作，不应用于 v6k 的 sub2api 转换。也不新增视频按秒、分辨率计价或完成结算。
+
 ## sub2api → Image2Pro 视频适配
 
 在 **直连渠道 → 编辑 → 上游视频接口** 选择 **POST /v1/videos（Image2Pro 兼容）**。管理 API 字段为 `video_upstream_mode: "videos"`；默认 `passthrough`。Base URL 填 `https://api.image2pro.top`，无需加 `/v1`。在路由模型映射中，将下游模型映射为该站模型列表的实际 ID。
@@ -48,4 +93,4 @@ sub2api 的视频下载处理会拒绝非 xAI 的任意 CDN 地址，因此适�
 
 任务查询只读取已有任务，不生成新的用量结算记录，避免反复查询重复按次收费。创建任务耗尽网关密钥额度后仍能查询自己的已有任务；密钥或网关组被禁用时仍会拒绝。提交仍沿用现有计价逻辑；此次改动不增加视频按秒、按分辨率定价或完成后结算。同步直接返回视频 URL、没有任务 ID 的 JSON 结果保留透传行为。
 
-`/v1/videos/{id}/content` 下载接口仅适用于通过上述 Image2Pro 兼容模式创建的任务；原协议透传任务保持原有视频 URL。本功能不新增 Seedance 的 `/api/v3/contents/generations/tasks` 接口。
+`/v1/videos/{id}/content` 对 Image2Pro 兼容任务使用结果中的公网视频 URL，对原生透传任务使用绑定上游的同名鉴权下载接口；原生查询结果中的视频 URL 保持原样。原上游需要支持所选方式。本功能不新增 Seedance 的 `/api/v3/contents/generations/tasks` 接口。
