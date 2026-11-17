@@ -689,9 +689,9 @@ export interface GatewayGroup {
   first_token_timeout_cooldown_enabled?: boolean
   /** SSE 连接握手与保活，不是模型内容或真实首字；默认关闭。 */
   stream_preconnect_enabled?: boolean
-  /** 无状态 store:false Responses 的 sub2api semantic 首字统计兼容；改变响应 ID，不改变真实首字或计费。 */
+  /** sub2api 首字统计兼容：无状态 Responses 前缀、Chat 角色 chunk、Claude 原生 ping；不改变真实首字或计费。 */
   stream_preconnect_sub2api_enabled?: boolean
-  /** 合成 reasoning 空格用于多层 sub2api 首响应；依赖前两个开关，会影响下游首输出超时与换源。 */
+  /** Responses/Chat 合成空格用于多层 sub2api 首响应；依赖前两个开关，Claude ping 无需此项。会影响下游首输出超时与换源。 */
   stream_preconnect_multihop_enabled?: boolean
   /** 握手随机延迟下限，0 到 60000 毫秒。 */
   stream_preconnect_min_delay_ms?: number

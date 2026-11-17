@@ -42,6 +42,7 @@ type streamPreconnectWriter struct {
 	requestID       string
 	responses       *preconnectResponsesStream // used only after the first early write
 	chat            *preconnectChatStream      // Chat Completions synthetic first event
+	anthropicPing   bool                       // Anthropic-native data event for sub2api TTFT/relay compatibility
 }
 
 func streamPreconnectFor(c *gin.Context) *streamPreconnectWriter {
@@ -105,6 +106,13 @@ func beginStreamPreconnect(c *gin.Context, group *storage.GatewayGroup, kind pro
 		// Chat Completions 没有可容纳隐形内容的协议元素：只下发 assistant 角色
 		// （多层模式带一个空格），正文、用量与结束原因仍全部来自真实上游。
 		w.chat, _ = newPreconnectChatStream(streamPreconnectChatModel(requestBody[0]), group.StreamPreconnectMultihopEnabled)
+	} else if group.StreamPreconnectSub2apiEnabled && path == "/v1/messages" && protocol.NormalizeKind(kind) == protocol.KindAnthropic {
+		// Stock sub2api's Anthropic handlers time the first nonempty data
+		// event and flush it onward, including ping. A standard ping therefore
+		// survives multiple native Messages relays without inventing a message
+		// lifecycle, model, content block, ID, usage, or response text. Keep it
+		// below requestTimingWriter so our real TTFT/budget/winner stay intact.
+		w.anthropicPing = true
 	}
 	c.Request = c.Request.WithContext(context.WithValue(ctx, streamPreconnectKey{}, w))
 	if hasTiming {
@@ -220,12 +228,16 @@ func (w *streamPreconnectWriter) keepalive() bool {
 	}
 	// Ordinary mode remains transport-only. Responses compatibility adds a
 	// coherent lifecycle; multihop mode adds a single synthetic summary space.
-	// Both bypass our real TTFT/commit tracking and never invent model usage.
+	// Anthropic compatibility uses a native ping data event, which sub2api's
+	// Messages forwarding paths flush even before message_start. All variants
+	// bypass our real TTFT/commit tracking and never invent model usage.
 	payload := []byte(": upstream-ops keepalive\n\n")
 	if w.responses != nil && !w.preconnected {
 		payload = w.responses.preamble()
 	} else if w.chat != nil && !w.preconnected {
 		payload = w.chat.bytes()
+	} else if w.anthropicPing {
+		payload = []byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")
 	}
 	n, err := w.ResponseWriter.Write(payload)
 	w.preconnected = true

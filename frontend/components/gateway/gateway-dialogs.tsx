@@ -1277,12 +1277,15 @@ export function GroupFormDialog({
               </div>
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <Label>sub2api 首字统计兼容（Responses / Chat Completions）</Label>
+                  <Label>sub2api 首字统计兼容（Responses / Chat Completions / Claude）</Label>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    无需修改 sub2api 源码。未开启下方多层模式时，其首字统计需使用 semantic；visible 口径仍等待真实输出，多层转发也可能缓冲空事件。Responses 请求需明确设置 store:false 且不使用续接、会话或后台模式，此时提前发送生命周期事件与空 reasoning 项；Chat Completions 请求会提前发送一个仅含 assistant 角色、不含正文的合法 chunk（客户端拼装正文时贡献零字符）；其他请求仅发送普通保活注释。
+                    Responses 请求需明确设置 store:false 且不使用续接、会话或后台模式，提前发送生命周期事件与空 reasoning 项；未开启多层模式时，下游需使用 semantic 统计，visible 口径仍等待真实输出。Chat Completions 提前发送仅含 assistant 角色与空正文的 chunk，多层模式再加入一个空格。
                   </p>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    启用后，提前建流的响应使用网关生成的响应 ID，并多出 reasoning 项，不能用于 previous_response_id 续接。未开启多层模式时该项为空；开启后包含下方说明的合成空格。不会降低本程序真实首字、改变真实回答正文、Token 用量或计费；实际下游计时还包含网络与代理耗时，不保证等于设置的毫秒数。
+                    Claude /v1/messages 使用标准 ping 数据事件。已核对的 sub2api 原生 Claude 透传路径会计入首字并逐帧转发，可用于多层转发，无需开启下方合成空格选项；不会添加回答文字或改写消息 ID、模型、用量。其他代理版本及协议转换路径需单独验证。
+                  </p>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    Responses 兼容前缀使用网关响应 ID 和额外 reasoning 项，不能用于 previous_response_id 续接。兼容模式不改变本程序真实首字、上游失败换源、Token 用量或计费；下游展示的是提前建流时间，仍包含网络与代理耗时，不保证等于设置的毫秒数。
                   </p>
                 </div>
                 <Switch
@@ -1296,7 +1299,7 @@ export function GroupFormDialog({
                 <div className="min-w-0 flex-1">
                   <Label>合成首响应（多层 sub2api 兼容）</Label>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    在上述兼容模式基础上，额外发送一个 reasoning summary 空格 delta，促使现有 sub2api 向下一层转发。其 semantic 与 visible 统计均可识别，不要求修改下游；不保证任意代理或协议转换路径都有效。仍仅适用于满足条件的 store:false Responses 请求。
+                    在上述兼容模式基础上，Responses 额外发送一个 reasoning summary 空格 delta，Chat Completions 首帧加入一个正文空格，促使下游向下一层转发。Responses 仍需满足 store:false 等条件；Claude 使用标准 ping，不依赖此选项。不保证任意代理或协议转换路径都有效。
                   </p>
                   <p className="text-[11px] leading-5 text-amber-700 dark:text-amber-300">
                     这不是零内容保活或真实提速：下游会认为已经输出，解除各层首输出超时保护，并可能影响失败换源。会额外产生一个合成推理空格；本程序仍按真实上游输出计算 TTFT、执行真实首字预算、校验与计费。默认关闭，旧组不会自动启用。

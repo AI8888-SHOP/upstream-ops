@@ -20,7 +20,11 @@
 
 ## sub2api 首字统计兼容（可选）
 
-需要让下游 sub2api 的 **Responses / semantic** 首字统计识别提前建流时，可额外开启“sub2api 首字统计兼容（Responses / semantic）”。未开启下方多层合成首响应时，无需修改 sub2api 源码，但 sub2api 的“OpenAI Responses 首 token 统计口径”必须选择 `semantic`；`visible` 口径仍等待真实可见输出，不会把空 reasoning 项计为首字。不同协议、转换路径或不同下游实现不保证采用相同统计规则。
+主保活开关开启后，可额外开启“sub2api 首字统计兼容（Responses / Chat Completions / Claude）”。不同协议采用各自的兼容事件，下游统计的提前首响应时间不代表真实模型已经输出。
+
+### Responses：semantic 空事件
+
+需要让下游 sub2api 的 **Responses / semantic** 首字统计识别提前建流时，无需修改 sub2api 源码，但未开启下方多层合成首响应时，sub2api 的“OpenAI Responses 首 token 统计口径”必须选择 `semantic`；`visible` 口径仍等待真实可见输出，不会把空 reasoning 项计为首字。不同协议、转换路径或不同下游实现不保证采用相同统计规则。
 
 此模式只适用于同时满足以下条件的请求：
 
@@ -44,11 +48,31 @@
 - 配置延迟不等于下游最终展示的 TTFT：下游起算位置、网络传输、代理缓冲和事件处理都会带来额外耗时。不能保证设置 100 毫秒就记录为 100 毫秒。
 - 提前发出的生命周期事件不代表请求成功；失败仍按下文以流内错误结束。
 
+### Chat Completions：角色首帧
+
+对于 `/v1/chat/completions` 流式文本请求，兼容开关会提前发送包含 `assistant` 角色与空 `content` 的合法 chunk；开启多层选项后，`content` 为一个空格。后续真实回答、工具调用、结束原因和用量仍来自上游。该路径与 Responses 的 reasoning 项规则不同，不适用 Responses 的 `store:false` 条件。
+
+### Claude Messages：标准 ping，可经多层原生透传
+
+对于 `/v1/messages` 的 Anthropic 流式文本请求，开启主保活与 sub2api 兼容开关后，在配置的随机延迟到达时发送并刷新标准 Anthropic 事件：
+
+```text
+event: ping
+data: {"type":"ping"}
+
+```
+
+等待真实流期间，后续保活也使用该 ping。已审查的两个本机 sub2api 分支，其 Claude 原生透传均以第一个非空 `data:` 记录 TTFT，并在完整 SSE 事件边界刷新到下游，因此 ping 可以继续穿过多层相同的透传路径；无需改动下游或开启“合成首响应（多层 sub2api 兼容）”。这项结论基于已审查版本的原生 `/v1/messages` 路径，不保证会过滤 ping 的代理、协议转换或启用额外缓冲的链路采用相同行为。
+
+该事件不创建 `message_start`、正文、工具调用或用量，不改变真实消息 ID、响应模型审计和内容块索引。关闭兼容开关、仅开启普通保活时，Claude 仍只收到 SSE 注释。真实上游先就绪时，直接交付真实流。
+
+ping 不计入本网关真实 TTFT，不解除或延长真实首字预算，也不提前选择胜出渠道或阻止失败换源；请求结束或下游断开后停止。下游会提前记录它观察到的首个数据事件，因此该 TTFT 与真实生成首字不同，仍受网络与代理处理耗时影响。上游最终失败仍返回 Anthropic `error` 事件，提前收到 ping 不代表生成成功。
+
 ## 合成首响应：多层 sub2api 兼容（可选）
 
 第一层 sub2api 可以把空 reasoning 事件计入 `semantic` TTFT，但在其首输出暂存阶段，不一定立刻向下一层转发。因此，上游已提前建流不代表后面的 sub2api 也会提前收到可计时事件。
 
-需要多层转发时，在主开关与 sub2api 兼容开关均开启后，再开启“合成首响应（多层 sub2api 兼容）”。该选项默认关闭，仅在上述所有无状态 Responses 条件满足时生效，沿用相同的随机延迟；不符合条件时仍使用普通保活注释。
+Responses 需要多层转发时，在主开关与 sub2api 兼容开关均开启后，再开启“合成首响应（多层 sub2api 兼容）”。该选项默认关闭，Responses 必须满足上述所有无状态请求条件，沿用相同的随机延迟；不符合条件时仍使用普通保活注释。Chat Completions 在此选项开启时发送正文空格；Claude 使用标准 ping，无需此选项。
 
 该模式在兼容生命周期与 reasoning 项之后，增加合法的 reasoning summary 事件，包含**单个空格**的 `response.reasoning_summary_text.delta`。这不是零内容保活：下游会收到合成的推理摘要内容。现有 sub2api 的 `semantic` 与 `visible` 口径均可将该非空 delta 识别为输出，并将其转发到下一层，无需改动下游代码；不保证任意代理版本、代理缓冲或协议转换路径都有效。
 
@@ -80,9 +104,9 @@
 
 ## 不改变的指标与限制
 
-- 普通保活模式不生成文本 delta、生命周期事件、用量数据或伪造的成功结束事件。semantic 兼容模式额外生成生命周期前缀和空 reasoning 项；多层模式再增加单个合成推理摘要空格。两种模式均不伪造工具参数、用量或成功。
+- 普通保活模式不生成文本 delta、生命周期事件、用量数据或伪造的成功结束事件。Responses semantic 兼容模式额外生成生命周期前缀和空 reasoning 项，多层模式再增加单个合成推理摘要空格；Chat Completions 使用角色首帧，多层模式再增加正文空格；Claude 使用标准 ping。各模式均不伪造工具参数、用量或成功。
 - 注释及兼容前缀均不计入网关真实 TTFT、不改变 Token 用量和计费，不解除单次尝试及整请求的真实首字预算。
 - 不改变上游实际生成速度，不保证降低下游测量的首个内容 Token 延迟，也不保证上游最终成功；semantic 统计提前不能作为真实速度提升。
 - 注释可能缩短客户端观察到的首字节等待并维持连接，但代理缓冲或客户端忽略注释等行为仍影响实际体验。
 
-相关配置字段为 `stream_preconnect_enabled`、`stream_preconnect_sub2api_enabled`、`stream_preconnect_multihop_enabled`、`stream_preconnect_min_delay_ms` 和 `stream_preconnect_max_delay_ms`。省略字段时保留原配置；两个兼容开关均默认 `false`，旧组升级不会自动开启。多层模式仅在三个开关均开启时生效。关闭主开关即可恢复等待真实上游响应后再建立流连接的原有方式；关闭父开关时保留兼容开关偏好，只有依赖的父开关重新开启后才可能生效。
+相关配置字段为 `stream_preconnect_enabled`、`stream_preconnect_sub2api_enabled`、`stream_preconnect_multihop_enabled`、`stream_preconnect_min_delay_ms` 和 `stream_preconnect_max_delay_ms`。省略字段时保留原配置；两个兼容开关均默认 `false`，旧组升级不会自动开启。Responses/Chat 的合成空格仅在三个开关均开启时生效；Claude ping 只依赖主保活与 sub2api 兼容开关。关闭主开关即可恢复等待真实上游响应后再建立流连接的原有方式；关闭父开关时保留兼容开关偏好，只有依赖的父开关重新开启后才可能生效。
