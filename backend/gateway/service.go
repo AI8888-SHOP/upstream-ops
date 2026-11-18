@@ -67,11 +67,11 @@ type Service struct {
 	schedulerStatsMu      sync.Mutex
 	schedulerStats        *schedulerStatistics
 	upstreamConcurrency   *upstreamConcurrencyRegistry
-	// httpTransports is keyed by the effective proxy URL. A blank key is the
-	// direct/environment-proxy transport. Clients remain cheap per-request,
-	// while their transports retain idle connections across attempts.
+	// Forwarding pools share connections by effective proxy URL. Model catalog
+	// queries use separate pools per origin, so a stalled generation cannot
+	// block model discovery and one failed catalog cannot retire other sites.
 	httpTransportsMu  sync.Mutex
-	httpTransports    map[string]*http.Transport
+	httpTransports    map[gatewayHTTPTransportKey]*http.Transport
 	loadBalanceMu     sync.RWMutex
 	loadBalanceStates map[loadBalancePoolKey]*loadBalancePoolState
 	// cachePriorityRot 记录缓存命中率优先调度的轮转槽位，用于限制优先渠道占比。
@@ -178,7 +178,7 @@ func NewService(
 		requestRouteFailures:   map[routeAffinityKey]map[uint]time.Time{},
 		cacheHealthPending:     map[cacheHealthSourceKey]time.Time{},
 		upstreamConcurrency:    newUpstreamConcurrencyRegistry(),
-		httpTransports:         map[string]*http.Transport{},
+		httpTransports:         map[gatewayHTTPTransportKey]*http.Transport{},
 		loadBalanceStates:      map[loadBalancePoolKey]*loadBalancePoolState{},
 	}
 	s.Admin = &AdminService{Service: s}

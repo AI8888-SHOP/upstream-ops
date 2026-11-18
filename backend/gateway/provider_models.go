@@ -6,12 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/bejix/upstream-ops/backend/connector"
 	"github.com/bejix/upstream-ops/backend/storage"
 )
 
@@ -247,19 +244,9 @@ func (s *Service) fetchProviderModels(
 	}
 	req.Header.Set("User-Agent", withDefaultUserAgent(userAgent, s.defaultUpstreamUserAgent()))
 
-	client := s.runtime().httpClientForTarget(nil, provider)
-	client.Timeout = 30 * time.Second
-	resp, err := client.Do(req)
+	status, body, err := s.runtime().readUpstreamModels(req, nil, provider)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: read body: %w", url, err)
-	}
-	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("GET %s: %w", url, connector.HTTPStatusError(resp.StatusCode, body))
+		return nil, err
 	}
 	var payload struct {
 		Data []struct {
@@ -267,7 +254,7 @@ func (s *Service) fetchProviderModels(
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("GET %s: HTTP %d invalid models JSON: %w", url, resp.StatusCode, err)
+		return nil, fmt.Errorf("GET %s: HTTP %d invalid models JSON: %w", url, status, err)
 	}
 	models := make([]string, 0, len(payload.Data))
 	for _, item := range payload.Data {

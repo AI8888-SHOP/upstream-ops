@@ -8,6 +8,7 @@ require (
 	github.com/go-resty/resty/v2 v2.16.2
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/viper v1.19.0
+	golang.org/x/net v0.27.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/driver/postgres v1.5.11
@@ -62,7 +63,6 @@ require (
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/crypto v0.25.0 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
-	golang.org/x/net v0.27.0 // indirect
 	golang.org/x/sync v0.9.0 // indirect
 	golang.org/x/sys v0.22.0 // indirect
 	golang.org/x/text v0.20.0 // indirect

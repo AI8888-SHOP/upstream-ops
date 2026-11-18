@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bejix/upstream-ops/backend/connector"
 	"github.com/bejix/upstream-ops/backend/gateway/protocol"
 	"github.com/bejix/upstream-ops/backend/storage"
 	"github.com/gin-gonic/gin"
@@ -212,8 +211,6 @@ func (rt *Runtime) fetchUpstreamModels(ctx context.Context, ch *storage.Channel,
 		return nil, err
 	}
 	defer release()
-	client := rt.httpClientForChannel(ch)
-	client.Timeout = 30 * time.Second
 	url := strings.TrimRight(ch.SiteURL, "/") + "/v1/models"
 	ctx = apiCallPurpose(ctx, storage.GatewayAPICallPurposeChannelAPI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -223,18 +220,9 @@ func (rt *Runtime) fetchUpstreamModels(ctx context.Context, ch *storage.Channel,
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", withDefaultUserAgent(userAgent, rt.defaultUpstreamUserAgent()))
-	resp, err := client.Do(req)
+	status, body, err := rt.readUpstreamModels(req, ch, nil)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: read body: %w", url, err)
-	}
-	if resp.StatusCode >= 400 {
-		// 保留 URL + 状态码 + 上游 body 摘要，便于模型同步结果页排查（如 base_url 多写/少写 /v1）
-		return nil, fmt.Errorf("GET %s: %w", url, connector.HTTPStatusError(resp.StatusCode, body))
+		return nil, err
 	}
 	var parsed struct {
 		Data []struct {
@@ -247,9 +235,9 @@ func (rt *Runtime) fetchUpstreamModels(ctx context.Context, ch *storage.Channel,
 			snippet = rt.truncateRunes(string(body), 200)
 		}
 		if snippet == "" {
-			return nil, fmt.Errorf("GET %s: HTTP %d invalid models JSON: %w", url, resp.StatusCode, err)
+			return nil, fmt.Errorf("GET %s: HTTP %d invalid models JSON: %w", url, status, err)
 		}
-		return nil, fmt.Errorf("GET %s: HTTP %d invalid models JSON (%v): %s", url, resp.StatusCode, err, snippet)
+		return nil, fmt.Errorf("GET %s: HTTP %d invalid models JSON (%v): %s", url, status, err, snippet)
 	}
 	out := make([]string, 0, len(parsed.Data))
 	for _, d := range parsed.Data {
